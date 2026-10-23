@@ -4,6 +4,30 @@
 
 **技术栈**：Electron · libmpv · FFmpeg · OpenCV（Python 检测服务）· SQLite · yt-dlp
 
+## 开发（阶段 0 · 工程骨架）
+
+```bash
+npm install        # 安装依赖（Electron 45 + electron-vite + Vue 3 + electron-builder）
+npm run dev        # 开发模式启动窗口（HMR）
+npm start          # 构建后启动窗口（electron-vite preview）
+npm run smoke      # 冒烟校验：窗口加载 + preload 白名单桥 + app:info 往返，可输出截图
+npm run typecheck  # 主进程 / 渲染层类型检查
+npm run build      # 打包 Windows 安装包（release/）
+npm run build:dir  # 只产出未压缩目录，验证打包链路
+```
+
+工程骨架按 S01 §4 落地：
+
+| 路径 | 内容 |
+|---|---|
+| `src/main/index.ts` | 主进程入口：生命周期 + IPC 注册 |
+| `src/main/app.ts` | 主窗口创建与安全基线（contextIsolation / sandbox / 禁止新窗口） |
+| `src/main/ipc/index.ts` | IPC 注册器（统一 `IpcResult` 信封） |
+| `src/preload/index.ts` | `contextBridge` 白名单桥 + zod 载荷校验 |
+| `src/renderer/` | Vue 3 三栏工作台壳子（`index.html` + `src/`） |
+| `src/shared/` | `types.ts` / `ipc-channels.ts` / `schemas.ts` / `ipc-result.ts` |
+
+阶段 0 只登记了 `app:info` 一个通道（S01 §6.2 app 域）；新增通道须先改 `src/shared/ipc-channels.ts` 并同步 S01 §6，再在 `src/main/ipc` 与 `src/preload` 注册/暴露。
 ## 文档索引
 
 | 编号 | 文档 | 说明 |
