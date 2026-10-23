@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# logs
+*.log
+npm-debug.log*
+
+# runtime data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
