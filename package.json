@@ -46,6 +46,21 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "asarUnpack": [
+      "node_modules/koffi/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/mpv",
+        "to": "mpv",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  },
+  "dependencies": {
+    "koffi": "^3.3.3"
   }
 }

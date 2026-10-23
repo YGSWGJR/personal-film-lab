@@ -23,3 +23,11 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+# 运行时二进制（体积大，本地放置；见 resources/mpv/README.md）
+resources/mpv/*.dll
+resources/mpv/*.dll.a
+resources/mpv/*.lib
+resources/mpv/mpv.exe
+
+# 本地测试素材
+assets/samples/

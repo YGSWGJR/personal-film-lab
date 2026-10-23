@@ -4,13 +4,13 @@
 
 **技术栈**：Electron · libmpv · FFmpeg · OpenCV（Python 检测服务）· SQLite · yt-dlp
 
-## 开发（阶段 0 · 工程骨架）
+## 开发（阶段 0–2 · 骨架 + 播放链路）
 
 ```bash
-npm install        # 安装依赖（Electron 45 + electron-vite + Vue 3 + electron-builder）
+npm install        # 安装依赖（Electron 45 + electron-vite + Vue 3 + electron-builder + koffi）
 npm run dev        # 开发模式启动窗口（HMR）
 npm start          # 构建后启动窗口（electron-vite preview）
-npm run smoke      # 冒烟校验：窗口加载 + preload 白名单桥 + app:info 往返，可输出截图
+npm run smoke      # 冒烟校验：窗口 + preload 白名单桥 + app:info；设置 SMOKE_VIDEO 时追加播放器全链路
 npm run typecheck  # 主进程 / 渲染层类型检查
 npm run build      # 打包 Windows 安装包（release/）
 npm run build:dir  # 只产出未压缩目录，验证打包链路
@@ -20,14 +20,32 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 
 | 路径 | 内容 |
 |---|---|
-| `src/main/index.ts` | 主进程入口：生命周期 + IPC 注册 |
+| `src/main/index.ts` | 主进程入口：生命周期 + IPC 注册 + 关闭 DirectComposition |
 | `src/main/app.ts` | 主窗口创建与安全基线（contextIsolation / sandbox / 禁止新窗口） |
 | `src/main/ipc/index.ts` | IPC 注册器（统一 `IpcResult` 信封） |
+| `src/main/player/` | 播放链路：`mpv-lib.ts`（FFI）· `mpv-client.ts` · `native-overlay.ts` · `player-service.ts` |
 | `src/preload/index.ts` | `contextBridge` 白名单桥 + zod 载荷校验 |
-| `src/renderer/` | Vue 3 三栏工作台壳子（`index.html` + `src/`） |
+| `src/renderer/` | Vue 3 三栏工作台 + 播放器 UI / 快捷键 |
 | `src/shared/` | `types.ts` / `ipc-channels.ts` / `schemas.ts` / `ipc-result.ts` |
 
-阶段 0 只登记了 `app:info` 一个通道（S01 §6.2 app 域）；新增通道须先改 `src/shared/ipc-channels.ts` 并同步 S01 §6，再在 `src/main/ipc` 与 `src/preload` 注册/暴露。
+### 播放链路（libmpv）
+
+- 运行时依赖 `resources/mpv/libmpv-2.dll`（官方 dev 包，**文件名是 `libmpv-2.dll`，不是 `mpv-2.dll`**；静态链接单文件，无需额外运行时库）。该 DLL 体积约 120MB，按二进制资源处理、不入库，放置到 `resources/mpv/` 即可；打包时由 electron-builder `extraResources` 复制到安装包 `resources/mpv/`。
+- 主进程用 `koffi` 直接调用 libmpv client API；画面经 `wid` 交给 mpv 的 vo/gpu（D3D11）渲染到 Win32 子窗口，渲染层通过 `player:setBounds` 上报播放器区域。因 Chromium DirectComposition 会遮挡原生子窗口，主进程启动时关闭该特性。
+- 帧级能力：`player:frameStep` 前后各 1 帧（等待 `playback-restart` + `time-pos` 稳定 + 帧号实际变化），`player:seek` 使用 `absolute+exact` 精确落帧；25fps 与 23.81fps 素材实测单帧步进稳定。
+- 快捷键（渲染层捕获后经 IPC 执行）：`Space` 播放/暂停、`←/→` 逐帧、`Shift+←/→` ±1 秒。
+
+### 播放器冒烟（PowerShell）
+
+```powershell
+$env:SMOKE_VIDEO = 'D:\path\clip.mp4'      # 追加播放器全链路断言
+$env:SMOKE_BAD_FILE = 'D:\path\bad.mp4'    # 非法格式错误处理断言（可选）
+$env:SMOKE_RESULT = 'D:\tmp\smoke.json'    # 结果 JSON
+$env:SMOKE_HOLD_MS = '15000'               # 保持窗口，便于外部截屏目检（可选）
+npm run smoke
+```
+
+已知限制：视频区域是原生子窗口，DOM 无法覆盖在其上方；点击视频区不会触发 DOM 事件（键盘快捷键不受影响）。后续如需播放器控件浮层，需评估 Electron 的 `WebContentsView` 或改用 GPU 帧共享方案。
 ## 文档索引
 
 | 编号 | 文档 | 说明 |
