@@ -13,6 +13,7 @@ const props = defineProps<{
   thumbnail: string;
   saving: boolean;
   demoMode: boolean;
+  emptyImage: string;
 }>();
 
 const emit = defineEmits<{
@@ -71,7 +72,7 @@ const demoAnnotations: Annotation[] = [
   { type: 'arrow', points: [[0.42, 0.55], [0.72, 0.3]], color: '#f59e0b', label: null },
 ];
 const visibleAnnotations = computed<Annotation[]>(() => {
-  const base = props.still ? props.still.annotations : demoAnnotations;
+  const base = props.still?.annotations ?? (props.demoMode ? demoAnnotations : []);
   if (!drawing.value) return base;
   return [...base, draftAnnotation(drawing.value)];
 });
@@ -369,7 +370,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else class="detail-empty">
-      <AppIcon name="camera" :size="24" />
+      <img :src="emptyImage" alt="" />
       <strong>选择一个镜头</strong>
       <p>从镜头列表或时间轴选中后，在这里记录景别、静帧、标签与笔记。</p>
     </div>
@@ -817,6 +818,15 @@ onBeforeUnmount(() => {
   padding: 24px;
   color: var(--text-faint);
   text-align: center;
+}
+
+.detail-empty img {
+  width: min(220px, 86%);
+  max-height: 162px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  object-fit: cover;
+  opacity: 0.84;
 }
 
 .detail-empty strong {

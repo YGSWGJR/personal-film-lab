@@ -221,6 +221,13 @@ select:focus-visible {
   font-size: 10px;
 }
 
+.nav-image-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  object-fit: cover;
+}
+
 .topbar-right {
   display: flex;
   justify-content: flex-end;
@@ -415,6 +422,55 @@ select:focus-visible {
 .toast-leave-to {
   opacity: 0;
   transform: translateY(8px);
+}
+
+.transfer-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 39px;
+  width: 300px;
+  padding: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.97);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(12px);
+  z-index: 70;
+}
+
+.transfer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.transfer-head strong {
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.transfer-track {
+  height: 4px;
+  margin: 8px 0 5px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bg-raised);
+}
+
+.transfer-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--amber);
+  transition: width 160ms ease;
+}
+
+.transfer-toast small {
+  color: var(--text-faint);
+  font-size: 9px;
 }
 
 @media (max-width: 1180px) {

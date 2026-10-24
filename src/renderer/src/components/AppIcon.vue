@@ -29,6 +29,10 @@ defineProps<{
     <template v-else-if="name === 'folder'">
       <path d="M3 7.5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
     </template>
+    <template v-else-if="name === 'link'">
+      <path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />
+      <path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 1 0 12 20l1.1-1.1" />
+    </template>
     <template v-else-if="name === 'search'">
       <circle cx="11" cy="11" r="7" />
       <path d="m20 20-4-4" />
