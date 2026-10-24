@@ -55,9 +55,9 @@ export const DEFAULT_TAG_GROUPS = [
   { category: '景别', items: ['远景', '全景', '中景', '近景', '特写'] },
   { category: '机位', items: ['正面', '侧面', '过肩', '俯拍', '仰拍'] },
   { category: '运镜', items: ['固定', '推', '拉', '摇', '跟', '手持'] },
-  { category: '光线', items: ['自然光', '冷光', '逆光', '低照度'] },
-  { category: '声音', items: ['对白', '环境声', '音乐', '静默'] },
-  { category: '剪辑', items: ['硬切', '叠化', '跳切', '匹配剪辑'] },
+  { category: '光线', items: ['自然光', '冷光', '逆光', '硬光'] },
+  { category: '声音', items: ['对白', '环境', '音乐', '无声'] },
+  { category: '剪辑', items: ['硬切', '叠化', '闪白'] },
 ] as const;
 
 export function demoTagId(category: string, name: string): string {

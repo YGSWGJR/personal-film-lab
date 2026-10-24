@@ -477,7 +477,7 @@ export interface Note {
   updatedAt: string;
 }
 
-export interface NoteSaveArgs {
+export interface NoteUpsertArgs {
   id?: string;
   projectId: string;
   shotId: string;
@@ -510,6 +510,26 @@ export interface TermUpdateArgs {
     definition?: string;
     sortOrder?: number;
   };
+}
+
+export interface TermJsonEntry {
+  term: string;
+  definition: string;
+  category?: string;
+}
+
+export interface TermImportResult {
+  canceled: boolean;
+  path: string | null;
+  total: number;
+  imported: number;
+  skipped: number;
+}
+
+export interface TermExportResult {
+  canceled: boolean;
+  path: string | null;
+  count: number;
 }
 
 export interface ProjectApi {
@@ -554,7 +574,8 @@ export interface TagApi {
 
 export interface NoteApi {
   list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Note[]>>;
-  save(args: NoteSaveArgs): Promise<IpcResult<Note>>;
+  get(args: { id: string }): Promise<IpcResult<Note>>;
+  upsert(args: NoteUpsertArgs): Promise<IpcResult<Note>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
 }
 
@@ -563,4 +584,6 @@ export interface TermApi {
   create(args: TermCreateArgs): Promise<IpcResult<Term>>;
   update(args: TermUpdateArgs): Promise<IpcResult<Term>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  importJson(): Promise<IpcResult<TermImportResult>>;
+  exportJson(): Promise<IpcResult<TermExportResult>>;
 }

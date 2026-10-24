@@ -292,7 +292,7 @@ export const noteListArgsSchema = z
     message: 'projectId 和 shotId 至少提供一个',
   });
 
-export const noteSaveArgsSchema = z.object({
+export const noteUpsertArgsSchema = z.object({
   id: z.string().min(1).optional(),
   projectId: z.string().min(1),
   shotId: z.string().min(1),

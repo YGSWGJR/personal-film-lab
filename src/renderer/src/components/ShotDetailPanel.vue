@@ -23,6 +23,11 @@ const emit = defineEmits<{
   collapse: [];
   toggleTag: [tag: Tag];
   setAnnotations: [annotations: Annotation[]];
+  createTag: [value: { category: string; name: string }];
+  createTerm: [];
+  editTerm: [term: DetailTerm];
+  importTerms: [];
+  exportTerms: [];
 }>();
 
 const locked = ref(true);
@@ -35,6 +40,7 @@ const drawing = ref<{
 } | null>(null);
 const textEditor = ref<{ x: number; y: number; value: string } | null>(null);
 const stillRoot = ref<HTMLElement | null>(null);
+const tagDraft = ref<{ category: string; name: string } | null>(null);
 
 const categoryOrder = ['景别', '机位', '运镜', '光线', '声音', '剪辑'];
 const assignedTagIds = computed(() => new Set(props.shot?.tagIds ?? []));
@@ -57,7 +63,9 @@ const tagGroups = computed(() => {
     }));
 });
 
-const visibleTerms = computed(() => props.terms.slice(0, 4));
+const visibleTerms = computed(() =>
+  [...props.terms].sort((left, right) => left.category.localeCompare(right.category) || left.sortOrder - right.sortOrder),
+);
 const demoAnnotations: Annotation[] = [
   { type: 'box', x: 0.42, y: 0.55, w: 0.2, h: 0.12, color: '#e11d48', label: null },
   { type: 'arrow', points: [[0.42, 0.55], [0.72, 0.3]], color: '#f59e0b', label: null },
@@ -185,6 +193,17 @@ function commitTextAnnotation(): void {
   textEditor.value = null;
 }
 
+function beginCustomTag(category: string): void {
+  tagDraft.value = { category, name: '' };
+}
+
+function submitCustomTag(): void {
+  const name = tagDraft.value?.name.trim();
+  if (!tagDraft.value || !name) return;
+  emit('createTag', { category: tagDraft.value.category, name });
+  tagDraft.value = null;
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener('pointerup', finishDrawingFromWindow);
 });
@@ -286,8 +305,23 @@ onBeforeUnmount(() => {
             >
               {{ tag.name }}
             </button>
-            <button class="chip add" type="button" title="新增自定义标签">+</button>
+            <button class="chip add" type="button" title="新增自定义标签" @click="beginCustomTag(group.category)">+</button>
           </div>
+          <form
+            v-if="tagDraft?.category === group.category"
+            class="custom-tag-form"
+            @submit.prevent="submitCustomTag"
+          >
+            <input
+              v-model="tagDraft.name"
+              maxlength="100"
+              :placeholder="`新增${group.category}标签`"
+              autofocus
+              @keydown.esc="tagDraft = null"
+            />
+            <button class="primary" type="submit" :disabled="!tagDraft.name.trim()">添加</button>
+            <button type="button" @click="tagDraft = null">取消</button>
+          </form>
         </section>
       </div>
 
@@ -305,22 +339,31 @@ onBeforeUnmount(() => {
       </section>
 
       <section class="term-section">
-        <button class="term-head" type="button" @click="termsOpen = !termsOpen">
-          <span>术语库</span>
-          <AppIcon :name="termsOpen ? 'chevron-down' : 'chevron-right'" :size="14" />
-        </button>
+        <div class="term-head">
+          <button class="term-toggle" type="button" @click="termsOpen = !termsOpen">
+            <span>术语库</span>
+            <span class="term-count">{{ terms.length }}</span>
+            <AppIcon :name="termsOpen ? 'chevron-down' : 'chevron-right'" :size="14" />
+          </button>
+          <div class="term-actions">
+            <button type="button" @click="emit('importTerms')">导入</button>
+            <button type="button" @click="emit('exportTerms')">导出</button>
+            <button type="button" title="新建术语" @click="emit('createTerm')">+</button>
+          </div>
+        </div>
         <div v-if="termsOpen" class="term-list">
-          <button
+          <div
             v-for="term in visibleTerms"
             :key="term.id"
             class="term-item"
-            type="button"
             :title="`${term.definition}\n点击插入笔记`"
-            @click="emit('insertTerm', term)"
           >
-            <span class="term-name">{{ term.term }}</span>
-            <span class="term-definition">{{ term.definition }}</span>
-          </button>
+            <button class="term-insert" type="button" @click="emit('insertTerm', term)">
+              <span class="term-name">{{ term.term }}</span>
+              <span class="term-definition">{{ term.definition }}</span>
+            </button>
+            <button class="term-edit" type="button" title="编辑术语" @click="emit('editTerm', term)">✎</button>
+          </div>
         </div>
       </section>
     </div>
@@ -561,6 +604,46 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
 }
 
+.custom-tag-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.custom-tag-form input {
+  height: 28px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.custom-tag-form input:focus {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.3);
+}
+
+.custom-tag-form button {
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.custom-tag-form button.primary {
+  background: var(--red);
+  color: #fff;
+}
+
 .note-section {
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
@@ -615,32 +698,98 @@ onBeforeUnmount(() => {
   height: 28px;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 0;
-  border: 0;
-  background: transparent;
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
 }
 
+.term-toggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.term-count {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.term-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.term-actions button {
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.term-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 .term-list {
   display: flex;
+  max-height: 160px;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .term-item {
   display: flex;
-  height: 24px;
+  min-height: 28px;
   align-items: center;
-  gap: 12px;
-  border: 0;
+  gap: 4px;
   border-bottom: 1px solid rgba(71, 85, 105, 0.4);
-  background: transparent;
-  text-align: left;
 }
 
 .term-item:hover {
   background: var(--bg-hover);
+}
+
+.term-insert {
+  display: flex;
+  min-width: 0;
+  height: 28px;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.term-edit {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.term-edit:hover {
+  color: var(--text-primary);
 }
 
 .term-name {

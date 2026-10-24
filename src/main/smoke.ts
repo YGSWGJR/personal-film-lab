@@ -202,9 +202,9 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
         const tagList = await api.tag.list({ category: '景别' });
         out.tagListOk = tagList.ok === true && tagList.data.some((item) => item.id === tag.data.id);
 
-        const note = await api.note.save({ projectId: project.id, shotId: shot1.data.id, text: '笔记内容' });
+        const note = await api.note.upsert({ projectId: project.id, shotId: shot1.data.id, text: '笔记内容' });
         out.noteSaveOk = note.ok === true;
-        const noteUpdate = await api.note.save({ id: note.data.id, projectId: project.id, shotId: shot1.data.id, text: '笔记2' });
+        const noteUpdate = await api.note.upsert({ id: note.data.id, projectId: project.id, shotId: shot1.data.id, text: '笔记2' });
         out.noteUpdateOk = noteUpdate.ok === true && noteUpdate.data.text === '笔记2';
         const noteList = await api.note.list({ shotId: shot1.data.id });
         out.noteListOk = noteList.ok === true && noteList.data.length === 1;

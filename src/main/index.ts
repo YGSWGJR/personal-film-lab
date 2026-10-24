@@ -10,6 +10,7 @@ import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
 import { runSmokeTest } from './smoke';
+import { TermTransferService } from './terms/term-transfer-service';
 
 const IS_SMOKE_TEST = process.argv.includes('--smoke-test');
 
@@ -26,6 +27,7 @@ let mediaService: MediaService | null = null;
 let dataLayer: DataLayer | null = null;
 let packageService: ProjectPackageService | null = null;
 let captureService: CaptureService | null = null;
+let termTransferService: TermTransferService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -61,6 +63,7 @@ registerIpcHandlers({
   getData: () => dataLayer,
   getPackage: () => packageService,
   getCapture: () => captureService,
+  getTermTransfer: () => termTransferService,
 });
 
 app.whenReady().then(() => {
@@ -68,6 +71,7 @@ app.whenReady().then(() => {
     const dataRoot = process.env['DSH_DATA_ROOT'] ?? join(app.getPath('userData'), 'lapian');
     dataLayer = new DataLayer(dataRoot);
     packageService = new ProjectPackageService(dataLayer);
+    termTransferService = new TermTransferService(dataLayer, () => mainWindow);
   }
 
   registerAssetProtocol(dataLayer.dataRoot);
@@ -95,4 +99,5 @@ app.on('before-quit', () => {
   dataLayer = null;
   packageService = null;
   captureService = null;
+  termTransferService = null;
 });

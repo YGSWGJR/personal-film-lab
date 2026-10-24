@@ -4,6 +4,7 @@ import AppIcon from './components/AppIcon.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import ShotDetailPanel from './components/ShotDetailPanel.vue';
 import ShotListPanel from './components/ShotListPanel.vue';
+import TermEditorModal from './components/TermEditorModal.vue';
 import {
   createDemoMarkers,
   createDemoShots,
@@ -27,6 +28,7 @@ import type {
   Shot,
   Still,
   Tag,
+  Term,
 } from '../../shared/types';
 
 const info = ref<AppInfo | null>(null);
@@ -52,6 +54,10 @@ const projectStills = ref<Still[]>([]);
 const toast = ref<{ title: string; message: string; tone: 'default' | 'error' | 'success' } | null>(null);
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let noteTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingNoteShotId: string | null = null;
+const termEditorOpen = ref(false);
+const editingTerm = ref<Term | null>(null);
+const termSaving = ref(false);
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -204,10 +210,24 @@ function markersFromData(projectShots: WorkspaceShot[], stills: Still[], loadedN
   return items;
 }
 
-async function loadTerms(preferBuiltin = true): Promise<void> {
+async function loadTerms(preferBuiltin = true, persistFallback = false): Promise<void> {
   const loaded = unwrap(await window.api.term.list());
   if (loaded && loaded.length > 0) {
     terms.value = loaded;
+  } else if (persistFallback) {
+    const defaults = createDemoTerms();
+    for (const term of defaults) {
+      unwrap(
+        await window.api.term.create({
+          category: term.category,
+          term: term.term,
+          definition: term.definition,
+          builtin: true,
+          sortOrder: term.sortOrder,
+        }),
+      );
+    }
+    terms.value = unwrap(await window.api.term.list()) ?? defaults;
   } else if (preferBuiltin) {
     terms.value = createDemoTerms();
   }
@@ -216,10 +236,11 @@ async function loadTerms(preferBuiltin = true): Promise<void> {
 async function loadTags(): Promise<void> {
   let loaded = unwrap(await window.api.tag.list());
   if (!loaded) return;
-  if (loaded.length === 0) {
-    let sortOrder = 1;
-    for (const group of DEFAULT_TAG_GROUPS) {
-      for (const name of group.items) {
+  let sortOrder = loaded.reduce((maximum, tag) => Math.max(maximum, tag.sortOrder), 0) + 1;
+  let created = false;
+  for (const group of DEFAULT_TAG_GROUPS) {
+    for (const name of group.items) {
+      if (!loaded.some((tag) => tag.category === group.category && tag.name === name)) {
         unwrap(
           await window.api.tag.create({
             category: group.category,
@@ -228,8 +249,11 @@ async function loadTags(): Promise<void> {
             sortOrder: sortOrder++,
           }),
         );
+        created = true;
       }
     }
+  }
+  if (created) {
     loaded = unwrap(await window.api.tag.list());
   }
   tags.value = loaded ?? createDemoTags();
@@ -255,7 +279,7 @@ async function loadProject(project: Project): Promise<void> {
   markers.value = markersFromData(mapped, loadedStills, loadedNotes);
   selectedId.value = mapped[0]?.id ?? null;
   previewTimeMs.value = mapped[0]?.startMs ?? 0;
-  await Promise.all([loadTerms(), loadTags()]);
+  await Promise.all([loadTerms(true, true), loadTags()]);
   await assignDefaultSampleTags(project, mapped);
 
   if (project.source.path && !player.hasFile) {
@@ -346,7 +370,7 @@ async function createProjectForMedia(media: MediaInfo): Promise<Project | null> 
         );
         if (created && shotIndex % 2 === 1) {
           unwrap(
-            await window.api.note.save({
+            await window.api.note.upsert({
               projectId: project.id,
               shotId: created.id,
               text: seed.remark ?? '',
@@ -561,12 +585,112 @@ async function toggleTag(tag: Tag): Promise<void> {
   if (!assigned && tag.category === '运镜') await updateShotLanguage({ cameraMethod: tag.name });
 }
 
+async function createCustomTag(value: { category: string; name: string }): Promise<void> {
+  const sortOrder = tags.value.reduce((maximum, tag) => Math.max(maximum, tag.sortOrder), 0) + 1;
+  if (demoMode.value) {
+    const tag: Tag = {
+      id: `demo-tag-custom-${Date.now()}`,
+      category: value.category,
+      name: value.name,
+      color: null,
+      builtin: false,
+      sortOrder,
+      createdAt: new Date().toISOString(),
+    };
+    tags.value = [...tags.value, tag];
+    await toggleTag(tag);
+    showToast(`已添加“${value.name}”并应用到当前镜头。`, 'success');
+    return;
+  }
+
+  const created = unwrap(
+    await window.api.tag.create({
+      category: value.category,
+      name: value.name,
+      builtin: false,
+      sortOrder,
+    }),
+  );
+  if (!created) return;
+  tags.value = [...tags.value, created];
+  await toggleTag(created);
+  showToast(`已添加“${value.name}”并应用到当前镜头。`, 'success');
+}
+
+function openNewTerm(): void {
+  editingTerm.value = null;
+  termEditorOpen.value = true;
+}
+
+function openEditTerm(term: DetailTerm): void {
+  editingTerm.value = term;
+  termEditorOpen.value = true;
+}
+
+async function saveTerm(value: { term: string; definition: string; category: string }): Promise<void> {
+  const isEditing = Boolean(editingTerm.value);
+  termSaving.value = true;
+  try {
+    const result = editingTerm.value
+      ? await window.api.term.update({
+          id: editingTerm.value.id,
+          patch: value,
+        })
+      : await window.api.term.create(value);
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    await loadTerms();
+    termEditorOpen.value = false;
+    editingTerm.value = null;
+    showToast(isEditing ? '术语已更新。' : '术语已创建。', 'success');
+  } finally {
+    termSaving.value = false;
+  }
+}
+
+async function deleteTerm(id: string): Promise<void> {
+  if (!window.confirm('确定删除这条术语吗？')) return;
+  termSaving.value = true;
+  try {
+    const result = await window.api.term.delete({ id });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    await loadTerms();
+    termEditorOpen.value = false;
+    editingTerm.value = null;
+    showToast('术语已删除。', 'success');
+  } finally {
+    termSaving.value = false;
+  }
+}
+
+async function importTerms(): Promise<void> {
+  const result = unwrap(await window.api.term.importJson());
+  if (!result || result.canceled) return;
+  await loadTerms();
+  showToast(`导入完成：新增 ${result.imported} 条，跳过 ${result.skipped} 条。`, 'success');
+}
+
+async function exportTerms(): Promise<void> {
+  const result = unwrap(await window.api.term.exportJson());
+  if (!result || result.canceled) return;
+  showToast(`已导出 ${result.count} 条术语：${result.path}`, 'success');
+}
+
 function updateNote(value: string): void {
   if (!selectedId.value) return;
   notes[selectedId.value] = value;
+  pendingNoteShotId = selectedId.value;
   if (noteTimer) clearTimeout(noteTimer);
   noteTimer = setTimeout(() => {
-    void saveCurrentNote();
+    const shotId = pendingNoteShotId;
+    noteTimer = null;
+    pendingNoteShotId = null;
+    if (shotId) void saveNoteForShot(shotId, false);
   }, 800);
 }
 
@@ -576,6 +700,13 @@ async function saveCurrentNote(showConfirmation = true): Promise<void> {
     noteTimer = null;
   }
   const shot = selectedShot.value;
+  pendingNoteShotId = null;
+  if (!shot) return;
+  await saveNoteForShot(shot.id, showConfirmation);
+}
+
+async function saveNoteForShot(shotId: string, showConfirmation: boolean): Promise<void> {
+  const shot = shots.value.find((item) => item.id === shotId);
   if (!shot || demoMode.value || !activeProject.value) {
     if (showConfirmation) showToast('示例笔记已保存在当前会话。');
     return;
@@ -584,7 +715,7 @@ async function saveCurrentNote(showConfirmation = true): Promise<void> {
   savingNote.value = true;
   try {
     const saved = unwrap(
-      await window.api.note.save({
+      await window.api.note.upsert({
         id: noteIds[shot.id],
         projectId: activeProject.value.id,
         shotId: shot.id,
@@ -934,6 +1065,11 @@ onBeforeUnmount(() => {
         @update-note="updateNote"
         @insert-term="insertTerm"
         @toggle-tag="toggleTag"
+        @create-tag="createCustomTag"
+        @create-term="openNewTerm"
+        @edit-term="openEditTerm"
+        @import-terms="importTerms"
+        @export-terms="exportTerms"
         @set-annotations="saveAnnotations"
         @save-note="saveCurrentNote()"
         @capture="captureStill"
@@ -956,6 +1092,15 @@ onBeforeUnmount(() => {
         <span>v{{ info?.version ?? '0.1.0' }}</span>
       </div>
     </footer>
+
+    <TermEditorModal
+      :open="termEditorOpen"
+      :term="editingTerm"
+      :saving="termSaving"
+      @close="termEditorOpen = false"
+      @save="saveTerm"
+      @delete="deleteTerm"
+    />
 
     <transition name="toast">
       <div v-if="toast" class="toast" :class="toast.tone">

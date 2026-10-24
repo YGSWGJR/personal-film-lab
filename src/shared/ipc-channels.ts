@@ -69,13 +69,16 @@ export const IPC = {
   TAG_UNASSIGN: 'tag:unassign',
 
   NOTE_LIST: 'note:list',
-  NOTE_SAVE: 'note:save',
+  NOTE_GET: 'note:get',
+  NOTE_UPSERT: 'note:upsert',
   NOTE_DELETE: 'note:delete',
 
   TERM_LIST: 'term:list',
   TERM_CREATE: 'term:create',
   TERM_UPDATE: 'term:update',
   TERM_DELETE: 'term:delete',
+  TERM_IMPORT_JSON: 'term:importJson',
+  TERM_EXPORT_JSON: 'term:exportJson',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

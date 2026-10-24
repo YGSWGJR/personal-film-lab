@@ -65,7 +65,7 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/001_init.sql`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
 - V1 表：`projects` / `shots` / `stills` / `tags` / `shot_tags` / `notes` / `terms`；shots 含景别 `shot_size`、摄法 `camera_method`、台词 `dialogue`、备注 `remark` 业务列；静帧标注以归一化坐标 JSON 存 `annotations_json`。
 - 仓储在 `src/data/repositories/`，**所有写操作都在 `db.transaction` 内**；子实体写入同时刷新项目 `updated_at`。
-- IPC / preload 提供完整 CRUD：`project:*`、`shot:*`、`still:*`、`tag:*`（含 assign/unassign）、`note:save`、`term:*`，统一 `IpcResult` 信封与 zod 入参校验。
+- IPC / preload 提供完整 CRUD：`project:*`、`shot:*`、`still:*`、`tag:*`（含 assign/unassign）、`note:list/get/upsert/delete`、`term:*`（含 JSON 导入导出），统一 `IpcResult` 信封与 zod 入参校验。
 - 项目文件：`project:save` / `project:saveAs` 导出单个 `.lapian`（zip）= `manifest.json` + 项目 SQLite 快照 `project.db` + `assets/` 资源目录；`project:open` 导入并重映射 id（冲突时自动换新 id、名称加「（导入）」）。默认导出目录 `userData/lapian/packages/`。
 - 原生模块：better-sqlite3 v13 内置 N-API 预编译，Electron 45 直接可用；打包配置 `asarUnpack: node_modules/better-sqlite3/**`、`npmRebuild: false`，已用打包产物冒烟验证。
 

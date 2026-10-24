@@ -10,7 +10,7 @@ import {
   mediaProbeArgsSchema,
   mediaTranscodeProxyArgsSchema,
   noteListArgsSchema,
-  noteSaveArgsSchema,
+  noteUpsertArgsSchema,
   playerFrameStepArgsSchema,
   projectCreateArgsSchema,
   projectOpenArgsSchema,
@@ -76,9 +76,11 @@ import type {
   TagCreateArgs,
   TagUpdateArgs,
   Note,
-  NoteSaveArgs,
+  NoteUpsertArgs,
   Term,
   TermCreateArgs,
+  TermExportResult,
+  TermImportResult,
   TermUpdateArgs,
 } from '../shared/types';
 
@@ -144,13 +146,16 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.TAG_UNASSIGN]: tagAssignArgsSchema,
 
   [IPC.NOTE_LIST]: noteListArgsSchema,
-  [IPC.NOTE_SAVE]: noteSaveArgsSchema,
+  [IPC.NOTE_GET]: idArgsSchema,
+  [IPC.NOTE_UPSERT]: noteUpsertArgsSchema,
   [IPC.NOTE_DELETE]: idArgsSchema,
 
   [IPC.TERM_LIST]: termListArgsSchema,
   [IPC.TERM_CREATE]: termCreateArgsSchema,
   [IPC.TERM_UPDATE]: termUpdateArgsSchema,
   [IPC.TERM_DELETE]: idArgsSchema,
+  [IPC.TERM_IMPORT_JSON]: emptyArgsSchema,
+  [IPC.TERM_EXPORT_JSON]: emptyArgsSchema,
 };
 
 /** 主进程 → 渲染层事件白名单 */
@@ -266,7 +271,8 @@ const tagApi = {
 
 const noteApi = {
   list: (args: { projectId?: string; shotId?: string }) => invoke<Note[]>(IPC.NOTE_LIST, [args]),
-  save: (args: NoteSaveArgs) => invoke<Note>(IPC.NOTE_SAVE, [args]),
+  get: (args: { id: string }) => invoke<Note>(IPC.NOTE_GET, [args]),
+  upsert: (args: NoteUpsertArgs) => invoke<Note>(IPC.NOTE_UPSERT, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.NOTE_DELETE, [args]),
 };
 
@@ -275,6 +281,8 @@ const termApi = {
   create: (args: TermCreateArgs) => invoke<Term>(IPC.TERM_CREATE, [args]),
   update: (args: TermUpdateArgs) => invoke<Term>(IPC.TERM_UPDATE, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.TERM_DELETE, [args]),
+  importJson: () => invoke<TermImportResult>(IPC.TERM_IMPORT_JSON),
+  exportJson: () => invoke<TermExportResult>(IPC.TERM_EXPORT_JSON),
 };
 
 const api: WindowApi = {

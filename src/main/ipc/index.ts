@@ -12,7 +12,7 @@ import type {
   MediaProbeArgs,
   MediaProbeResult,
   Note,
-  NoteSaveArgs,
+  NoteUpsertArgs,
   PlayerState,
   Project,
   ProjectCreateArgs,
@@ -36,6 +36,8 @@ import type {
   TagUpdateArgs,
   Term,
   TermCreateArgs,
+  TermExportResult,
+  TermImportResult,
   TermUpdateArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
@@ -48,6 +50,7 @@ import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
+import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
   getWindow(): BrowserWindow | null;
@@ -56,6 +59,7 @@ export interface IpcDeps {
   getData(): DataLayer | null;
   getPackage(): ProjectPackageService | null;
   getCapture(): CaptureService | null;
+  getTermTransfer(): TermTransferService | null;
 }
 
 /**
@@ -87,6 +91,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     const capture = deps.getCapture();
     if (!capture) throw new DataError('DATA_UNAVAILABLE', '静帧截图服务尚未初始化');
     return capture;
+  };
+  const requireTermTransfer = (): TermTransferService => {
+    const service = deps.getTermTransfer();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '术语导入导出服务尚未初始化');
+    return service;
   };
 
   ipcMain.handle(
@@ -318,8 +327,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: { projectId?: string; shotId?: string }): Note[] => requireData().notes.list(args)),
   );
   ipcMain.handle(
-    IPC.NOTE_SAVE,
-    withEnvelope((args: NoteSaveArgs): Note => requireData().notes.save(args)),
+    IPC.NOTE_GET,
+    withEnvelope((args: { id: string }): Note => requireData().notes.get(args.id)),
+  );
+  ipcMain.handle(
+    IPC.NOTE_UPSERT,
+    withEnvelope((args: NoteUpsertArgs): Note => requireData().notes.upsert(args)),
   );
   ipcMain.handle(
     IPC.NOTE_DELETE,
@@ -348,5 +361,13 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireData().terms.delete(args.id);
       return { deleted: true };
     }),
+  );
+  ipcMain.handle(
+    IPC.TERM_IMPORT_JSON,
+    withEnvelope((): Promise<TermImportResult> => requireTermTransfer().importJson()),
+  );
+  ipcMain.handle(
+    IPC.TERM_EXPORT_JSON,
+    withEnvelope((): Promise<TermExportResult> => requireTermTransfer().exportJson()),
   );
 }
