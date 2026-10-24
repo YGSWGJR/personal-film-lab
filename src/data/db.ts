@@ -5,6 +5,7 @@ import { DataError } from './errors';
 import { MIGRATIONS } from './migrations';
 import { NoteRepository } from './repositories/notes';
 import { ProjectRepository } from './repositories/projects';
+import { SceneRepository } from './repositories/scenes';
 import { ShotRepository } from './repositories/shots';
 import { StillRepository } from './repositories/stills';
 import { TagRepository } from './repositories/tags';
@@ -21,6 +22,7 @@ export class DataLayer {
   readonly db: Database.Database;
   readonly dataRoot: string;
   readonly projects: ProjectRepository;
+  readonly scenes: SceneRepository;
   readonly shots: ShotRepository;
   readonly stills: StillRepository;
   readonly tags: TagRepository;
@@ -39,6 +41,7 @@ export class DataLayer {
     this.runMigrations();
 
     this.projects = new ProjectRepository(this);
+    this.scenes = new SceneRepository(this);
     this.shots = new ShotRepository(this);
     this.stills = new StillRepository(this);
     this.tags = new TagRepository(this);

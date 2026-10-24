@@ -239,6 +239,7 @@ export interface WindowApi {
   note: NoteApi;
   term: TermApi;
   export: ExportApi;
+  detect: DetectApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
@@ -274,6 +275,8 @@ export interface DetectOptions {
   filterTransitions: boolean;
   weights: DetectWeights;
   frameInterval?: number;
+  /** 直接指定抽帧间隔（毫秒）；优先于 frameInterval */
+  intervalMs?: number;
 }
 
 export interface Project {
@@ -339,9 +342,76 @@ export interface Shot {
   cameraMethod: string | null;
   dialogue: string | null;
   remark: string | null;
+  origin: 'auto' | 'manual';
+  locked: boolean;
   tagIds: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface Scene {
+  id: string;
+  projectId: string;
+  index: number;
+  label: string | null;
+  startMs: number;
+  endMs: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ShotPreview {
+  id: string;
+  index: number;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+}
+
+export interface DetectResult {
+  shots: ShotPreview[];
+  scenes: Scene[];
+}
+
+export type DetectJobStatus = 'queued' | 'running' | 'done' | 'cancelled' | 'error';
+
+export interface DetectJobSnapshot {
+  jobId: string;
+  projectId: string;
+  status: DetectJobStatus;
+  progress: number;
+  error: string | null;
+}
+
+export interface DetectRunArgs {
+  projectId: string;
+  options: DetectOptions;
+  dryRun?: boolean;
+}
+
+export interface DetectRunResult {
+  jobId: string;
+}
+
+export interface DetectProgressEvent {
+  jobId: string;
+  stage: 'extractFrames' | 'analyze';
+  percent: number;
+}
+
+export interface DetectDoneEvent {
+  jobId: string;
+  result: DetectResult;
+}
+
+export interface DetectApplyArgs {
+  projectId: string;
+  shotIds: string[];
+  sceneIds?: string[];
+}
+
+export interface DetectApplyResult {
+  applied: number;
 }
 
 export interface ShotCreateArgs {
@@ -642,4 +712,13 @@ export interface ExportApi {
   storyboard(args: StoryboardExportArgs): Promise<IpcResult<StoryboardExportResult>>;
   onProgress(listener: (event: ExportProgressEvent) => void): () => void;
   onDone(listener: (event: ExportDoneEvent) => void): () => void;
+}
+
+export interface DetectApi {
+  run(args: DetectRunArgs): Promise<IpcResult<DetectRunResult>>;
+  cancel(args: { jobId: string }): Promise<IpcResult<void>>;
+  getJob(args: { jobId: string }): Promise<IpcResult<DetectJobSnapshot>>;
+  apply(args: DetectApplyArgs): Promise<IpcResult<DetectApplyResult>>;
+  onProgress(listener: (event: DetectProgressEvent) => void): () => void;
+  onDone(listener: (event: DetectDoneEvent) => void): () => void;
 }

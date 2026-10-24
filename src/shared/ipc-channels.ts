@@ -35,6 +35,15 @@ export const IPC = {
 
   /** media 域（E 方向） */
   MEDIA_EVENT_PROGRESS: 'media:event:progress',
+
+  /** detect 域（S01 §5.4 / §8.2） */
+  DETECT_RUN: 'detect:run',
+  DETECT_CANCEL: 'detect:cancel',
+  DETECT_GET_JOB: 'detect:getJob',
+  DETECT_APPLY: 'detect:apply',
+  DETECT_EVENT_PROGRESS: 'detect:event:progress',
+  DETECT_EVENT_DONE: 'detect:event:done',
+
   /** data 域：项目 / 镜头 / 静帧 / 标签 / 笔记 / 术语（I 方向，S01 §6.2） */
   PROJECT_CREATE: 'project:create',
   PROJECT_LIST: 'project:list',

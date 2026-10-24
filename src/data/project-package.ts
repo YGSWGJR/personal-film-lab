@@ -144,6 +144,9 @@ export class ProjectPackageService {
         const noteRows = snapshot
           .prepare('SELECT * FROM notes WHERE project_id = ?')
           .all(manifest.projectId) as Array<Record<string, unknown>>;
+        const sceneRows = snapshot
+          .prepare('SELECT * FROM scenes WHERE project_id = ?')
+          .all(manifest.projectId) as Array<Record<string, unknown>>;
         const shotIds = shotRows.map((row) => String(row.id));
         const tagRows = shotIds.length
           ? (snapshot
@@ -178,6 +181,7 @@ export class ProjectPackageService {
             const shotId = shotIdMap.get(String(row.shot_id));
             if (shotId) this.insertNote(row, projectId, randomUUID(), shotId);
           }
+          for (const row of sceneRows) this.insertScene(row, projectId);
           for (const link of shotTagRows) {
             const shotId = shotIdMap.get(link.shot_id);
             const tagId = tagIdMap.get(link.tag_id);
@@ -231,6 +235,7 @@ export class ProjectPackageService {
         copy('INSERT INTO shots SELECT * FROM src.shots WHERE project_id = ?', [projectId]);
         copy('INSERT INTO stills SELECT * FROM src.stills WHERE project_id = ?', [projectId]);
         copy('INSERT INTO notes SELECT * FROM src.notes WHERE project_id = ?', [projectId]);
+        copy('INSERT INTO scenes SELECT * FROM src.scenes WHERE project_id = ?', [projectId]);
         copy(
           `INSERT INTO shot_tags SELECT * FROM src.shot_tags
            WHERE shot_id IN (SELECT id FROM src.shots WHERE project_id = ?)`,
@@ -305,8 +310,8 @@ export class ProjectPackageService {
       .prepare(
         `INSERT INTO shots (
           id, project_id, shot_index, start_ms, end_ms, duration_ms,
-          shot_size, camera_method, dialogue, remark, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -319,6 +324,27 @@ export class ProjectPackageService {
         (row.camera_method as string | null) ?? null,
         (row.dialogue as string | null) ?? null,
         (row.remark as string | null) ?? null,
+        String(row.origin ?? 'manual'),
+        Number(row.locked) ? 1 : 0,
+        String(row.created_at ?? new Date().toISOString()),
+        String(row.updated_at ?? new Date().toISOString()),
+      );
+  }
+
+  private insertScene(row: Record<string, unknown>, projectId: string): void {
+    this.layer.db
+      .prepare(
+        `INSERT INTO scenes (
+          id, project_id, scene_index, label, start_ms, end_ms, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        projectId,
+        Number(row.scene_index) || 0,
+        (row.label as string | null) ?? null,
+        Number(row.start_ms) || 0,
+        Number(row.end_ms) || 0,
         String(row.created_at ?? new Date().toISOString()),
         String(row.updated_at ?? new Date().toISOString()),
       );

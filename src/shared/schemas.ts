@@ -87,6 +87,47 @@ export const mediaTranscodeProxyArgsSchema = z.object({
 export const mediaCancelJobArgsSchema = z.object({
   jobId: z.string().min(1),
 });
+
+const detectWeightsSchema = z.object({
+  s: z.number().min(0).max(1),
+  c: z.number().min(0).max(1),
+  h: z.number().min(0).max(1),
+});
+
+export const detectOptionsSchema = z
+  .object({
+    sensitivity: z.number().min(0).max(1),
+    minShotSeconds: z.number().positive().max(600),
+    filterTransitions: z.boolean(),
+    weights: detectWeightsSchema,
+    frameInterval: z.number().int().min(1).max(10_000).optional(),
+    intervalMs: z.number().int().min(50).max(3_600_000).optional(),
+  })
+  .refine((value) => value.weights.s + value.weights.c + value.weights.h > 0, {
+    message: 'weights 之和必须大于 0',
+    path: ['weights'],
+  });
+
+export const detectRunArgsSchema = z.object({
+  projectId: z.string().min(1),
+  options: detectOptionsSchema,
+  dryRun: z.boolean().optional(),
+});
+
+export const detectCancelArgsSchema = z.object({
+  jobId: z.string().min(1),
+});
+
+export const detectGetJobArgsSchema = z.object({
+  jobId: z.string().min(1),
+});
+
+export const detectApplyArgsSchema = z.object({
+  projectId: z.string().min(1),
+  shotIds: z.array(z.string().min(1)).min(1).max(100_000),
+  sceneIds: z.array(z.string().min(1)).max(10_000).optional(),
+});
+
 /* ---------- data 域（S01 §7） ---------- */
 
 const nullableText = (max = 20000) => z.string().max(max).nullable().optional();

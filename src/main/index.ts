@@ -6,6 +6,7 @@ import { IPC } from '../shared/ipc-channels';
 import { createMainWindow } from './app';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
+import { DetectService } from './detect/detect-service';
 import { ExportService } from './export/export-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
@@ -30,6 +31,7 @@ let packageService: ProjectPackageService | null = null;
 let captureService: CaptureService | null = null;
 let termTransferService: TermTransferService | null = null;
 let exportService: ExportService | null = null;
+let detectService: DetectService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -57,6 +59,19 @@ function ensureMainWindow(): BrowserWindow {
           },
         )
       : null;
+  detectService =
+    dataLayer && mediaService
+      ? new DetectService(
+          dataLayer,
+          mediaService,
+          (event) => {
+            if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_PROGRESS, event);
+          },
+          (event) => {
+            if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_DONE, event);
+          },
+        )
+      : null;
 
   win.on('closed', () => {
     if (mainWindow === win) {
@@ -64,6 +79,8 @@ function ensureMainWindow(): BrowserWindow {
       playerService = null;
       captureService = null;
       exportService = null;
+      detectService?.dispose();
+      detectService = null;
       mediaService?.dispose();
       mediaService = null;
     }
@@ -81,6 +98,7 @@ registerIpcHandlers({
   getCapture: () => captureService,
   getTermTransfer: () => termTransferService,
   getExport: () => exportService,
+  getDetect: () => detectService,
 });
 
 app.whenReady().then(() => {
@@ -118,4 +136,6 @@ app.on('before-quit', () => {
   captureService = null;
   termTransferService = null;
   exportService = null;
+  detectService?.dispose();
+  detectService = null;
 });

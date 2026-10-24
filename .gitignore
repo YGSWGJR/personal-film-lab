@@ -33,3 +33,7 @@ resources/mpv/mpv.exe
 assets/samples/
 # FFmpeg 二进制（体积大，本地放置；见 README 媒体处理小节）
 resources/ffmpeg/*.exe
+
+# Python 缓存
+__pycache__/
+*.pyc

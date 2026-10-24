@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Shot, ShotCreateArgs, ShotUpdateArgs } from '../../shared/types';
+import type { Shot, ShotCreateArgs, ShotPreview, ShotUpdateArgs } from '../../shared/types';
 import type { DataLayer } from '../db';
 import { DataError, isSqliteConstraintError } from '../errors';
 import { nowIso } from './projects';
@@ -15,6 +15,8 @@ interface ShotRow {
   camera_method: string | null;
   dialogue: string | null;
   remark: string | null;
+  origin: 'auto' | 'manual';
+  locked: number;
   created_at: string;
   updated_at: string;
 }
@@ -60,10 +62,10 @@ export class ShotRepository {
           .prepare(
             `INSERT INTO shots (
               id, project_id, shot_index, start_ms, end_ms, duration_ms,
-              shot_size, camera_method, dialogue, remark, created_at, updated_at
+              shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
             ) VALUES (
               @id, @projectId, @index, @startMs, @endMs, @durationMs,
-              @shotSize, @cameraMethod, @dialogue, @remark, @createdAt, @updatedAt
+              @shotSize, @cameraMethod, @dialogue, @remark, 'manual', 0, @createdAt, @updatedAt
             )`,
           )
           .run({
@@ -134,6 +136,45 @@ export class ShotRepository {
     });
   }
 
+  /** 应用检测预览：保留 locked 镜头，替换其他镜头并跳过与 locked 区间重叠的候选。 */
+  applyDetected(projectId: string, previews: ShotPreview[]): number {
+    this.assertProject(projectId);
+    const now = nowIso();
+    let applied = 0;
+    this.layer.transaction(() => {
+      const lockedRows = this.db
+        .prepare('SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND locked = 1')
+        .all(projectId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
+      this.db.prepare('DELETE FROM shots WHERE project_id = ? AND locked = 0').run(projectId);
+      let nextIndex = Math.max(0, ...lockedRows.map((row) => row.shot_index)) + 1;
+      const insert = this.db.prepare(
+        `INSERT INTO shots (
+          id, project_id, shot_index, start_ms, end_ms, duration_ms,
+          shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'auto', 0, ?, ?)`,
+      );
+      for (const preview of previews) {
+        const overlapsLocked = lockedRows.some(
+          (row) => preview.startMs < row.end_ms && preview.endMs > row.start_ms,
+        );
+        if (overlapsLocked) continue;
+        insert.run(
+          randomUUID(),
+          projectId,
+          nextIndex++,
+          preview.startMs,
+          preview.endMs,
+          preview.endMs - preview.startMs,
+          now,
+          now,
+        );
+        applied += 1;
+      }
+      this.layer.projects.touch(projectId);
+    });
+    return applied;
+  }
+
   private validateRange(startMs: number, endMs: number): void {
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || endMs < startMs) {
       throw new DataError('INVALID_ARGUMENT', `镜头时间区间无效：startMs=${startMs} endMs=${endMs}`);
@@ -174,6 +215,8 @@ function mapShot(row: ShotRow, tagIds: string[]): Shot {
     cameraMethod: row.camera_method,
     dialogue: row.dialogue,
     remark: row.remark,
+    origin: row.origin === 'auto' ? 'auto' : 'manual',
+    locked: row.locked !== 0,
     tagIds,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

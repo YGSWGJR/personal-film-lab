@@ -4,6 +4,11 @@ import { withEnvelope } from '../../shared/ipc-result';
 import type {
   AppInfo,
   CancelJobResult,
+  DetectApplyArgs,
+  DetectApplyResult,
+  DetectJobSnapshot,
+  DetectRunArgs,
+  DetectRunResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -46,6 +51,7 @@ import type {
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import type { CaptureService } from '../capture/capture-service';
+import type { DetectService } from '../detect/detect-service';
 import type { ExportService } from '../export/export-service';
 import { DataError } from '../../data/errors';
 import type { ProjectPackageService } from '../../data/project-package';
@@ -64,6 +70,7 @@ export interface IpcDeps {
   getCapture(): CaptureService | null;
   getTermTransfer(): TermTransferService | null;
   getExport(): ExportService | null;
+  getDetect(): DetectService | null;
 }
 
 /**
@@ -104,6 +111,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireExport = (): ExportService => {
     const service = deps.getExport();
     if (!service) throw new DataError('DATA_UNAVAILABLE', '导出服务尚未初始化');
+    return service;
+  };
+  const requireDetect = (): DetectService => {
+    const service = deps.getDetect();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '镜头检测服务尚未初始化');
     return service;
   };
 
@@ -190,6 +202,24 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.MEDIA_CANCEL_JOB,
     withEnvelope((args: { jobId: string }): CancelJobResult => requireMedia().cancelJob(args.jobId)),
+  );
+
+  // ---------- detect ----------
+  ipcMain.handle(
+    IPC.DETECT_RUN,
+    withEnvelope((args: DetectRunArgs): DetectRunResult => requireDetect().run(args)),
+  );
+  ipcMain.handle(
+    IPC.DETECT_CANCEL,
+    withEnvelope((args: { jobId: string }): void => requireDetect().cancel(args.jobId)),
+  );
+  ipcMain.handle(
+    IPC.DETECT_GET_JOB,
+    withEnvelope((args: { jobId: string }): DetectJobSnapshot => requireDetect().getJob(args.jobId)),
+  );
+  ipcMain.handle(
+    IPC.DETECT_APPLY,
+    withEnvelope((args: DetectApplyArgs): DetectApplyResult => requireDetect().apply(args)),
   );
 
   // ---------- data: project ----------

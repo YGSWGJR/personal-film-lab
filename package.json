@@ -67,6 +67,13 @@
           "ffmpeg.exe",
           "ffprobe.exe"
         ]
+      },
+      {
+        "from": "src/main/detect/python",
+        "to": "detect/python",
+        "filter": [
+          "*.py"
+        ]
       }
     ],
     "npmRebuild": false

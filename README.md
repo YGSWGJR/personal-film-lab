@@ -60,10 +60,17 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - **进度与取消**：批量抽帧/转码通过 `media:event:progress` 推送 `{ jobId, stage, percent, message }`（约 1% 或 250ms 节流）；`media:cancelJob` 可中止任务，返回 `CANCELLED`。
 - **错误码**：`FFMPEG_NOT_FOUND` / `INPUT_NOT_FOUND` / `INPUT_EMPTY` / `PROBE_FAILED` / `PROBE_TIMEOUT` / `NO_VIDEO_STREAM` / `EXTRACT_FRAME_FAILED` / `EXTRACT_FRAMES_FAILED` / `TRANSCODE_FAILED` / `CANCELLED` 等。
 
+### OpenCV 镜头检测（DetectService）
+
+- `src/main/detect/python/server.py` 通过 stdio JSON-RPC 接收帧列表；`features.py` 提取饱和度 / 对比度 / 亮度 / 16-bin 色调直方图，`difference.py` 计算加权差异曲线，`peaks.py` 做自适应阈值与闪白/淡变过滤，`clustering.py` 按色调直方图距离聚类场景。
+- `detect:run` 异步返回 `jobId`，进度经 `detect:event:progress` 推送；完成时 `detect:event:done` 返回带临时 id 的 `shots` 与 `scenes` 预览，不直接写库。
+- `detect:apply` 使用预览 id 确认写库：未锁定镜头被本次结果替换，`locked=1` 镜头保留且重叠候选跳过；场景按确认结果整体替换。
+- Python 依赖：OpenCV ≥ 5.0、NumPy ≥ 2.5。开发期使用 `DSH_PYTHON`、`PYTHON` 或系统 `python`；打包时将 `src/main/detect/python/*.py` 复制到 `resources/detect/python/`。
+
 ### 数据层（SQLite / better-sqlite3）
 
-- 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/001_init.sql`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
-- V1 表：`projects` / `shots` / `stills` / `tags` / `shot_tags` / `notes` / `terms`；shots 含景别 `shot_size`、摄法 `camera_method`、台词 `dialogue`、备注 `remark` 业务列；静帧标注以归一化坐标 JSON 存 `annotations_json`。
+- 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
+- 表：`projects` / `scenes` / `shots` / `stills` / `tags` / `shot_tags` / `notes` / `terms`；shots 含景别 `shot_size`、摄法 `camera_method`、台词 `dialogue`、备注 `remark`、来源 `origin` 与锁定 `locked`。
 - 仓储在 `src/data/repositories/`，**所有写操作都在 `db.transaction` 内**；子实体写入同时刷新项目 `updated_at`。
 - IPC / preload 提供完整 CRUD：`project:*`、`shot:*`、`still:*`、`tag:*`（含 assign/unassign）、`note:list/get/upsert/delete`、`term:*`（含 JSON 导入导出），统一 `IpcResult` 信封与 zod 入参校验。
 - 项目文件：`project:save` / `project:saveAs` 导出单个 `.lapian`（zip）= `manifest.json` + 项目 SQLite 快照 `project.db` + `assets/` 资源目录；`project:open` 导入并重映射 id（冲突时自动换新 id、名称加「（导入）」）。默认导出目录 `userData/lapian/packages/`。
@@ -116,11 +123,13 @@ npm run smoke
 
 | 智能体 | 工作分支 | 工作目录 | 职责 |
 |---|---|---|---|
-| dsh | `feature/player`、`feature/detect`、`feature/export` | `src/main/{player,media,capture,detect,export,stats}`、`src/services/detect`、`src/export` | 管线与算法向：播放 / 检测 / 导出 |
-| codex | `feature/ui` | `src/renderer`、`src/preload`、`src/main/app.ts` | 界面向：三栏工作台、时间轴、标注交互 |
+| dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 |
+| codex | `feature/ui`、`feature/detect` | `src/renderer`、`src/preload`、`src/main/detect`、`src/main/app.ts` | 界面与镜头检测：三栏工作台、时间轴、DetectService |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
+
+> S07 状态（2026-10-24）：`feature/detect` 已完成 DetectService、Python 算法、`detect:*` IPC、migration 003 与合成帧单测；真实样例 dry-run/apply 已通过。UI 接入仍按计划留给 S14。
 
 ## 提交规范
 
