@@ -87,6 +87,7 @@ export const mediaExtractFrameArgsSchema = z.object({
   outputPath: z.string().min(1).optional(),
   format: z.enum(['jpg', 'jpeg', 'png']).optional(),
   quality: z.number().int().min(1).max(31).optional(),
+  hwaccel: z.enum(['auto', 'cuda', 'd3d11va', 'none']).optional(),
   timeoutMs: z.number().int().positive().max(600_000).optional(),
 });
 

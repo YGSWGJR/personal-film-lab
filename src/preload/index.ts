@@ -82,6 +82,7 @@ import type {
   WorkspaceState,
   TranscodeProxyArgs,
   TranscodeProxyResult,
+  TranscodeQueueItem,
   WindowApi,
   ProjectCreateArgs,
   ProjectUpdateArgs,
@@ -152,6 +153,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
   [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
+  [IPC.MEDIA_QUEUE_LIST]: emptyArgsSchema,
   [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
@@ -288,6 +290,7 @@ const mediaApi = {
   extractFrames: (args: ExtractFramesArgs) => invoke<ExtractFramesResult>(IPC.MEDIA_EXTRACT_FRAMES, [args]),
   transcodeProxy: (args: TranscodeProxyArgs) => invoke<TranscodeProxyResult>(IPC.MEDIA_TRANSCODE_PROXY, [args]),
   cancelJob: (args: { jobId: string }) => invoke<CancelJobResult>(IPC.MEDIA_CANCEL_JOB, [args]),
+  queueList: () => invoke<TranscodeQueueItem[]>(IPC.MEDIA_QUEUE_LIST),
   onProgress: (listener: (event: MediaProgressEvent) => void) =>
     subscribe<MediaProgressEvent>(EVENT_WHITELIST.onMediaProgress, listener),
 };

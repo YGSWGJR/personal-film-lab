@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, statSync, unlinkSync, existsSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import type { BrowserWindow } from 'electron';
@@ -16,9 +16,11 @@ import type {
   MediaProgressEvent,
   TranscodeProxyArgs,
   TranscodeProxyResult,
+  TranscodeQueueItem,
 } from '../../shared/types';
 import { isHardwareEncoder, resolveAvailableEncoders, selectBestEncoder } from './encoders';
 import { resolveFfmpegBinaries, type FfmpegBinaries } from './ffmpeg-binaries';
+import { resolveAvailableHwaccels, selectHwaccel } from './hwaccel';
 import { MediaError, diagnosticsOf, tailText } from './media-error';
 import { formatCommand, runProcess } from './process-runner';
 import { resolveFrameCacheDir, resolveProxyCacheDir } from '../paths';
@@ -53,6 +55,16 @@ interface ActiveJob {
   startedAt: number;
 }
 
+interface TranscodeQueueEntry extends TranscodeQueueItem {
+  args: TranscodeProxyArgs;
+  outputPath: string;
+  sourceSizeBytes: number;
+  controller: AbortController;
+  promise: Promise<TranscodeProxyResult>;
+  resolve: (result: TranscodeProxyResult) => void;
+  reject: (reason?: unknown) => void;
+}
+
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 const DEFAULT_FRAME_TIMEOUT_MS = 60_000;
 const DEFAULT_FRAMES_TIMEOUT_MS = 30 * 60_000;
@@ -85,6 +97,9 @@ export interface ProxySizeOptions {
  */
 export class MediaService {
   private readonly jobs = new Map<string, ActiveJob>();
+  private readonly transcodeQueue: TranscodeQueueEntry[] = [];
+  private transcodeActive: TranscodeQueueEntry | null = null;
+  private readonly transcodeRecent: TranscodeQueueEntry[] = [];
 
   constructor(private readonly getWindow: () => BrowserWindow | null) {}
 
@@ -106,11 +121,17 @@ export class MediaService {
 
     const { ffmpeg } = await this.ensureReady();
     const seconds = (Math.max(0, args.timeMs) / 1000).toFixed(3);
-    const ffArgs = [
+    const hwaccel =
+      args.hwaccel === 'auto' || args.hwaccel === undefined
+        ? selectHwaccel(await resolveAvailableHwaccels())
+        : args.hwaccel;
+    const buildArgs = (accel: ExtractFrameArgs['hwaccel']): string[] => [
       '-hide_banner',
       '-loglevel',
       'error',
       '-nostdin',
+      ...(accel === 'cuda' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : []),
+      ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
       '-ss',
       seconds,
       '-i',
@@ -119,16 +140,30 @@ export class MediaService {
       '1',
       '-an',
       '-sn',
+      ...(accel === 'cuda' ? ['-vf', 'hwdownload,format=nv12'] : []),
       ...(format === 'png' ? ['-compression_level', '6'] : ['-q:v', String(quality)]),
       '-y',
       outputPath,
     ];
+    let ffArgs = buildArgs(hwaccel);
 
-    const result = await runProcess({
+    let result = await runProcess({
       command: ffmpeg,
       args: ffArgs,
       timeoutMs: args.timeoutMs ?? DEFAULT_FRAME_TIMEOUT_MS,
     });
+
+    if (!result.timedOut && result.exitCode !== 0 && hwaccel !== 'none') {
+      const fallbackReason = tailText(result.stderr, 500);
+      console.info(`[hwaccel] fallback to software: ${fallbackReason || 'hardware decode failed'}`);
+      this.removeQuietly(outputPath);
+      ffArgs = buildArgs('none');
+      result = await runProcess({
+        command: ffmpeg,
+        args: ffArgs,
+        timeoutMs: args.timeoutMs ?? DEFAULT_FRAME_TIMEOUT_MS,
+      });
+    }
 
     if (result.timedOut) {
       this.removeQuietly(outputPath);
@@ -353,16 +388,221 @@ export class MediaService {
     }
   }
 
-  async transcodeProxy(args: TranscodeProxyArgs): Promise<TranscodeProxyResult> {
-    const sourcePath = this.validateInput(args.sourcePath);
-    const sourceStat = this.statOrThrow(sourcePath, 'INPUT_NOT_FOUND', '源文件不可读');
-    const outputPath = args.outputPath
-      ? this.validateOutputPath(args.outputPath)
-      : join(resolveProxyCacheDir(), `${basename(sourcePath, extname(sourcePath))}-proxy.mp4`);
+  transcodeProxy(args: TranscodeProxyArgs): Promise<TranscodeProxyResult> {
+    try {
+      const sourcePath = this.validateInput(args.sourcePath);
+      const sourceStat = this.statOrThrow(sourcePath, 'INPUT_NOT_FOUND', '源文件不可读');
+      const hash = proxyKey(sourcePath, sourceStat.size, sourceStat.mtimeMs);
+      const outputPath = args.outputPath
+        ? this.validateOutputPath(args.outputPath)
+        : join(resolveProxyCacheDir(), `${hash}-proxy.mp4`);
 
-    this.assertNotSameFile(sourcePath, outputPath);
-    mkdirSync(dirname(outputPath), { recursive: true });
+      this.assertNotSameFile(sourcePath, outputPath);
+      mkdirSync(dirname(outputPath), { recursive: true });
 
+      const pending = this.findPendingTranscode(hash);
+      if (pending) return pending.promise;
+
+      if (!existsSync(outputPath)) {
+        return this.enqueueTranscode(args, sourcePath, sourceStat.size, hash, outputPath);
+      }
+      return this.resolveCachedTranscodeOrEnqueue(args, sourcePath, sourceStat.size, hash, outputPath);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  private async resolveCachedTranscodeOrEnqueue(
+    args: TranscodeProxyArgs,
+    sourcePath: string,
+    sourceSizeBytes: number,
+    hash: string,
+    outputPath: string,
+  ): Promise<TranscodeProxyResult> {
+    const cachedResult = await this.getCachedTranscodeResult(sourcePath, sourceSizeBytes, outputPath, hash);
+    if (cachedResult) return cachedResult;
+
+    const pending = this.findPendingTranscode(hash);
+    if (pending) return pending.promise;
+    return this.enqueueTranscode(args, sourcePath, sourceSizeBytes, hash, outputPath);
+  }
+
+  private enqueueTranscode(
+    args: TranscodeProxyArgs,
+    sourcePath: string,
+    sourceSizeBytes: number,
+    hash: string,
+    outputPath: string,
+  ): Promise<TranscodeProxyResult> {
+    const jobId = `transcode-${randomUUID()}`;
+    const controller = new AbortController();
+    let resolve!: (result: TranscodeProxyResult) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<TranscodeProxyResult>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const item: TranscodeQueueEntry = {
+      jobId,
+      sourcePath,
+      hash,
+      outputPath,
+      sourceSizeBytes,
+      args: { ...args },
+      controller,
+      state: 'waiting',
+      percent: 0,
+      message: '等待转码',
+      promise,
+      resolve,
+      reject,
+    };
+
+    this.transcodeQueue.push(item);
+    this.emitProgress({
+      jobId,
+      stage: 'transcode',
+      percent: 0,
+      message: '等待转码',
+      queueState: 'waiting',
+    });
+    this.pump();
+    return promise;
+  }
+
+  queueList(): TranscodeQueueItem[] {
+    const items = [
+      ...this.transcodeQueue,
+      ...(this.transcodeActive ? [this.transcodeActive] : []),
+      ...this.transcodeRecent,
+    ];
+    return items.map(({ jobId, sourcePath, hash, state, percent, message, encoderUsed, startedAt }) => ({
+      jobId,
+      sourcePath,
+      hash,
+      state,
+      percent,
+      message,
+      encoderUsed,
+      startedAt,
+    }));
+  }
+
+  private async getCachedTranscodeResult(
+    sourcePath: string,
+    sourceSizeBytes: number,
+    outputPath: string,
+    hash: string,
+  ): Promise<TranscodeProxyResult | null> {
+    if (!existsSync(outputPath)) return null;
+
+    let cachedStat: ReturnType<typeof statSync>;
+    try {
+      cachedStat = statSync(outputPath);
+    } catch {
+      this.removeQuietly(outputPath);
+      return null;
+    }
+    if (!cachedStat.isFile() || cachedStat.size <= 0) {
+      this.removeQuietly(outputPath);
+      return null;
+    }
+
+    const startedAt = Date.now();
+    const outputInfo = await this.runProbe(outputPath, 15_000).catch(() => null);
+    if (!outputInfo?.hasVideo || outputInfo.durationMs <= 0) {
+      this.removeQuietly(outputPath);
+      return null;
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    console.info(`[transcode] cache hit: ${hash} (${elapsedMs}ms)`);
+    return {
+      sourcePath,
+      outputPath,
+      sourceSizeBytes,
+      sizeBytes: cachedStat.size,
+      durationMs: outputInfo.durationMs,
+      width: outputInfo.width,
+      height: outputInfo.height,
+      elapsedMs,
+      encoderUsed: 'cache',
+      hardwareAccelerated: false,
+      audioCopied: false,
+      cached: true,
+    };
+  }
+
+  private findPendingTranscode(hash: string): TranscodeQueueEntry | null {
+    if (this.transcodeActive?.hash === hash) return this.transcodeActive;
+    return this.transcodeQueue.find((item) => item.hash === hash) ?? null;
+  }
+
+  private pump(): void {
+    if (this.transcodeActive || this.transcodeQueue.length === 0) return;
+    const item = this.transcodeQueue.shift();
+    if (!item) return;
+
+    this.transcodeActive = item;
+    item.state = 'running';
+    item.percent = 0;
+    item.message = '开始转码代理';
+    item.startedAt = Date.now();
+    this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
+    this.emitProgress({
+      jobId: item.jobId,
+      stage: 'transcode',
+      percent: 0,
+      message: item.message,
+      queueState: 'running',
+    });
+    void this.processQueuedTranscode(item);
+  }
+
+  private async processQueuedTranscode(item: TranscodeQueueEntry): Promise<void> {
+    try {
+      const result = await this.runQueuedTranscode(item);
+      item.state = 'done';
+      item.percent = 100;
+      item.message = '代理转码完成';
+      item.encoderUsed = result.encoderUsed;
+      this.finalizeQueueEntry(item);
+      this.emitProgress({
+        jobId: item.jobId,
+        stage: 'transcode',
+        percent: 100,
+        message: item.message,
+        queueState: 'done',
+      });
+      item.resolve(result);
+    } catch (error) {
+      const cancelled =
+        item.controller.signal.aborted || (error instanceof MediaError && error.code === 'CANCELLED');
+      item.state = cancelled ? 'cancelled' : 'failed';
+      item.message = error instanceof Error ? error.message : String(error);
+      this.finalizeQueueEntry(item);
+      this.emitProgress({
+        jobId: item.jobId,
+        stage: 'transcode',
+        percent: item.percent,
+        message: item.message,
+        queueState: item.state,
+      });
+      item.reject(error);
+    } finally {
+      this.pump();
+    }
+  }
+
+  private finalizeQueueEntry(item: TranscodeQueueEntry): void {
+    if (this.transcodeActive === item) this.transcodeActive = null;
+    this.jobs.delete(item.jobId);
+    this.transcodeRecent.push(item);
+    if (this.transcodeRecent.length > 20) this.transcodeRecent.shift();
+  }
+
+  private async runQueuedTranscode(item: TranscodeQueueEntry): Promise<TranscodeProxyResult> {
+    const { args, sourcePath, outputPath, jobId, controller } = item;
     const { ffmpeg } = await this.ensureReady();
     const meta = await this.runProbe(sourcePath, DEFAULT_PROBE_TIMEOUT_MS);
     if (!meta.hasVideo) {
@@ -375,6 +615,7 @@ export class MediaService {
     const encoder = args.encoder
       ? { name: args.encoder }
       : selectBestEncoder(await resolveAvailableEncoders());
+    item.encoderUsed = encoder.name;
     const proxyMode = args.proxyMode ?? 'balanced';
     const audioCopied = Boolean(meta.hasAudio && AUDIO_COPY_CODECS.has(meta.audioCodec ?? ''));
     const proxySize = computeProxySize({
@@ -388,11 +629,6 @@ export class MediaService {
     const evenHeight = proxySize.height;
     const timeoutMs = args.timeoutMs ?? DEFAULT_TRANSCODE_TIMEOUT_MS;
     const gopFrames = Math.max(1, Math.round((meta.fps > 0 ? meta.fps : 30) * 2));
-
-    const jobId = `transcode-${randomUUID()}`;
-    const controller = new AbortController();
-    this.jobs.set(jobId, { controller, stage: 'transcode', startedAt: Date.now() });
-    this.emitProgress({ jobId, stage: 'transcode', percent: 0, message: '开始转码代理' });
 
     const buildTranscodeArgs = (encoderName: string): string[] => [
       '-hide_banner',
@@ -433,115 +669,140 @@ export class MediaService {
     let fallbackReason: string | undefined;
     let ffArgs = buildTranscodeArgs(encoderUsed);
 
-    try {
-      const onStdoutLine = (line: string): void => {
-        const match = /^out_time_us=(\d+)$/u.exec(line.trim());
-        if (!match) return;
-        const percent = clampInt(Math.floor((Number(match[1]) / 1000 / meta.durationMs) * 100), 0, 99);
-        const now = Date.now();
-        if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
-          lastPercent = percent;
-          lastEmitAt = now;
-          this.emitProgress({
-            jobId,
-            stage: 'transcode',
-            percent,
-            message: `代理转码中 ${percent}%`,
-          });
-        }
-      };
+    const onStdoutLine = (line: string): void => {
+      const match = /^out_time_us=(\d+)$/u.exec(line.trim());
+      if (!match) return;
+      const percent = clampInt(Math.floor((Number(match[1]) / 1000 / meta.durationMs) * 100), 0, 99);
+      const now = Date.now();
+      if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
+        lastPercent = percent;
+        lastEmitAt = now;
+        item.percent = percent;
+        item.message = `代理转码中 ${percent}%`;
+        this.emitProgress({
+          jobId,
+          stage: 'transcode',
+          percent,
+          message: item.message,
+          queueState: 'running',
+        });
+      }
+    };
 
-      let result = await runProcess({
+    let result = await runProcess({
+      command: ffmpeg,
+      args: ffArgs,
+      timeoutMs,
+      signal: controller.signal,
+      onStdoutLine,
+    });
+
+    if (
+      !result.timedOut &&
+      !result.aborted &&
+      result.exitCode !== 0 &&
+      encoderUsed !== 'libx264' &&
+      HARDWARE_ENCODER_FAILURE_RE.test(result.stderr)
+    ) {
+      fallbackReason = `${encoderUsed}: ${tailText(result.stderr, 1000).trim() || '硬件编码器启动失败'}`;
+      this.removeQuietly(outputPath);
+      encoderUsed = 'libx264';
+      ffArgs = buildTranscodeArgs(encoderUsed);
+      lastPercent = 0;
+      lastEmitAt = 0;
+      item.percent = 0;
+      item.message = '硬件编码不可用，正在回退 libx264';
+      this.emitProgress({
+        jobId,
+        stage: 'transcode',
+        percent: 0,
+        message: item.message,
+        queueState: 'running',
+      });
+      result = await runProcess({
         command: ffmpeg,
         args: ffArgs,
         timeoutMs,
         signal: controller.signal,
         onStdoutLine,
       });
-
-      if (
-        !result.timedOut &&
-        !result.aborted &&
-        result.exitCode !== 0 &&
-        encoderUsed !== 'libx264' &&
-        HARDWARE_ENCODER_FAILURE_RE.test(result.stderr)
-      ) {
-        fallbackReason = `${encoderUsed}: ${tailText(result.stderr, 1000).trim() || '硬件编码器启动失败'}`;
-        this.removeQuietly(outputPath);
-        encoderUsed = 'libx264';
-        ffArgs = buildTranscodeArgs(encoderUsed);
-        lastPercent = 0;
-        lastEmitAt = 0;
-        this.emitProgress({
-          jobId,
-          stage: 'transcode',
-          percent: 0,
-          message: '硬件编码不可用，正在回退 libx264',
-        });
-        result = await runProcess({
-          command: ffmpeg,
-          args: ffArgs,
-          timeoutMs,
-          signal: controller.signal,
-          onStdoutLine,
-        });
-      }
-
-      if (result.timedOut) {
-        this.removeQuietly(outputPath);
-        throw new MediaError('TRANSCODE_TIMEOUT', `代理转码超时（${timeoutMs}ms）`, {
-          ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
-          sourcePath,
-          jobId,
-        });
-      }
-      if (result.aborted) {
-        this.removeQuietly(outputPath);
-        throw new MediaError('CANCELLED', '代理转码已取消', {
-          ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
-          jobId,
-        });
-      }
-      if (result.exitCode !== 0) {
-        this.removeQuietly(outputPath);
-        throw new MediaError('TRANSCODE_FAILED', `代理转码失败：${this.stderrSummary(result.stderr)}`, {
-          ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
-          sourcePath,
-          jobId,
-        });
-      }
-
-      const outputStat = this.statOrThrow(outputPath, 'TRANSCODE_FAILED', '代理文件未生成');
-      const outputInfo = await this.runProbe(outputPath, 30_000).catch(() => null);
-      const elapsedMs = Date.now() - startedAt;
-      const hardwareAccelerated = isHardwareEncoder(encoderUsed);
-      const finalWidth = outputInfo?.width ?? targetWidth;
-      const finalHeight = outputInfo?.height ?? evenHeight;
-      this.emitProgress({ jobId, stage: 'transcode', percent: 100, message: '代理转码完成' });
-      console.info(
-        `[transcode] complete: mode=${proxyMode} encoderUsed=${encoderUsed} width=${finalWidth} height=${finalHeight} elapsedMs=${elapsedMs} hardwareAccelerated=${hardwareAccelerated} audio=${audioCopied ? 'copy' : 'aac'}`,
-      );
-
-      return {
-        sourcePath,
-        outputPath,
-        sourceSizeBytes: sourceStat.size,
-        sizeBytes: outputStat.size,
-        durationMs: outputInfo?.durationMs ?? meta.durationMs,
-        width: finalWidth,
-        height: finalHeight,
-        elapsedMs,
-        encoderUsed,
-        hardwareAccelerated,
-        fallbackReason,
-        audioCopied,
-      };
-    } finally {
-      this.jobs.delete(jobId);
     }
+
+    if (result.timedOut) {
+      this.removeQuietly(outputPath);
+      throw new MediaError('TRANSCODE_TIMEOUT', `代理转码超时（${timeoutMs}ms）`, {
+        ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+        sourcePath,
+        jobId,
+      });
+    }
+    if (result.aborted) {
+      this.removeQuietly(outputPath);
+      throw new MediaError('CANCELLED', '代理转码已取消', {
+        ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+        jobId,
+      });
+    }
+    if (result.exitCode !== 0) {
+      this.removeQuietly(outputPath);
+      throw new MediaError('TRANSCODE_FAILED', `代理转码失败：${this.stderrSummary(result.stderr)}`, {
+        ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+        sourcePath,
+        jobId,
+      });
+    }
+
+    const outputStat = this.statOrThrow(outputPath, 'TRANSCODE_FAILED', '代理文件未生成');
+    const outputInfo = await this.runProbe(outputPath, 30_000).catch(() => null);
+    const elapsedMs = Date.now() - startedAt;
+    const hardwareAccelerated = isHardwareEncoder(encoderUsed);
+    const finalWidth = outputInfo?.width ?? targetWidth;
+    const finalHeight = outputInfo?.height ?? evenHeight;
+    console.info(
+      `[transcode] complete: mode=${proxyMode} encoderUsed=${encoderUsed} width=${finalWidth} height=${finalHeight} elapsedMs=${elapsedMs} hardwareAccelerated=${hardwareAccelerated} audio=${audioCopied ? 'copy' : 'aac'}`,
+    );
+
+    return {
+      sourcePath,
+      outputPath,
+      sourceSizeBytes: item.sourceSizeBytes,
+      sizeBytes: outputStat.size,
+      durationMs: outputInfo?.durationMs ?? meta.durationMs,
+      width: finalWidth,
+      height: finalHeight,
+      elapsedMs,
+      encoderUsed,
+      hardwareAccelerated,
+      fallbackReason,
+      audioCopied,
+      cached: false,
+    };
   }
 
   cancelJob(jobId: string): CancelJobResult {
+    const waitingIndex = this.transcodeQueue.findIndex((item) => item.jobId === jobId);
+    if (waitingIndex >= 0) {
+      const [item] = this.transcodeQueue.splice(waitingIndex, 1);
+      item.state = 'cancelled';
+      item.message = '排队转码已取消';
+      this.finalizeQueueEntry(item);
+      this.emitProgress({
+        jobId,
+        stage: 'transcode',
+        percent: item.percent,
+        message: item.message,
+        queueState: 'cancelled',
+      });
+      item.reject(new MediaError('CANCELLED', item.message, { jobId }));
+      this.pump();
+      return { jobId, cancelled: true };
+    }
+
+    if (this.transcodeActive?.jobId === jobId) {
+      this.transcodeActive.controller.abort();
+      return { jobId, cancelled: true };
+    }
+
     const job = this.jobs.get(jobId);
     if (!job) return { jobId, cancelled: false };
     job.controller.abort();
@@ -550,6 +811,12 @@ export class MediaService {
 
   /** 退出/窗口关闭时中止所有长任务 */
   dispose(): void {
+    for (const item of this.transcodeQueue.splice(0)) {
+      item.state = 'cancelled';
+      item.message = '媒体服务已关闭';
+      this.finalizeQueueEntry(item);
+      item.reject(new MediaError('CANCELLED', item.message, { jobId: item.jobId }));
+    }
     for (const job of this.jobs.values()) {
       job.controller.abort();
     }
@@ -730,6 +997,11 @@ function normalizeFormat(format: FrameFormat | undefined): FrameFormat {
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function proxyKey(sourcePath: string, size: number, mtimeMs: number): string {
+  const digest = createHash('sha256').update(`${resolve(sourcePath)}|${size}|${mtimeMs}`).digest('hex');
+  return digest.slice(0, 24);
 }
 
 export function computeProxySize(opts: ProxySizeOptions): { width: number; height: number } {

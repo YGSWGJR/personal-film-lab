@@ -51,6 +51,7 @@ import type {
   TermUpdateArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
+  TranscodeQueueItem,
   StoryboardExportArgs,
   StoryboardExportResult,
   AudioWaveform,
@@ -276,6 +277,10 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.MEDIA_CANCEL_JOB,
     withEnvelope((args: { jobId: string }): CancelJobResult => requireMedia().cancelJob(args.jobId)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_QUEUE_LIST,
+    withEnvelope((): TranscodeQueueItem[] => requireMedia().queueList()),
   );
 
   // ---------- scope ----------

@@ -136,6 +136,19 @@ export interface PlayerOpenArgs {
 
 export type FrameFormat = 'jpg' | 'jpeg' | 'png';
 
+export type TranscodeQueueState = 'waiting' | 'running' | 'done' | 'failed' | 'cancelled';
+
+export interface TranscodeQueueItem {
+  jobId: string;
+  sourcePath: string;
+  hash: string;
+  state: TranscodeQueueState;
+  percent: number;
+  message: string;
+  encoderUsed?: string;
+  startedAt?: number;
+}
+
 /** 媒体长任务进度（media:event:progress） */
 export interface MediaProgressEvent {
   jobId: string;
@@ -143,6 +156,7 @@ export interface MediaProgressEvent {
   /** 0..100，整数 */
   percent: number;
   message: string;
+  queueState?: TranscodeQueueState;
 }
 
 export interface MediaProbeArgs {
@@ -159,6 +173,8 @@ export interface ExtractFrameArgs {
   format?: FrameFormat;
   /** JPG 质量，1（最好）..31（最差），默认 2 */
   quality?: number;
+  /** 解码硬件加速：默认 auto，优先 cuda，其次 d3d11va */
+  hwaccel?: 'auto' | 'cuda' | 'd3d11va' | 'none';
   /** 默认 60s */
   timeoutMs?: number;
 }
@@ -244,6 +260,8 @@ export interface TranscodeProxyResult {
   fallbackReason?: string;
   /** 源音频是否直接复制而未重编码 */
   audioCopied: boolean;
+  /** 是否命中已有代理缓存 */
+  cached: boolean;
 }
 
 export interface CancelJobArgs {
@@ -286,6 +304,7 @@ export interface MediaApi {
   extractFrames(args: ExtractFramesArgs): Promise<IpcResult<ExtractFramesResult>>;
   transcodeProxy(args: TranscodeProxyArgs): Promise<IpcResult<TranscodeProxyResult>>;
   cancelJob(args: CancelJobArgs): Promise<IpcResult<CancelJobResult>>;
+  queueList(): Promise<IpcResult<TranscodeQueueItem[]>>;
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
 }
 

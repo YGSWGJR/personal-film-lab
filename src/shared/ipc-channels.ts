@@ -43,6 +43,7 @@ export const IPC = {
   MEDIA_EXTRACT_FRAMES: 'media:extractFrames',
   MEDIA_TRANSCODE_PROXY: 'media:transcodeProxy',
   MEDIA_CANCEL_JOB: 'media:cancelJob',
+  MEDIA_QUEUE_LIST: 'media:queueList',
 
   /** media 域（E 方向） */
   MEDIA_EVENT_PROGRESS: 'media:event:progress',
