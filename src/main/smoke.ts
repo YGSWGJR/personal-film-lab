@@ -30,13 +30,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
   let mediaChecks: Record<string, unknown> = {};
+  let scopeChecks: Record<string, unknown> = {};
   let dataChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, dataChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, dataChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -57,7 +58,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'app,detect,export,media,note,player,project,shot,still,tag,term';
+      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,shot,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -76,6 +77,16 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       const transcodeSource = process.env['SMOKE_TRANSCODE_VIDEO'] ?? mediaVideo;
       mediaChecks = await runMediaChecks(win, mediaVideo, transcodeSource, mediaOut);
       Object.assign(checks, mediaChecksAssertions(mediaChecks));
+    }
+
+    const scopeVideo = process.env['SMOKE_SCOPE_VIDEO'];
+    if (scopeVideo) {
+      scopeChecks = await runScopeChecks(win, scopeVideo);
+      Object.assign(checks, {
+        scopeAnalyze: scopeChecks.analyzeOk === true,
+        scopeCache: scopeChecks.cachedOk === true,
+        scopeAudio: scopeChecks.audioOk === true,
+      });
     }
 
     const dataPkg = process.env['SMOKE_DATA_PKG'];
@@ -105,7 +116,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, dataChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, dataChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -120,6 +131,62 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     console.error(error);
     finish(1);
   }
+}
+
+async function runScopeChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        const first = await window.api.scope.analyzeFrame({
+          path: ${JSON.stringify(videoPath)},
+          timeMs: 1000
+        });
+        out.first = first.ok ? {
+          histogramBins: first.data.histogram.y.length,
+          waveformColumns: first.data.waveform.length,
+          vectorPoints: first.data.vectorscope.length,
+          paradeColumns: first.data.parade.r.length,
+          ciePoints: first.data.cie.points.length,
+          gamutPoints: first.data.cie.gamut.length
+        } : first.error;
+        out.analyzeOk = first.ok === true
+          && first.data.histogram.y.length === 64
+          && first.data.histogram.r.length === 64
+          && first.data.waveform.length === 128
+          && first.data.vectorscope.length > 0
+          && first.data.parade.r.length === 128
+          && first.data.cie.points.length > 0
+          && first.data.cie.gamut.length >= 4;
+
+        const started = performance.now();
+        const cached = await window.api.scope.analyzeFrame({
+          path: ${JSON.stringify(videoPath)},
+          timeMs: 1200
+        });
+        out.cacheElapsedMs = Math.round(performance.now() - started);
+        out.cachedOk = cached.ok === true && out.cacheElapsedMs < 250;
+
+        const audio = await window.api.scope.extractAudioWaveform({
+          path: ${JSON.stringify(videoPath)},
+          bucketMs: 100
+        });
+        out.audio = audio.ok ? {
+          buckets: audio.data.buckets.length,
+          bucketMs: audio.data.bucketMs,
+          totalMs: audio.data.totalMs,
+          first: audio.data.buckets[0]
+        } : audio.error;
+        out.audioOk = audio.ok === true
+          && audio.data.bucketMs === 100
+          && audio.data.buckets.length > 0
+          && audio.data.totalMs > 0;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
 }
 
 function dataChecksAssertions(result: Record<string, any>): Record<string, boolean> {
