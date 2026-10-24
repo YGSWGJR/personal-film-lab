@@ -83,6 +83,8 @@ export function createDemoShots(projectId = 'demo-project'): WorkspaceShot[] {
       demoTagId('声音', '对白'),
       demoTagId('剪辑', '硬切'),
     ],
+    origin: 'manual',
+    locked: false,
     createdAt: CREATED_AT,
     updatedAt: CREATED_AT,
     thumbnail: definition.image,

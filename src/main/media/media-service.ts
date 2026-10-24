@@ -187,7 +187,13 @@ export class MediaService {
     return targetPath;
   }
 
-  async extractFrames(args: ExtractFramesArgs): Promise<ExtractFramesResult> {
+  async extractFrames(
+    args: ExtractFramesArgs,
+    controls?: {
+      jobId?: string;
+      onProgress?: (event: MediaProgressEvent) => void;
+    },
+  ): Promise<ExtractFramesResult> {
     const inputPath = this.validateInput(args.path);
     const intervalMs = Math.round(args.intervalMs);
     if (!Number.isFinite(intervalMs) || intervalMs < 50) {
@@ -219,10 +225,14 @@ export class MediaService {
     const pattern = join(outputDir, `${prefix}%06d.${format}`);
 
     this.cleanOldFrames(outputDir, prefix, format);
-    const jobId = `extract-${randomUUID()}`;
+    const jobId = controls?.jobId ?? `extract-${randomUUID()}`;
     const controller = new AbortController();
     this.jobs.set(jobId, { controller, stage: 'extractFrames', startedAt: Date.now() });
-    this.emitProgress({ jobId, stage: 'extractFrames', percent: 0, message: '开始抽帧' });
+    const reportProgress = (event: MediaProgressEvent): void => {
+      this.emitProgress(event);
+      controls?.onProgress?.(event);
+    };
+    reportProgress({ jobId, stage: 'extractFrames', percent: 0, message: '开始抽帧' });
 
     const ffArgs = [
       '-hide_banner',
@@ -267,7 +277,7 @@ export class MediaService {
           if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
             lastPercent = percent;
             lastEmitAt = now;
-            this.emitProgress({
+            reportProgress({
               jobId,
               stage: 'extractFrames',
               percent,
@@ -308,7 +318,7 @@ export class MediaService {
         });
       }
 
-      this.emitProgress({ jobId, stage: 'extractFrames', percent: 100, message: `抽帧完成，共 ${frames.length} 帧` });
+      reportProgress({ jobId, stage: 'extractFrames', percent: 100, message: `抽帧完成，共 ${frames.length} 帧` });
       return {
         outputDir,
         frames,

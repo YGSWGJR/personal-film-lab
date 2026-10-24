@@ -513,6 +513,8 @@ async function addShotAtPlayhead(): Promise<void> {
       dialogue: null,
       remark: '',
       tagIds: [],
+      origin: 'manual',
+      locked: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       thumbnail: DEMO_THUMBNAILS[shots.value.length % DEMO_THUMBNAILS.length],

@@ -4,6 +4,10 @@ import { IPC } from '../shared/ipc-channels';
 import { fail } from '../shared/ipc-result';
 import {
   emptyArgsSchema,
+  detectApplyArgsSchema,
+  detectCancelArgsSchema,
+  detectGetJobArgsSchema,
+  detectRunArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -42,6 +46,13 @@ import {
 import type {
   AppInfo,
   CancelJobResult,
+  DetectApplyArgs,
+  DetectApplyResult,
+  DetectDoneEvent,
+  DetectJobSnapshot,
+  DetectProgressEvent,
+  DetectRunArgs,
+  DetectRunResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -119,6 +130,11 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
 
+  [IPC.DETECT_RUN]: detectRunArgsSchema,
+  [IPC.DETECT_CANCEL]: detectCancelArgsSchema,
+  [IPC.DETECT_GET_JOB]: detectGetJobArgsSchema,
+  [IPC.DETECT_APPLY]: detectApplyArgsSchema,
+
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
   [IPC.PROJECT_GET]: idArgsSchema,
@@ -171,6 +187,8 @@ const EVENT_WHITELIST = {
   onLoaded: IPC.PLAYER_EVENT_LOADED,
   onError: IPC.PLAYER_EVENT_ERROR,
   onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
+  onDetectProgress: IPC.DETECT_EVENT_PROGRESS,
+  onDetectDone: IPC.DETECT_EVENT_DONE,
   onStillCreated: IPC.STILL_EVENT_CREATED,
   onExportProgress: IPC.EXPORT_EVENT_PROGRESS,
   onExportDone: IPC.EXPORT_EVENT_DONE,
@@ -231,6 +249,17 @@ const mediaApi = {
   cancelJob: (args: { jobId: string }) => invoke<CancelJobResult>(IPC.MEDIA_CANCEL_JOB, [args]),
   onProgress: (listener: (event: MediaProgressEvent) => void) =>
     subscribe<MediaProgressEvent>(EVENT_WHITELIST.onMediaProgress, listener),
+};
+
+const detectApi = {
+  run: (args: DetectRunArgs) => invoke<DetectRunResult>(IPC.DETECT_RUN, [args]),
+  cancel: (args: { jobId: string }) => invoke<void>(IPC.DETECT_CANCEL, [args]),
+  getJob: (args: { jobId: string }) => invoke<DetectJobSnapshot>(IPC.DETECT_GET_JOB, [args]),
+  apply: (args: DetectApplyArgs) => invoke<DetectApplyResult>(IPC.DETECT_APPLY, [args]),
+  onProgress: (listener: (event: DetectProgressEvent) => void) =>
+    subscribe<DetectProgressEvent>(EVENT_WHITELIST.onDetectProgress, listener),
+  onDone: (listener: (event: DetectDoneEvent) => void) =>
+    subscribe<DetectDoneEvent>(EVENT_WHITELIST.onDetectDone, listener),
 };
 
 const projectApi = {
@@ -306,6 +335,7 @@ const api: WindowApi = {
   app: appApi,
   player: playerApi,
   media: mediaApi,
+  detect: detectApi,
   project: projectApi,
   shot: shotApi,
   still: stillApi,

@@ -1,5 +1,6 @@
 import initSql from './001_init.sql?raw';
 import presetTagsSql from './002_preset_tags.sql?raw';
+import detectSql from './003_detect.sql?raw';
 
 export interface Migration {
   version: number;
@@ -10,4 +11,5 @@ export interface Migration {
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: initSql },
   { version: 2, sql: presetTagsSql },
+  { version: 3, sql: detectSql },
 ];
