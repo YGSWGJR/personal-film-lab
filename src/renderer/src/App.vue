@@ -8,6 +8,7 @@ import AppIcon from './components/AppIcon.vue';
 import DetectionModal from './components/DetectionModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
+import SettingsModal from './components/SettingsModal.vue';
 import ShotDetailPanel from './components/ShotDetailPanel.vue';
 import ShotListPanel from './components/ShotListPanel.vue';
 import TermEditorModal from './components/TermEditorModal.vue';
@@ -36,6 +37,8 @@ import type {
   PlayerState,
   Project,
   RenderBounds,
+  Settings,
+  SettingsSetArgs,
   Shot,
   Still,
   StoryboardExportArgs,
@@ -85,8 +88,13 @@ const detectionJobId = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
 const audioWaveform = ref<AudioWaveform | null>(null);
 const audioLoading = ref(false);
+const settingsOpen = ref(false);
+const settings = ref<Settings | null>(null);
+const settingsSaving = ref(false);
+const settingsError = ref<string | null>(null);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
+let lastPlayerBounds: RenderBounds | null = null;
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -989,24 +997,28 @@ function showUrlImportPending(): void {
   showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
 }
 
+function enterDemoWorkspace(): void {
+  const fallback = createDemoShots();
+  activeProject.value = null;
+  demoMode.value = true;
+  detectionOpen.value = false;
+  shots.value = fallback;
+  markers.value = createDemoMarkers(fallback);
+  projectStills.value = [];
+  selectedId.value = fallback[2]?.id ?? null;
+  previewTimeMs.value = fallback[2]?.startMs ?? 0;
+  for (const key of Object.keys(notes)) delete notes[key];
+  for (const shot of fallback) notes[shot.id] = shot.remark ?? '';
+  tags.value = createDemoTags();
+  terms.value = createDemoTerms();
+}
+
 async function toggleDemoWorkspace(): Promise<void> {
   if (!demoMode.value) {
     if (detecting.value) await cancelDetection();
     await closePlayer();
     resetAudioWaveform();
-    activeProject.value = null;
-    demoMode.value = true;
-    detectionOpen.value = false;
-    const fallback = createDemoShots();
-    shots.value = fallback;
-    markers.value = createDemoMarkers(fallback);
-    projectStills.value = [];
-    selectedId.value = fallback[2]?.id ?? null;
-    previewTimeMs.value = fallback[2]?.startMs ?? 0;
-    for (const key of Object.keys(notes)) delete notes[key];
-    for (const shot of fallback) notes[shot.id] = shot.remark ?? '';
-    tags.value = createDemoTags();
-    terms.value = createDemoTerms();
+    enterDemoWorkspace();
     showToast('已切换到示例工作区，数据库项目未被修改。');
     return;
   }
@@ -1017,6 +1029,70 @@ async function toggleDemoWorkspace(): Promise<void> {
     showToast(`已打开最近项目：${projects[0].name}`, 'success');
   } else {
     await openVideo();
+  }
+}
+
+async function loadSettings(): Promise<void> {
+  const result = await window.api.settings.get();
+  if (result.ok) {
+    settings.value = result.data;
+  } else {
+    settingsError.value = result.error.message;
+    console.warn(`[settings] ${result.error.code} ${result.error.message}`);
+  }
+}
+
+async function openSettings(): Promise<void> {
+  settingsError.value = null;
+  if (!settings.value) await loadSettings();
+  settingsOpen.value = true;
+  await nextTick();
+  void window.api.player.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+}
+
+async function closeSettings(): Promise<void> {
+  settingsOpen.value = false;
+  await nextTick();
+  if (lastPlayerBounds) void window.api.player.setBounds(lastPlayerBounds);
+}
+
+async function saveSettings(value: SettingsSetArgs): Promise<void> {
+  if (settingsSaving.value) return;
+  const previousRoot = settings.value?.dataRoot;
+  const willChangeDataRoot = Boolean(previousRoot && previousRoot !== value.dataRoot);
+  settingsSaving.value = true;
+  settingsError.value = null;
+  try {
+    if (willChangeDataRoot && detecting.value) await cancelDetection();
+    const result = await window.api.settings.set(value);
+    if (!result.ok) {
+      settingsError.value = result.error.message;
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    settings.value = result.data;
+    const dataRootChanged = Boolean(previousRoot && previousRoot !== result.data.dataRoot);
+    if (!dataRootChanged) {
+      await closeSettings();
+      showToast('设置已保存，新的缓存、导出和截图路径已生效。', 'success');
+      return;
+    }
+
+    await closePlayer();
+    settingsOpen.value = false;
+    resetAudioWaveform();
+    enterDemoWorkspace();
+    const projects = unwrap(await window.api.project.list());
+    if (projects && projects[0]) {
+      await loadProject(projects[0]);
+    }
+    showToast(
+      '数据目录已切换。现有项目不会自动迁移，新项目将写入新位置。',
+      'success',
+      '设置已生效',
+    );
+  } finally {
+    settingsSaving.value = false;
   }
 }
 
@@ -1118,6 +1194,7 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
 }
 
 function setPlayerBounds(bounds: RenderBounds): void {
+  lastPlayerBounds = bounds;
   void window.api.player.setBounds(bounds);
 }
 
@@ -1191,6 +1268,8 @@ onMounted(async () => {
   } finally {
     skeleton.ready = true;
   }
+
+  await loadSettings();
 
   try {
     const projectResult = await api.project.list();
@@ -1331,7 +1410,7 @@ onBeforeUnmount(() => {
         <button class="nav-item icon-only" type="button" title="学习统计">
           <AppIcon name="chart" :size="16" />
         </button>
-        <button class="nav-item icon-only" type="button" title="设置">
+        <button class="nav-item icon-only" type="button" title="设置" @click="openSettings">
           <AppIcon name="settings" :size="16" />
         </button>
       </div>
@@ -1432,6 +1511,15 @@ onBeforeUnmount(() => {
       @close="termEditorOpen = false"
       @save="saveTerm"
       @delete="deleteTerm"
+    />
+
+    <SettingsModal
+      :open="settingsOpen"
+      :settings="settings"
+      :saving="settingsSaving"
+      :error="settingsError"
+      @close="closeSettings"
+      @save="saveSettings"
     />
 
     <DetectionModal
