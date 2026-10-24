@@ -55,6 +55,9 @@ import type {
   StoryboardExportResult,
   AudioWaveform,
   WorkspaceState,
+  StatsProgress,
+  StatsRhythmPoint,
+  StatsTagDistributionItem,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import type { CaptureService } from '../capture/capture-service';
@@ -69,6 +72,7 @@ import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
 import { SettingsError, type SettingsService } from '../settings/settings-service';
 import { SessionError, type SessionService } from '../session/session-service';
+import type { StatsService } from '../stats/stats-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
@@ -84,6 +88,7 @@ export interface IpcDeps {
   getScope(): ScopeService | null;
   getSettings(): SettingsService | null;
   getSession(): SessionService | null;
+  getStats(): StatsService | null;
 }
 
 /**
@@ -144,6 +149,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireSession = (): SessionService => {
     const service = deps.getSession();
     if (!service) throw new SessionError('SESSION_UNAVAILABLE', '会话服务尚未初始化');
+    return service;
+  };
+  const requireStats = (): StatsService => {
+    const service = deps.getStats();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '统计服务尚未初始化');
     return service;
   };
 
@@ -487,6 +497,26 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     IPC.EXPORT_STORYBOARD,
     withEnvelope((args: StoryboardExportArgs): Promise<StoryboardExportResult> =>
       requireExport().exportStoryboard(args),
+    ),
+  );
+
+  // ---------- stats ----------
+  ipcMain.handle(
+    IPC.STATS_TAG_DISTRIBUTION,
+    withEnvelope((args: { projectId: string }): StatsTagDistributionItem[] =>
+      requireStats().tagDistribution(args.projectId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.STATS_RHYTHM,
+    withEnvelope((args: { projectId: string }): StatsRhythmPoint[] =>
+      requireStats().rhythm(args.projectId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.STATS_PROGRESS,
+    withEnvelope((args: { projectId: string }): StatsProgress =>
+      requireStats().progress(args.projectId),
     ),
   );
 }

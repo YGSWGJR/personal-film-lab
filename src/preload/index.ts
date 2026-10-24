@@ -46,6 +46,7 @@ import {
   scopeExtractAudioWaveformArgsSchema,
   settingsChooseDirectoryArgsSchema,
   settingsSetArgsSchema,
+  statsProjectArgsSchema,
   workspaceStateSchema,
 } from '../shared/schemas';
 import type {
@@ -110,6 +111,9 @@ import type {
   TermExportResult,
   TermImportResult,
   TermUpdateArgs,
+  StatsProgress,
+  StatsRhythmPoint,
+  StatsTagDistributionItem,
 } from '../shared/types';
 
 /**
@@ -198,6 +202,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.TERM_IMPORT_JSON]: emptyArgsSchema,
   [IPC.TERM_EXPORT_JSON]: emptyArgsSchema,
   [IPC.EXPORT_STORYBOARD]: storyboardExportArgsSchema,
+  [IPC.STATS_TAG_DISTRIBUTION]: statsProjectArgsSchema,
+  [IPC.STATS_RHYTHM]: statsProjectArgsSchema,
+  [IPC.STATS_PROGRESS]: statsProjectArgsSchema,
 };
 
 /** 主进程 → 渲染层事件白名单 */
@@ -370,6 +377,15 @@ const exportApi = {
     subscribe<ExportDoneEvent>(EVENT_WHITELIST.onExportDone, listener),
 };
 
+const statsApi = {
+  tagDistribution: (args: { projectId: string }) =>
+    invoke<StatsTagDistributionItem[]>(IPC.STATS_TAG_DISTRIBUTION, [args]),
+  rhythm: (args: { projectId: string }) =>
+    invoke<StatsRhythmPoint[]>(IPC.STATS_RHYTHM, [args]),
+  progress: (args: { projectId: string }) =>
+    invoke<StatsProgress>(IPC.STATS_PROGRESS, [args]),
+};
+
 const api: WindowApi = {
   app: appApi,
   settings: settingsApi,
@@ -385,6 +401,7 @@ const api: WindowApi = {
   note: noteApi,
   term: termApi,
   export: exportApi,
+  stats: statsApi,
 };
 
 contextBridge.exposeInMainWorld('api', api);

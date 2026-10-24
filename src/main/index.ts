@@ -16,6 +16,7 @@ import { ScopeService } from './scope/scope-service';
 import { SessionService } from './session/session-service';
 import { SettingsService } from './settings/settings-service';
 import { runSmokeTest } from './smoke';
+import { StatsService } from './stats/stats-service';
 import { TermTransferService } from './terms/term-transfer-service';
 
 const IS_SMOKE_TEST = process.argv.includes('--smoke-test');
@@ -39,6 +40,7 @@ let detectService: DetectService | null = null;
 let scopeService: ScopeService | null = null;
 let settingsService: SettingsService | null = null;
 let sessionService: SessionService | null = null;
+let statsService: StatsService | null = null;
 let exitCaptureStarted = false;
 let allowWindowClose = false;
 let closeCaptureStarted = false;
@@ -96,6 +98,7 @@ function rebuildDataServices(): void {
   const nextLayer = new DataLayer(resolveDataRoot());
   const nextPackage = new ProjectPackageService(nextLayer);
   const nextTerms = new TermTransferService(nextLayer, () => mainWindow);
+  const nextStats = new StatsService(nextLayer);
   const nextWindowServices =
     mainWindow && mediaService ? createWindowDataServices(mainWindow, nextLayer, mediaService) : null;
   const previousDetect = detectService;
@@ -104,6 +107,7 @@ function rebuildDataServices(): void {
   dataLayer = nextLayer;
   packageService = nextPackage;
   termTransferService = nextTerms;
+  statsService = nextStats;
   captureService = nextWindowServices?.capture ?? null;
   exportService = nextWindowServices?.exportService ?? null;
   detectService = nextWindowServices?.detect ?? null;
@@ -169,6 +173,7 @@ registerIpcHandlers({
   getScope: () => scopeService,
   getSettings: () => settingsService,
   getSession: () => sessionService,
+  getStats: () => statsService,
 });
 
 app.whenReady().then(() => {
@@ -185,6 +190,7 @@ app.whenReady().then(() => {
     dataLayer = new DataLayer(resolveDataRoot());
     packageService = new ProjectPackageService(dataLayer);
     termTransferService = new TermTransferService(dataLayer, () => mainWindow);
+    statsService = new StatsService(dataLayer);
   }
 
   registerAssetProtocol(() => resolveAssetRoots());
@@ -221,6 +227,7 @@ function cleanupServices(): void {
   settingsService = null;
   sessionService?.flush();
   sessionService = null;
+  statsService = null;
 }
 
 app.on('before-quit', (event) => {

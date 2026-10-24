@@ -106,6 +106,11 @@ export const IPC = {
   EXPORT_STORYBOARD: 'export:storyboard',
   EXPORT_EVENT_PROGRESS: 'export:event:progress',
   EXPORT_EVENT_DONE: 'export:event:done',
+
+  /** stats 域（S01 §5.7） */
+  STATS_TAG_DISTRIBUTION: 'stats:tagDistribution',
+  STATS_RHYTHM: 'stats:rhythm',
+  STATS_PROGRESS: 'stats:progress',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

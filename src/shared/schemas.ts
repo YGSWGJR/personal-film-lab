@@ -427,4 +427,8 @@ export const storyboardExportArgsSchema = z.object({
   imageStrategy: z.enum(['both', 'thumbnail', 'full']).optional(),
 });
 
+export const statsProjectArgsSchema = z.object({
+  projectId: z.string().min(1),
+});
+
 export const emptyObjectSchema = z.object({}).optional();
