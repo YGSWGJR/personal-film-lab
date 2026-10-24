@@ -238,6 +238,7 @@ export interface WindowApi {
   tag: TagApi;
   note: NoteApi;
   term: TermApi;
+  export: ExportApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
@@ -408,6 +409,23 @@ export interface StillCreateArgs {
   annotations?: Annotation[];
 }
 
+export interface StillCaptureArgs {
+  projectId: string;
+  timeMs: number;
+  shotId?: string | null;
+  caption?: string | null;
+}
+
+export interface StillCaptureAtArgs {
+  shotId: string;
+  caption?: string | null;
+}
+
+export interface StillSetAnnotationArgs {
+  id: string;
+  annotations: Annotation[];
+}
+
 export interface StillUpdateArgs {
   id: string;
   patch: {
@@ -460,7 +478,7 @@ export interface Note {
   updatedAt: string;
 }
 
-export interface NoteSaveArgs {
+export interface NoteUpsertArgs {
   id?: string;
   projectId: string;
   shotId: string;
@@ -495,6 +513,75 @@ export interface TermUpdateArgs {
   };
 }
 
+export interface TermJsonEntry {
+  term: string;
+  definition: string;
+  category?: string;
+}
+
+export interface TermImportResult {
+  canceled: boolean;
+  path: string | null;
+  total: number;
+  imported: number;
+  skipped: number;
+}
+
+export interface TermExportResult {
+  canceled: boolean;
+  path: string | null;
+  count: number;
+}
+
+export type StoryboardFormat = 'pdf' | 'docx';
+export type StoryboardImageStrategy = 'both' | 'thumbnail' | 'full';
+export type StoryboardColumnKey =
+  | 'index'
+  | 'duration'
+  | 'thumbnail'
+  | 'shotSize'
+  | 'cameraMethod'
+  | 'image'
+  | 'dialogue'
+  | 'remark';
+
+export interface StoryboardHeader {
+  key: StoryboardColumnKey;
+  label: string;
+}
+
+export interface StoryboardExportArgs {
+  projectId: string;
+  format: StoryboardFormat;
+  range?: {
+    shotIds?: string[];
+  };
+  headers?: StoryboardHeader[];
+  imageStrategy?: StoryboardImageStrategy;
+}
+
+export interface StoryboardExportResult {
+  jobId: string;
+  canceled: boolean;
+  filePath: string | null;
+  format: StoryboardFormat;
+  rowCount: number;
+}
+
+export interface ExportProgressEvent {
+  jobId: string;
+  percent: number;
+  stage: 'prepare' | 'thumbnails' | 'render' | 'write';
+  message: string;
+}
+
+export interface ExportDoneEvent {
+  jobId: string;
+  filePath: string;
+  format: StoryboardFormat;
+  rowCount: number;
+}
+
 export interface ProjectApi {
   create(args: ProjectCreateArgs): Promise<IpcResult<Project>>;
   list(): Promise<IpcResult<Project[]>>;
@@ -518,8 +605,12 @@ export interface StillApi {
   list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Still[]>>;
   get(args: { id: string }): Promise<IpcResult<Still>>;
   create(args: StillCreateArgs): Promise<IpcResult<Still>>;
+  capture(args: StillCaptureArgs): Promise<IpcResult<Still>>;
+  captureAt(args: StillCaptureAtArgs): Promise<IpcResult<Still>>;
   update(args: StillUpdateArgs): Promise<IpcResult<Still>>;
+  setAnnotation(args: StillSetAnnotationArgs): Promise<IpcResult<Still>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  onCreated(listener: (still: Still) => void): () => void;
 }
 
 export interface TagApi {
@@ -533,7 +624,8 @@ export interface TagApi {
 
 export interface NoteApi {
   list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Note[]>>;
-  save(args: NoteSaveArgs): Promise<IpcResult<Note>>;
+  get(args: { id: string }): Promise<IpcResult<Note>>;
+  upsert(args: NoteUpsertArgs): Promise<IpcResult<Note>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
 }
 
@@ -542,4 +634,12 @@ export interface TermApi {
   create(args: TermCreateArgs): Promise<IpcResult<Term>>;
   update(args: TermUpdateArgs): Promise<IpcResult<Term>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  importJson(): Promise<IpcResult<TermImportResult>>;
+  exportJson(): Promise<IpcResult<TermExportResult>>;
+}
+
+export interface ExportApi {
+  storyboard(args: StoryboardExportArgs): Promise<IpcResult<StoryboardExportResult>>;
+  onProgress(listener: (event: ExportProgressEvent) => void): () => void;
+  onDone(listener: (event: ExportDoneEvent) => void): () => void;
 }

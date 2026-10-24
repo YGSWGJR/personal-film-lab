@@ -10,7 +10,7 @@ import {
   mediaProbeArgsSchema,
   mediaTranscodeProxyArgsSchema,
   noteListArgsSchema,
-  noteSaveArgsSchema,
+  noteUpsertArgsSchema,
   playerFrameStepArgsSchema,
   projectCreateArgsSchema,
   projectOpenArgsSchema,
@@ -20,8 +20,12 @@ import {
   shotCreateArgsSchema,
   shotUpdateArgsSchema,
   stillCreateArgsSchema,
+  stillCaptureArgsSchema,
+  stillCaptureAtArgsSchema,
   stillListArgsSchema,
+  stillSetAnnotationArgsSchema,
   stillUpdateArgsSchema,
+  storyboardExportArgsSchema,
   tagAssignArgsSchema,
   tagCreateArgsSchema,
   tagListArgsSchema,
@@ -64,15 +68,24 @@ import type {
   ShotCreateArgs,
   ShotUpdateArgs,
   Still,
+  StillCaptureArgs,
+  StillCaptureAtArgs,
   StillCreateArgs,
+  StillSetAnnotationArgs,
   StillUpdateArgs,
+  StoryboardExportArgs,
+  StoryboardExportResult,
+  ExportDoneEvent,
+  ExportProgressEvent,
   Tag,
   TagCreateArgs,
   TagUpdateArgs,
   Note,
-  NoteSaveArgs,
+  NoteUpsertArgs,
   Term,
   TermCreateArgs,
+  TermExportResult,
+  TermImportResult,
   TermUpdateArgs,
 } from '../shared/types';
 
@@ -124,7 +137,10 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.STILL_LIST]: stillListArgsSchema,
   [IPC.STILL_GET]: idArgsSchema,
   [IPC.STILL_CREATE]: stillCreateArgsSchema,
+  [IPC.STILL_CAPTURE]: stillCaptureArgsSchema,
+  [IPC.STILL_CAPTURE_AT]: stillCaptureAtArgsSchema,
   [IPC.STILL_UPDATE]: stillUpdateArgsSchema,
+  [IPC.STILL_SET_ANNOTATION]: stillSetAnnotationArgsSchema,
   [IPC.STILL_DELETE]: idArgsSchema,
 
   [IPC.TAG_LIST]: tagListArgsSchema,
@@ -135,13 +151,17 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.TAG_UNASSIGN]: tagAssignArgsSchema,
 
   [IPC.NOTE_LIST]: noteListArgsSchema,
-  [IPC.NOTE_SAVE]: noteSaveArgsSchema,
+  [IPC.NOTE_GET]: idArgsSchema,
+  [IPC.NOTE_UPSERT]: noteUpsertArgsSchema,
   [IPC.NOTE_DELETE]: idArgsSchema,
 
   [IPC.TERM_LIST]: termListArgsSchema,
   [IPC.TERM_CREATE]: termCreateArgsSchema,
   [IPC.TERM_UPDATE]: termUpdateArgsSchema,
   [IPC.TERM_DELETE]: idArgsSchema,
+  [IPC.TERM_IMPORT_JSON]: emptyArgsSchema,
+  [IPC.TERM_EXPORT_JSON]: emptyArgsSchema,
+  [IPC.EXPORT_STORYBOARD]: storyboardExportArgsSchema,
 };
 
 /** 主进程 → 渲染层事件白名单 */
@@ -151,6 +171,9 @@ const EVENT_WHITELIST = {
   onLoaded: IPC.PLAYER_EVENT_LOADED,
   onError: IPC.PLAYER_EVENT_ERROR,
   onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
+  onStillCreated: IPC.STILL_EVENT_CREATED,
+  onExportProgress: IPC.EXPORT_EVENT_PROGRESS,
+  onExportDone: IPC.EXPORT_EVENT_DONE,
 } as const;
 
 async function invoke<T>(channel: string, args: unknown[] = []): Promise<IpcResult<T>> {
@@ -234,8 +257,13 @@ const stillApi = {
   list: (args: { projectId?: string; shotId?: string }) => invoke<Still[]>(IPC.STILL_LIST, [args]),
   get: (args: { id: string }) => invoke<Still>(IPC.STILL_GET, [args]),
   create: (args: StillCreateArgs) => invoke<Still>(IPC.STILL_CREATE, [args]),
+  capture: (args: StillCaptureArgs) => invoke<Still>(IPC.STILL_CAPTURE, [args]),
+  captureAt: (args: StillCaptureAtArgs) => invoke<Still>(IPC.STILL_CAPTURE_AT, [args]),
   update: (args: StillUpdateArgs) => invoke<Still>(IPC.STILL_UPDATE, [args]),
+  setAnnotation: (args: StillSetAnnotationArgs) => invoke<Still>(IPC.STILL_SET_ANNOTATION, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.STILL_DELETE, [args]),
+  onCreated: (listener: (still: Still) => void) =>
+    subscribe<Still>(EVENT_WHITELIST.onStillCreated, listener),
 };
 
 const tagApi = {
@@ -251,7 +279,8 @@ const tagApi = {
 
 const noteApi = {
   list: (args: { projectId?: string; shotId?: string }) => invoke<Note[]>(IPC.NOTE_LIST, [args]),
-  save: (args: NoteSaveArgs) => invoke<Note>(IPC.NOTE_SAVE, [args]),
+  get: (args: { id: string }) => invoke<Note>(IPC.NOTE_GET, [args]),
+  upsert: (args: NoteUpsertArgs) => invoke<Note>(IPC.NOTE_UPSERT, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.NOTE_DELETE, [args]),
 };
 
@@ -260,6 +289,17 @@ const termApi = {
   create: (args: TermCreateArgs) => invoke<Term>(IPC.TERM_CREATE, [args]),
   update: (args: TermUpdateArgs) => invoke<Term>(IPC.TERM_UPDATE, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.TERM_DELETE, [args]),
+  importJson: () => invoke<TermImportResult>(IPC.TERM_IMPORT_JSON),
+  exportJson: () => invoke<TermExportResult>(IPC.TERM_EXPORT_JSON),
+};
+
+const exportApi = {
+  storyboard: (args: StoryboardExportArgs) =>
+    invoke<StoryboardExportResult>(IPC.EXPORT_STORYBOARD, [args]),
+  onProgress: (listener: (event: ExportProgressEvent) => void) =>
+    subscribe<ExportProgressEvent>(EVENT_WHITELIST.onExportProgress, listener),
+  onDone: (listener: (event: ExportDoneEvent) => void) =>
+    subscribe<ExportDoneEvent>(EVENT_WHITELIST.onExportDone, listener),
 };
 
 const api: WindowApi = {
@@ -272,6 +312,7 @@ const api: WindowApi = {
   tag: tagApi,
   note: noteApi,
   term: termApi,
+  export: exportApi,
 };
 
 contextBridge.exposeInMainWorld('api', api);

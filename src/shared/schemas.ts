@@ -217,6 +217,23 @@ export const stillCreateArgsSchema = z.object({
   annotations: z.array(z.record(z.string(), z.unknown())).max(500).optional(),
 });
 
+export const stillCaptureArgsSchema = z.object({
+  projectId: z.string().min(1),
+  timeMs: z.number().int().min(0),
+  shotId: z.string().min(1).nullable().optional(),
+  caption: nullableText(2000),
+});
+
+export const stillCaptureAtArgsSchema = z.object({
+  shotId: z.string().min(1),
+  caption: nullableText(2000),
+});
+
+export const stillSetAnnotationArgsSchema = z.object({
+  id: z.string().min(1),
+  annotations: z.array(z.record(z.string(), z.unknown())).max(500),
+});
+
 export const stillUpdateArgsSchema = z.object({
   id: z.string().min(1),
   patch: z.object({
@@ -275,7 +292,7 @@ export const noteListArgsSchema = z
     message: 'projectId 和 shotId 至少提供一个',
   });
 
-export const noteSaveArgsSchema = z.object({
+export const noteUpsertArgsSchema = z.object({
   id: z.string().min(1).optional(),
   projectId: z.string().min(1),
   shotId: z.string().min(1),
@@ -300,6 +317,37 @@ export const termUpdateArgsSchema = z.object({
     definition: z.string().max(20000).optional(),
     sortOrder: z.number().int().optional(),
   }),
+});
+
+const storyboardColumnKeySchema = z.enum([
+  'index',
+  'duration',
+  'thumbnail',
+  'shotSize',
+  'cameraMethod',
+  'image',
+  'dialogue',
+  'remark',
+]);
+
+export const storyboardExportArgsSchema = z.object({
+  projectId: z.string().min(1),
+  format: z.enum(['pdf', 'docx']),
+  range: z
+    .object({
+      shotIds: z.array(z.string().min(1)).max(100_000).optional(),
+    })
+    .optional(),
+  headers: z
+    .array(
+      z.object({
+        key: storyboardColumnKeySchema,
+        label: z.string().min(1).max(80),
+      }),
+    )
+    .max(8)
+    .optional(),
+  imageStrategy: z.enum(['both', 'thumbnail', 'full']).optional(),
 });
 
 export const emptyObjectSchema = z.object({}).optional();

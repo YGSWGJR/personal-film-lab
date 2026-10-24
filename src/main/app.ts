@@ -9,13 +9,13 @@ import { BrowserWindow, shell } from 'electron';
  */
 export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 960,
-    minHeight: 600,
+    width: 1440,
+    height: 900,
+    minWidth: 1200,
+    minHeight: 720,
     show: false,
     title: '个人拉片工作台',
-    backgroundColor: '#0f1115',
+    backgroundColor: '#0f172a',
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Note, NoteSaveArgs } from '../../shared/types';
+import type { Note, NoteUpsertArgs } from '../../shared/types';
 import type { DataLayer } from '../db';
 import { DataError } from '../errors';
 import { nowIso } from './projects';
@@ -40,7 +40,7 @@ export class NoteRepository {
     return mapNote(row);
   }
 
-  save(args: NoteSaveArgs): Note {
+  upsert(args: NoteUpsertArgs): Note {
     if (!this.layer.projects.exists(args.projectId)) {
       throw new DataError('PROJECT_NOT_FOUND', `项目不存在：${args.projectId}`, { projectId: args.projectId });
     }

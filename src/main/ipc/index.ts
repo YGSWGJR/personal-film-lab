@@ -12,7 +12,7 @@ import type {
   MediaProbeArgs,
   MediaProbeResult,
   Note,
-  NoteSaveArgs,
+  NoteUpsertArgs,
   PlayerState,
   Project,
   ProjectCreateArgs,
@@ -26,24 +26,34 @@ import type {
   ShotCreateArgs,
   ShotUpdateArgs,
   Still,
+  StillCaptureArgs,
+  StillCaptureAtArgs,
   StillCreateArgs,
+  StillSetAnnotationArgs,
   StillUpdateArgs,
   Tag,
   TagCreateArgs,
   TagUpdateArgs,
   Term,
   TermCreateArgs,
+  TermExportResult,
+  TermImportResult,
   TermUpdateArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
+  StoryboardExportArgs,
+  StoryboardExportResult,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
+import type { CaptureService } from '../capture/capture-service';
+import type { ExportService } from '../export/export-service';
 import { DataError } from '../../data/errors';
 import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
+import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
   getWindow(): BrowserWindow | null;
@@ -51,6 +61,9 @@ export interface IpcDeps {
   getMedia(): MediaService | null;
   getData(): DataLayer | null;
   getPackage(): ProjectPackageService | null;
+  getCapture(): CaptureService | null;
+  getTermTransfer(): TermTransferService | null;
+  getExport(): ExportService | null;
 }
 
 /**
@@ -76,6 +89,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requirePackage = (): ProjectPackageService => {
     const service = deps.getPackage();
     if (!service) throw new DataError('DATA_UNAVAILABLE', '项目包服务尚未初始化');
+    return service;
+  };
+  const requireCapture = (): CaptureService => {
+    const capture = deps.getCapture();
+    if (!capture) throw new DataError('DATA_UNAVAILABLE', '静帧截图服务尚未初始化');
+    return capture;
+  };
+  const requireTermTransfer = (): TermTransferService => {
+    const service = deps.getTermTransfer();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '术语导入导出服务尚未初始化');
+    return service;
+  };
+  const requireExport = (): ExportService => {
+    const service = deps.getExport();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '导出服务尚未初始化');
     return service;
   };
 
@@ -238,12 +266,26 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: { id: string }): Still => requireData().stills.get(args.id)),
   );
   ipcMain.handle(
+    IPC.STILL_CAPTURE,
+    withEnvelope((args: StillCaptureArgs): Promise<Still> => requireCapture().capture(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_CAPTURE_AT,
+    withEnvelope((args: StillCaptureAtArgs): Promise<Still> => requireCapture().captureAt(args)),
+  );
+  ipcMain.handle(
     IPC.STILL_CREATE,
     withEnvelope((args: StillCreateArgs): Still => requireData().stills.create(args)),
   );
   ipcMain.handle(
     IPC.STILL_UPDATE,
     withEnvelope((args: StillUpdateArgs): Still => requireData().stills.update(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_SET_ANNOTATION,
+    withEnvelope((args: StillSetAnnotationArgs): Still =>
+      requireCapture().setAnnotations(args.id, args.annotations),
+    ),
   );
   ipcMain.handle(
     IPC.STILL_DELETE,
@@ -294,8 +336,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: { projectId?: string; shotId?: string }): Note[] => requireData().notes.list(args)),
   );
   ipcMain.handle(
-    IPC.NOTE_SAVE,
-    withEnvelope((args: NoteSaveArgs): Note => requireData().notes.save(args)),
+    IPC.NOTE_GET,
+    withEnvelope((args: { id: string }): Note => requireData().notes.get(args.id)),
+  );
+  ipcMain.handle(
+    IPC.NOTE_UPSERT,
+    withEnvelope((args: NoteUpsertArgs): Note => requireData().notes.upsert(args)),
   );
   ipcMain.handle(
     IPC.NOTE_DELETE,
@@ -324,5 +370,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireData().terms.delete(args.id);
       return { deleted: true };
     }),
+  );
+  ipcMain.handle(
+    IPC.TERM_IMPORT_JSON,
+    withEnvelope((): Promise<TermImportResult> => requireTermTransfer().importJson()),
+  );
+  ipcMain.handle(
+    IPC.TERM_EXPORT_JSON,
+    withEnvelope((): Promise<TermExportResult> => requireTermTransfer().exportJson()),
+  );
+
+  // ---------- export ----------
+  ipcMain.handle(
+    IPC.EXPORT_STORYBOARD,
+    withEnvelope((args: StoryboardExportArgs): Promise<StoryboardExportResult> =>
+      requireExport().exportStoryboard(args),
+    ),
   );
 }

@@ -54,8 +54,12 @@ export const IPC = {
   STILL_LIST: 'still:list',
   STILL_GET: 'still:get',
   STILL_CREATE: 'still:create',
+  STILL_CAPTURE: 'still:capture',
+  STILL_CAPTURE_AT: 'still:captureAt',
   STILL_UPDATE: 'still:update',
+  STILL_SET_ANNOTATION: 'still:setAnnotation',
   STILL_DELETE: 'still:delete',
+  STILL_EVENT_CREATED: 'still:event:created',
 
   TAG_LIST: 'tag:list',
   TAG_CREATE: 'tag:create',
@@ -65,13 +69,20 @@ export const IPC = {
   TAG_UNASSIGN: 'tag:unassign',
 
   NOTE_LIST: 'note:list',
-  NOTE_SAVE: 'note:save',
+  NOTE_GET: 'note:get',
+  NOTE_UPSERT: 'note:upsert',
   NOTE_DELETE: 'note:delete',
 
   TERM_LIST: 'term:list',
   TERM_CREATE: 'term:create',
   TERM_UPDATE: 'term:update',
   TERM_DELETE: 'term:delete',
+  TERM_IMPORT_JSON: 'term:importJson',
+  TERM_EXPORT_JSON: 'term:exportJson',
+
+  EXPORT_STORYBOARD: 'export:storyboard',
+  EXPORT_EVENT_PROGRESS: 'export:event:progress',
+  EXPORT_EVENT_DONE: 'export:event:done',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
