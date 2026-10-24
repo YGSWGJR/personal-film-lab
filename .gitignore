@@ -31,3 +31,5 @@ resources/mpv/mpv.exe
 
 # 本地测试素材
 assets/samples/
+# FFmpeg 二进制（体积大，本地放置；见 README 媒体处理小节）
+resources/ffmpeg/*.exe
