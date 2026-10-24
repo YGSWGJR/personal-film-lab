@@ -211,12 +211,18 @@ export interface TranscodeProxyArgs {
   sourcePath: string;
   /** 缺省为 userData/lapian/proxies/<原名>-proxy.mp4；绝不覆盖源文件 */
   outputPath?: string;
-  /** 代理目标最大高度，默认 720（不放大） */
+  /** 兼容旧调用：仅用于 auto 分辨率模式的目标高度上限 */
   maxHeight?: number;
-  /** x264 CRF，默认 26 */
+  /** 兼容旧调用；当前代理编码参数由编码器策略决定 */
   crf?: number;
-  /** x264 preset，默认 veryfast */
+  /** 兼容旧调用；当前代理编码参数由编码器策略决定 */
   preset?: string;
+  /** 强制指定编码器名，仅用于调试/测试 */
+  encoder?: string;
+  /** 代理档位：极速/均衡/画质，默认 balanced */
+  proxyMode?: 'fast' | 'balanced' | 'quality';
+  /** 代理分辨率：auto 走档位规则，显式档覆盖自动规则，默认 auto */
+  proxyResolution?: 'auto' | 'p240' | 'p360' | 'p540' | 'p720' | 'p1080';
   /** 默认 60 分钟 */
   timeoutMs?: number;
 }
@@ -230,6 +236,14 @@ export interface TranscodeProxyResult {
   width: number;
   height: number;
   elapsedMs: number;
+  /** 实际使用的编码器名，如 h264_nvenc / libx264 */
+  encoderUsed: string;
+  /** 最终是否使用硬件编码器 */
+  hardwareAccelerated: boolean;
+  /** 硬编初始化/执行失败后回退软编时的原因 */
+  fallbackReason?: string;
+  /** 源音频是否直接复制而未重编码 */
+  audioCopied: boolean;
 }
 
 export interface CancelJobArgs {

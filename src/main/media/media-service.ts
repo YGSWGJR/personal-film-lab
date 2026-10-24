@@ -17,6 +17,7 @@ import type {
   TranscodeProxyArgs,
   TranscodeProxyResult,
 } from '../../shared/types';
+import { isHardwareEncoder, resolveAvailableEncoders, selectBestEncoder } from './encoders';
 import { resolveFfmpegBinaries, type FfmpegBinaries } from './ffmpeg-binaries';
 import { MediaError, diagnosticsOf, tailText } from './media-error';
 import { formatCommand, runProcess } from './process-runner';
@@ -57,6 +58,20 @@ const DEFAULT_FRAME_TIMEOUT_MS = 60_000;
 const DEFAULT_FRAMES_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_TRANSCODE_TIMEOUT_MS = 60 * 60_000;
 const MAX_STDERR_FOR_DIAGNOSTICS = 4000;
+const HARDWARE_ENCODER_FAILURE_RE = /encoder|not supported|Cannot load|No capable|initialization failed/i;
+const AUDIO_COPY_CODECS = new Set(['aac', 'mp3', 'ac3', 'eac3', 'opus', 'flac']);
+
+type ProxyMode = 'fast' | 'balanced' | 'quality';
+type ProxyResolution = 'auto' | 'p240' | 'p360' | 'p540' | 'p720' | 'p1080';
+
+export interface ProxySizeOptions {
+  srcWidth: number;
+  srcHeight: number;
+  mode: ProxyMode;
+  resolution?: ProxyResolution;
+  /** 兼容旧调用：仅覆盖 auto 分辨率模式的目标高度上限 */
+  maxHeight?: number;
+}
 
 /**
  * MediaService（docs/S01 §5.2）：
@@ -357,23 +372,29 @@ export class MediaService {
       throw new MediaError('PROBE_INCOMPLETE', '无法获取源文件时长，代理转码进度不可用');
     }
 
-    const targetHeight = Math.min(
-      clampInt(args.maxHeight ?? 720, 120, 4320),
-      meta.height > 0 ? meta.height : 720,
-    );
-    const sourceWidth = meta.width > 0 ? meta.width : Math.round((targetHeight * 16) / 9);
-    const targetWidth = Math.max(2, Math.round((sourceWidth * targetHeight) / (meta.height || targetHeight) / 2) * 2);
-    const evenHeight = Math.max(2, Math.round(targetHeight / 2) * 2);
-    const crf = clampInt(args.crf ?? 26, 1, 51);
-    const preset = args.preset ?? 'veryfast';
+    const encoder = args.encoder
+      ? { name: args.encoder }
+      : selectBestEncoder(await resolveAvailableEncoders());
+    const proxyMode = args.proxyMode ?? 'balanced';
+    const audioCopied = Boolean(meta.hasAudio && AUDIO_COPY_CODECS.has(meta.audioCodec ?? ''));
+    const proxySize = computeProxySize({
+      srcWidth: meta.width,
+      srcHeight: meta.height,
+      mode: proxyMode,
+      resolution: args.proxyResolution,
+      maxHeight: args.maxHeight,
+    });
+    const targetWidth = proxySize.width;
+    const evenHeight = proxySize.height;
     const timeoutMs = args.timeoutMs ?? DEFAULT_TRANSCODE_TIMEOUT_MS;
+    const gopFrames = Math.max(1, Math.round((meta.fps > 0 ? meta.fps : 30) * 2));
 
     const jobId = `transcode-${randomUUID()}`;
     const controller = new AbortController();
     this.jobs.set(jobId, { controller, stage: 'transcode', startedAt: Date.now() });
     this.emitProgress({ jobId, stage: 'transcode', percent: 0, message: '开始转码代理' });
 
-    const ffArgs = [
+    const buildTranscodeArgs = (encoderName: string): string[] => [
       '-hide_banner',
       '-loglevel',
       'error',
@@ -389,18 +410,15 @@ export class MediaService {
       '0:a:0?',
       '-vf',
       `scale=${targetWidth}:${evenHeight}`,
-      '-c:v',
-      'libx264',
-      '-preset',
-      preset,
-      '-crf',
-      String(crf),
+      ...buildVideoEncoderArgs(encoderName, proxyMode),
+      '-g',
+      String(gopFrames),
+      '-keyint_min',
+      String(gopFrames),
+      ...(encoderName === 'libx264' ? ['-sc_threshold', '0'] : []),
       '-pix_fmt',
       'yuv420p',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '128k',
+      ...(audioCopied ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k']),
       '-movflags',
       '+faststart',
       '-max_muxing_queue_size',
@@ -411,30 +429,63 @@ export class MediaService {
     let lastPercent = 0;
     let lastEmitAt = 0;
     const startedAt = Date.now();
+    let encoderUsed = encoder.name;
+    let fallbackReason: string | undefined;
+    let ffArgs = buildTranscodeArgs(encoderUsed);
 
     try {
-      const result = await runProcess({
+      const onStdoutLine = (line: string): void => {
+        const match = /^out_time_us=(\d+)$/u.exec(line.trim());
+        if (!match) return;
+        const percent = clampInt(Math.floor((Number(match[1]) / 1000 / meta.durationMs) * 100), 0, 99);
+        const now = Date.now();
+        if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
+          lastPercent = percent;
+          lastEmitAt = now;
+          this.emitProgress({
+            jobId,
+            stage: 'transcode',
+            percent,
+            message: `代理转码中 ${percent}%`,
+          });
+        }
+      };
+
+      let result = await runProcess({
         command: ffmpeg,
         args: ffArgs,
         timeoutMs,
         signal: controller.signal,
-        onStdoutLine: (line) => {
-          const match = /^out_time_us=(\d+)$/u.exec(line.trim());
-          if (!match) return;
-          const percent = clampInt(Math.floor((Number(match[1]) / 1000 / meta.durationMs) * 100), 0, 99);
-          const now = Date.now();
-          if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
-            lastPercent = percent;
-            lastEmitAt = now;
-            this.emitProgress({
-              jobId,
-              stage: 'transcode',
-              percent,
-              message: `代理转码中 ${percent}%`,
-            });
-          }
-        },
+        onStdoutLine,
       });
+
+      if (
+        !result.timedOut &&
+        !result.aborted &&
+        result.exitCode !== 0 &&
+        encoderUsed !== 'libx264' &&
+        HARDWARE_ENCODER_FAILURE_RE.test(result.stderr)
+      ) {
+        fallbackReason = `${encoderUsed}: ${tailText(result.stderr, 1000).trim() || '硬件编码器启动失败'}`;
+        this.removeQuietly(outputPath);
+        encoderUsed = 'libx264';
+        ffArgs = buildTranscodeArgs(encoderUsed);
+        lastPercent = 0;
+        lastEmitAt = 0;
+        this.emitProgress({
+          jobId,
+          stage: 'transcode',
+          percent: 0,
+          message: '硬件编码不可用，正在回退 libx264',
+        });
+        result = await runProcess({
+          command: ffmpeg,
+          args: ffArgs,
+          timeoutMs,
+          signal: controller.signal,
+          onStdoutLine,
+        });
+      }
 
       if (result.timedOut) {
         this.removeQuietly(outputPath);
@@ -462,7 +513,14 @@ export class MediaService {
 
       const outputStat = this.statOrThrow(outputPath, 'TRANSCODE_FAILED', '代理文件未生成');
       const outputInfo = await this.runProbe(outputPath, 30_000).catch(() => null);
+      const elapsedMs = Date.now() - startedAt;
+      const hardwareAccelerated = isHardwareEncoder(encoderUsed);
+      const finalWidth = outputInfo?.width ?? targetWidth;
+      const finalHeight = outputInfo?.height ?? evenHeight;
       this.emitProgress({ jobId, stage: 'transcode', percent: 100, message: '代理转码完成' });
+      console.info(
+        `[transcode] complete: mode=${proxyMode} encoderUsed=${encoderUsed} width=${finalWidth} height=${finalHeight} elapsedMs=${elapsedMs} hardwareAccelerated=${hardwareAccelerated} audio=${audioCopied ? 'copy' : 'aac'}`,
+      );
 
       return {
         sourcePath,
@@ -470,9 +528,13 @@ export class MediaService {
         sourceSizeBytes: sourceStat.size,
         sizeBytes: outputStat.size,
         durationMs: outputInfo?.durationMs ?? meta.durationMs,
-        width: outputInfo?.width ?? targetWidth,
-        height: outputInfo?.height ?? evenHeight,
-        elapsedMs: Date.now() - startedAt,
+        width: finalWidth,
+        height: finalHeight,
+        elapsedMs,
+        encoderUsed,
+        hardwareAccelerated,
+        fallbackReason,
+        audioCopied,
       };
     } finally {
       this.jobs.delete(jobId);
@@ -668,6 +730,120 @@ function normalizeFormat(format: FrameFormat | undefined): FrameFormat {
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+export function computeProxySize(opts: ProxySizeOptions): { width: number; height: number } {
+  const srcWidth = Number.isFinite(opts.srcWidth) && opts.srcWidth > 0 ? opts.srcWidth : 16;
+  const srcHeight = Number.isFinite(opts.srcHeight) && opts.srcHeight > 0 ? opts.srcHeight : 9;
+  const sourceEvenHeight = Math.max(2, Math.floor(srcHeight / 2) * 2);
+  const explicitHeight = explicitResolutionHeight(opts.resolution);
+  let targetHeight: number;
+
+  if (explicitHeight !== null) {
+    targetHeight = Math.min(sourceEvenHeight, explicitHeight);
+  } else {
+    const maxHeight = opts.mode === 'quality' ? 1080 : 540;
+    targetHeight = Math.max(240, Math.min(srcHeight / 2, maxHeight));
+    if (opts.maxHeight !== undefined && Number.isFinite(opts.maxHeight)) {
+      targetHeight = Math.min(targetHeight, Math.max(2, opts.maxHeight));
+    }
+    targetHeight = Math.min(sourceEvenHeight, targetHeight);
+  }
+
+  targetHeight = Math.max(2, Math.floor(targetHeight / 2) * 2);
+  const width = Math.max(2, Math.round((srcWidth * targetHeight) / srcHeight / 2) * 2);
+  return { width, height: targetHeight };
+}
+
+function explicitResolutionHeight(resolution: ProxyResolution | undefined): number | null {
+  switch (resolution) {
+    case 'p240':
+      return 240;
+    case 'p360':
+      return 360;
+    case 'p540':
+      return 540;
+    case 'p720':
+      return 720;
+    case 'p1080':
+      return 1080;
+    default:
+      return null;
+  }
+}
+
+function buildVideoEncoderArgs(encoderName: string, mode: ProxyMode): string[] {
+  switch (encoderName) {
+    case 'h264_nvenc': {
+      const preset = mode === 'fast' ? 'p6' : mode === 'quality' ? 'p4' : 'p5';
+      const cq = mode === 'fast' ? '30' : mode === 'quality' ? '24' : '28';
+      const maxrate = mode === 'quality' ? '6M' : '4M';
+      const bufsize = mode === 'quality' ? '8M' : '6M';
+      return [
+        '-c:v', 'h264_nvenc',
+        '-preset', preset,
+        '-tune', 'hq',
+        '-rc', 'vbr',
+        '-cq', cq,
+        '-b:v', '0',
+        '-maxrate', maxrate,
+        '-bufsize', bufsize,
+      ];
+    }
+    case 'hevc_nvenc': {
+      const preset = mode === 'fast' ? 'p6' : mode === 'quality' ? 'p4' : 'p5';
+      const cq = mode === 'fast' ? '30' : mode === 'quality' ? '24' : '30';
+      const maxrate = mode === 'quality' ? '6M' : '3M';
+      const bufsize = mode === 'quality' ? '8M' : '4M';
+      return [
+        '-c:v', 'hevc_nvenc',
+        '-preset', preset,
+        '-tune', 'hq',
+        '-rc', 'vbr',
+        '-cq', cq,
+        '-b:v', '0',
+        '-maxrate', maxrate,
+        '-bufsize', bufsize,
+      ];
+    }
+    case 'h264_qsv':
+      return ['-c:v', 'h264_qsv', '-global_quality', qsvQuality(mode, '28')];
+    case 'hevc_qsv':
+      return ['-c:v', 'hevc_qsv', '-global_quality', qsvQuality(mode, '30')];
+    case 'h264_amf':
+      return [
+        '-c:v', 'h264_amf',
+        '-quality', 'balanced',
+        '-qp_i', amfQuality(mode, '26'),
+        '-qp_p', amfQuality(mode, '26'),
+      ];
+    case 'hevc_amf':
+      return [
+        '-c:v', 'hevc_amf',
+        '-quality', 'balanced',
+        '-qp_i', amfQuality(mode, '28'),
+        '-qp_p', amfQuality(mode, '28'),
+      ];
+    case 'libx264':
+      return x264Args(mode);
+    default:
+      return ['-c:v', encoderName];
+  }
+}
+
+function qsvQuality(mode: ProxyMode, balancedQuality: string): string {
+  return mode === 'fast' ? '30' : mode === 'quality' ? '24' : balancedQuality;
+}
+
+function amfQuality(mode: ProxyMode, balancedQuality: string): string {
+  return mode === 'fast' ? '30' : mode === 'quality' ? '22' : balancedQuality;
+}
+
+function x264Args(mode: ProxyMode): string[] {
+  const tune = ['-tune', 'fastdecode'];
+  if (mode === 'fast') return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', ...tune];
+  if (mode === 'quality') return ['-c:v', 'libx264', '-preset', 'medium', '-crf', '24', ...tune];
+  return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', ...tune];
 }
 
 function firstFinite(values: Array<string | number | undefined | null>): number | null {

@@ -111,6 +111,9 @@ export const mediaTranscodeProxyArgsSchema = z.object({
   maxHeight: z.number().int().min(120).max(4320).optional(),
   crf: z.number().int().min(1).max(51).optional(),
   preset: z.string().min(1).max(20).optional(),
+  encoder: z.string().min(1).max(32).optional(),
+  proxyMode: z.enum(['fast', 'balanced', 'quality']).optional(),
+  proxyResolution: z.enum(['auto', 'p240', 'p360', 'p540', 'p720', 'p1080']).optional(),
   timeoutMs: z.number().int().positive().max(6 * 3_600_000).optional(),
 });
 
