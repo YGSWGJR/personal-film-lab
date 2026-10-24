@@ -9,6 +9,7 @@ import DetectionModal from './components/DetectionModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import SettingsModal from './components/SettingsModal.vue';
+import StatsModal from './components/StatsModal.vue';
 import ShotDetailPanel from './components/ShotDetailPanel.vue';
 import ShotListPanel from './components/ShotListPanel.vue';
 import TermEditorModal from './components/TermEditorModal.vue';
@@ -94,6 +95,7 @@ const settingsOpen = ref(false);
 const settings = ref<Settings | null>(null);
 const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
+const statsOpen = ref(false);
 const shotScrollTop = ref(0);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
@@ -1077,6 +1079,22 @@ async function closeSettings(): Promise<void> {
   if (lastPlayerBounds) void window.api.player.setBounds(lastPlayerBounds);
 }
 
+async function openStats(): Promise<void> {
+  if (demoMode.value || !activeProject.value) {
+    showToast('请先打开一个真实项目，再查看学习统计。');
+    return;
+  }
+  statsOpen.value = true;
+  await nextTick();
+  void window.api.player.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+}
+
+async function closeStats(): Promise<void> {
+  statsOpen.value = false;
+  await nextTick();
+  if (lastPlayerBounds) void window.api.player.setBounds(lastPlayerBounds);
+}
+
 async function saveSettings(value: SettingsSetArgs): Promise<void> {
   if (settingsSaving.value) return;
   const previousRoot = settings.value?.dataRoot;
@@ -1528,7 +1546,7 @@ onBeforeUnmount(() => {
         <button class="nav-item icon-only" type="button" title="保存项目" @click="saveProject">
           <AppIcon name="save" :size="16" />
         </button>
-        <button class="nav-item icon-only" type="button" title="学习统计">
+        <button class="nav-item icon-only" type="button" title="学习统计" @click="openStats">
           <AppIcon name="chart" :size="16" />
         </button>
         <button class="nav-item icon-only" type="button" title="设置" @click="openSettings">
@@ -1644,6 +1662,13 @@ onBeforeUnmount(() => {
       :error="settingsError"
       @close="closeSettings"
       @save="saveSettings"
+    />
+
+    <StatsModal
+      :open="statsOpen"
+      :project-id="activeProject?.id ?? null"
+      :project-name="activeProject?.name ?? ''"
+      @close="closeStats"
     />
 
     <DetectionModal
