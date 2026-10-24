@@ -54,7 +54,8 @@ function timeFromClientX(clientX: number, element: HTMLElement | null): number {
   if (!rect || rect.width <= 0) return 0;
   const raw = ((clientX - rect.left) / rect.width) * safeDuration.value;
   const frameMs = 1000 / Math.max(1, props.fps || 24);
-  return Math.max(0, Math.min(safeDuration.value, Math.round(raw / frameMs) * frameMs));
+  const frameAlignedMs = Math.round(raw / frameMs) * frameMs;
+  return Math.max(0, Math.min(Math.round(safeDuration.value), Math.round(frameAlignedMs)));
 }
 
 function seekFromPointer(event: PointerEvent): void {

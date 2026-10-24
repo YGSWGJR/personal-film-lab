@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import emptyProjectImage from '../../../assets/design/design_empty_project_1024x768.png';
+import emptyShotsImage from '../../../assets/design/design_empty_shots_1024x768.png';
+import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x768.png';
+import cutIcon from '../../../assets/design/design_icon_cut_48.png';
 import AppIcon from './components/AppIcon.vue';
+import DetectionModal from './components/DetectionModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import ShotDetailPanel from './components/ShotDetailPanel.vue';
@@ -19,9 +24,12 @@ import type { SkeletonState } from './env';
 import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from './types/workspace';
 import type {
   AppInfo,
+  DetectProgressEvent,
+  DetectResult,
   ExportProgressEvent,
   IpcResult,
   MediaInfo,
+  MediaProgressEvent,
   Note,
   PlayerErrorEvent,
   PlayerState,
@@ -64,6 +72,17 @@ const termSaving = ref(false);
 const exportOpen = ref(false);
 const exporting = ref(false);
 const exportProgress = ref<ExportProgressEvent | null>(null);
+const transcoding = ref(false);
+const transcodeProgress = ref<MediaProgressEvent | null>(null);
+const detectionOpen = ref(false);
+const detecting = ref(false);
+const applyingDetection = ref(false);
+const detectionProgress = ref<DetectProgressEvent | null>(null);
+const detectionResult = ref<DetectResult | null>(null);
+const detectionError = ref<string | null>(null);
+const detectionJobId = ref<string | null>(null);
+const loadedPlaybackPath = ref<string | null>(null);
+let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -102,9 +121,16 @@ const selectedStill = computed(() => {
       })[0] ?? null
   );
 });
-const poster = computed(() =>
-  selectedStill.value ? assetUrl(selectedStill.value) : selectedShot.value?.thumbnail ?? DEMO_THUMBNAILS[2],
-);
+const videoPoster = computed(() => {
+  if (selectedShot.value?.thumbnail) return selectedShot.value.thumbnail;
+  if (demoMode.value) return DEMO_THUMBNAILS[2];
+  return activeProject.value ? emptyShotsImage : emptyProjectImage;
+});
+const detailPoster = computed(() => {
+  if (selectedStill.value) return assetUrl(selectedStill.value);
+  if (selectedShot.value && demoMode.value) return selectedShot.value.thumbnail;
+  return emptyStillsImage;
+});
 const displayDurationMs = computed(() => {
   if (player.hasFile && player.durationMs > 0) return player.durationMs;
   if (!demoMode.value && activeProject.value?.media.durationMs) return activeProject.value.media.durationMs;
@@ -165,27 +191,20 @@ function seedDemoNoteMap(items: WorkspaceShot[], loaded: Note[]): void {
   }
 }
 
-function shotTitleFor(shot: Shot, index: number, sampleProject: boolean): string {
-  if (sampleProject) {
-    const seed = createDemoShots(shot.projectId);
-    return seed[index % seed.length]?.title ?? `镜头 ${shot.index}`;
-  }
-  if (shot.shotSize) return `${shot.shotSize} · ${String(shot.index).padStart(2, '0')}`;
-  return `镜头 ${String(shot.index).padStart(2, '0')}`;
-}
-
-function mapShots(project: Project, items: Shot[], stills: Still[]): WorkspaceShot[] {
-  const sampleProject = isSampleMedia(project.source.path ?? project.media.filename ?? '');
-  const demoSeed = createDemoShots(project.id);
+function mapShots(items: Shot[], stills: Still[]): WorkspaceShot[] {
   return items.map((shot, index) => {
-    const still = stills.find((item) => item.shotId === shot.id);
+    const shotStills = stills.filter((item) => item.shotId === shot.id);
+    const thumbnailStill =
+      shotStills.find((item) => item.role === 'auto-thumb' && item.thumbPath) ??
+      shotStills.find((item) => Boolean(item.thumbPath));
+    const still = shotStills.find((item) => item.role === 'main') ?? shotStills[0];
     return {
       ...shot,
-      thumbnail: sampleProject
-        ? demoSeed[index % demoSeed.length]?.thumbnail ?? DEMO_THUMBNAILS[index % DEMO_THUMBNAILS.length]
-        : DEMO_THUMBNAILS[index % DEMO_THUMBNAILS.length],
-      title: shotTitleFor(shot, index, sampleProject),
-      scene: sampleProject ? demoSeed[index % demoSeed.length]?.scene ?? '镜头序列' : `镜头序列 · ${Math.floor(index / 4) + 1}`,
+      thumbnail: thumbnailStill ? assetUrl(thumbnailStill) : emptyShotsImage,
+      title: shot.shotSize
+        ? `${shot.shotSize} · ${String(shot.index).padStart(2, '0')}`
+        : `镜头 ${String(shot.index).padStart(2, '0')}`,
+      scene: `镜头序列 · ${Math.floor(index / 8) + 1}`,
       noteId: noteIds[shot.id],
       remark: shot.remark ?? still?.caption ?? null,
     };
@@ -281,7 +300,7 @@ async function loadProject(project: Project): Promise<void> {
   const loadedNotes = unwrap(noteResult);
   if (!loadedShots || !loadedStills || !loadedNotes) return;
 
-  const mapped = mapShots(project, loadedShots, loadedStills);
+  const mapped = mapShots(loadedShots, loadedStills);
   shots.value = mapped;
   projectStills.value = loadedStills;
   seedDemoNoteMap(mapped, loadedNotes);
@@ -289,43 +308,28 @@ async function loadProject(project: Project): Promise<void> {
   selectedId.value = mapped[0]?.id ?? null;
   previewTimeMs.value = mapped[0]?.startMs ?? 0;
   await Promise.all([loadTerms(true, true), loadTags()]);
-  await assignDefaultSampleTags(project, mapped);
 
-  if (project.source.path && !player.hasFile) {
-    await openMediaPath(project.source.path, false);
+  const playbackCandidates = [project.media.proxyPath, project.source.path]
+    .filter((path): path is string => Boolean(path))
+    .filter((path, index, paths) => paths.findIndex((item) => samePath(item, path)) === index);
+  for (const [index, path] of playbackCandidates.entries()) {
+    if (player.hasFile && samePath(loadedPlaybackPath.value, path)) return;
+    if (await openMediaPath(path, false, false)) {
+      if (index > 0) showToast('代理文件不可用，已切换为源文件播放。');
+      return;
+    }
+  }
+  if (playbackCandidates.length > 0) {
+    await closePlayer();
+    showToast('项目媒体文件无法打开，请检查文件是否已移动。', 'error', '播放器打开失败');
+  } else if (player.hasFile) {
+    await closePlayer();
   }
 }
 
-async function assignDefaultSampleTags(project: Project, projectShots: WorkspaceShot[]): Promise<void> {
-  if (!isSampleMedia(project.source.path ?? project.media.filename ?? '') || projectShots.length > 250) return;
-  const byName = new Map(tags.value.map((tag) => [`${tag.category}:${tag.name}`, tag]));
-  for (const shot of projectShots) {
-    if (shot.tagIds.length > 0) continue;
-    const camera = shot.cameraMethod ?? '固定';
-    const cameraTag = camera.includes('推')
-      ? '推'
-      : camera.includes('拉')
-        ? '拉'
-        : camera.includes('摇')
-          ? '摇'
-          : camera.includes('跟') || camera.includes('移')
-            ? '跟'
-            : '固定';
-    const ids = [
-      byName.get(`景别:${shot.shotSize ?? '中景'}`)?.id,
-      byName.get(`运镜:${cameraTag}`)?.id,
-      byName.get('光线:冷光')?.id,
-      byName.get('声音:对白')?.id,
-      byName.get('剪辑:硬切')?.id,
-    ].filter((id): id is string => Boolean(id));
-    if (ids.length === 0) continue;
-    const result = await window.api.tag.assign({ shotId: shot.id, tagIds: ids });
-    if (result.ok) shot.tagIds = result.data.tagIds;
-  }
-}
-
-function isSampleMedia(path: string): boolean {
-  return /sword\s*art\s*online|刀剑神域|kamigami/i.test(path);
+function samePath(left: string | null, right: string): boolean {
+  if (!left) return false;
+  return left.replaceAll('\\', '/').toLowerCase() === right.replaceAll('\\', '/').toLowerCase();
 }
 
 function cleanProjectName(filePath: string): string {
@@ -355,42 +359,6 @@ async function createProjectForMedia(media: MediaInfo): Promise<Project | null> 
   );
   if (!project) return null;
 
-  if (isSampleMedia(media.path)) {
-    const seeds = createDemoShots(project.id);
-    const sourceDuration = probe?.durationMs ?? media.durationMs;
-    const cycleSpan = seeds.at(-1)?.endMs ?? DEMO_PROJECT.durationMs;
-    let shotIndex = 1;
-    for (let cycleStart = 0; cycleStart < sourceDuration; cycleStart += cycleSpan) {
-      for (const seed of seeds) {
-        const startMs = cycleStart + seed.startMs;
-        const endMs = Math.min(sourceDuration, cycleStart + seed.endMs);
-        if (endMs - startMs < 350) break;
-        const created = unwrap(
-          await window.api.shot.create({
-            projectId: project.id,
-            startMs,
-            endMs,
-            index: shotIndex,
-            shotSize: seed.shotSize,
-            cameraMethod: seed.cameraMethod,
-            dialogue: seed.dialogue,
-            remark: seed.remark,
-          }),
-        );
-        if (created && shotIndex % 2 === 1) {
-          unwrap(
-            await window.api.note.upsert({
-              projectId: project.id,
-              shotId: created.id,
-              text: seed.remark ?? '',
-            }),
-          );
-        }
-        shotIndex += 1;
-      }
-    }
-  }
-
   return project;
 }
 
@@ -400,25 +368,86 @@ async function openVideo(): Promise<void> {
   try {
     const media = unwrap(await window.api.player.openDialog());
     if (!media) return;
+    loadedPlaybackPath.value = media.path;
     const project = await createProjectForMedia(media);
     if (project) {
-      await loadProject(project);
-      showToast('已创建项目并加载影片，可从左侧镜头或时间轴跳转。', 'success');
+      let targetProject = project;
+      let usedProxy = false;
+      transcoding.value = true;
+      transcodeProgress.value = {
+        jobId: '',
+        stage: 'transcode',
+        percent: 0,
+        message: '正在生成 720p 代理',
+      };
+      const proxy = unwrap(
+        await window.api.media.transcodeProxy({
+          sourcePath: media.path,
+          maxHeight: 720,
+          crf: 26,
+        }),
+      );
+      if (proxy) {
+        const updated = unwrap(
+          await window.api.project.update({
+            id: project.id,
+            patch: { media: { proxyPath: proxy.outputPath } },
+          }),
+        );
+        if (updated) {
+          targetProject = updated;
+          usedProxy = true;
+        }
+      }
+      await loadProject(targetProject);
+      showToast(
+        usedProxy
+          ? '影片导入完成，可开始镜头检测或手动打点。'
+          : '代理转码失败，当前直接使用源文件；仍可继续拉片。',
+        usedProxy ? 'success' : 'error',
+      );
     }
   } finally {
+    transcoding.value = false;
+    transcodeProgress.value = null;
     busy.value = false;
   }
 }
 
-async function openMediaPath(path: string, autoplay: boolean): Promise<void> {
-  const state = unwrap(await window.api.player.open({ mediaPath: path }));
-  if (!state) return;
-  player.hasFile = true;
-  Object.assign(player, state);
-  if (autoplay) {
-    const next = unwrap(await window.api.player.play());
-    if (next) Object.assign(player, next);
+async function openMediaPath(path: string, autoplay: boolean, reportError = true): Promise<boolean> {
+  try {
+    const result = await window.api.player.open({ mediaPath: path });
+    if (!result.ok) {
+      if (reportError) showToast(result.error.message, 'error', result.error.code);
+      return false;
+    }
+    loadedPlaybackPath.value = path;
+    player.hasFile = true;
+    Object.assign(player, result.data);
+    if (autoplay) {
+      const next = unwrap(await window.api.player.play());
+      if (next) Object.assign(player, next);
+    }
+    return true;
+  } catch (error) {
+    if (reportError) showToast(error instanceof Error ? error.message : String(error), 'error', '播放器打开失败');
+    return false;
   }
+}
+
+async function closePlayer(): Promise<void> {
+  await window.api.player.close();
+  loadedPlaybackPath.value = null;
+  Object.assign(player, {
+    hasFile: false,
+    timeMs: 0,
+    durationMs: 0,
+    paused: true,
+    ended: false,
+    width: 0,
+    height: 0,
+    fps: 0,
+  });
 }
 
 async function togglePlayback(): Promise<void> {
@@ -426,7 +455,7 @@ async function togglePlayback(): Promise<void> {
   busy.value = true;
   try {
     if (!player.hasFile) {
-      const path = activeProject.value?.source.path;
+      const path = activeProject.value?.media.proxyPath || activeProject.value?.source.path;
       if (path) {
         await openMediaPath(path, true);
       } else {
@@ -489,8 +518,14 @@ async function commitBoundary(change: BoundaryChange): Promise<void> {
       window.api.shot.update({ id: shot.id, patch: { endMs: change.timeMs } }),
       window.api.shot.update({ id: next.id, patch: { startMs: change.timeMs } }),
     ]);
-    if (updatedShot.ok) Object.assign(shot, updatedShot.data);
-    if (updatedNext.ok) Object.assign(next, updatedNext.data);
+    if (!updatedShot.ok || !updatedNext.ok) {
+      const failure = !updatedShot.ok ? updatedShot.error : !updatedNext.ok ? updatedNext.error : null;
+      showToast(failure?.message ?? '镜头边界保存失败', 'error', failure?.code);
+      if (activeProject.value) await loadProject(activeProject.value);
+      return;
+    }
+    Object.assign(shot, updatedShot.data);
+    Object.assign(next, updatedNext.data);
     showToast('镜头边界已保存。', 'success');
   } finally {
     busy.value = false;
@@ -553,10 +588,16 @@ async function addShotAtPlayhead(): Promise<void> {
 async function updateShotLanguage(patch: { shotSize?: string; cameraMethod?: string }): Promise<void> {
   const shot = selectedShot.value;
   if (!shot) return;
+  const previous = { shotSize: shot.shotSize, cameraMethod: shot.cameraMethod };
   Object.assign(shot, patch);
   if (demoMode.value) return;
   const result = await window.api.shot.update({ id: shot.id, patch });
-  if (result.ok) Object.assign(shot, result.data);
+  if (result.ok) {
+    Object.assign(shot, result.data);
+  } else {
+    Object.assign(shot, previous);
+    showToast(result.error.message, 'error', result.error.code);
+  }
 }
 
 async function toggleTag(tag: Tag): Promise<void> {
@@ -697,6 +738,10 @@ function openExport(): void {
     showToast('请先打开一个本地影片项目，再导出分镜本。');
     return;
   }
+  if (shots.value.length === 0) {
+    showToast('当前项目还没有镜头，请先运行镜头检测或手动打点。');
+    return;
+  }
   exportProgress.value = null;
   exportOpen.value = true;
 }
@@ -803,7 +848,10 @@ function insertTerm(term: DetailTerm): void {
 
 async function captureStill(): Promise<void> {
   const shot = selectedShot.value;
-  if (!shot) return;
+  if (!shot) {
+    showToast('请先选择一个镜头，再截取静帧。');
+    return;
+  }
   if (
     demoMode.value ||
     !activeProject.value ||
@@ -883,8 +931,151 @@ async function saveProject(): Promise<void> {
   }
 }
 
-function openSmartCut(): void {
-  showToast('检测服务尚未接入；当前可直接拖动橙色镜头边界完成手动校准。');
+function stopDetectionPolling(): void {
+  if (!detectionPollTimer) return;
+  clearInterval(detectionPollTimer);
+  detectionPollTimer = null;
+}
+
+function openDetection(): void {
+  if (busy.value || transcoding.value) return;
+  if (demoMode.value || !activeProject.value) {
+    showToast('请先导入本地影片，再运行镜头检测。');
+    return;
+  }
+  detectionOpen.value = true;
+  void startDetection();
+}
+
+function showUrlImportPending(): void {
+  showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
+}
+
+async function toggleDemoWorkspace(): Promise<void> {
+  if (!demoMode.value) {
+    if (detecting.value) await cancelDetection();
+    await closePlayer();
+    activeProject.value = null;
+    demoMode.value = true;
+    detectionOpen.value = false;
+    const fallback = createDemoShots();
+    shots.value = fallback;
+    markers.value = createDemoMarkers(fallback);
+    projectStills.value = [];
+    selectedId.value = fallback[2]?.id ?? null;
+    previewTimeMs.value = fallback[2]?.startMs ?? 0;
+    for (const key of Object.keys(notes)) delete notes[key];
+    for (const shot of fallback) notes[shot.id] = shot.remark ?? '';
+    tags.value = createDemoTags();
+    terms.value = createDemoTerms();
+    showToast('已切换到示例工作区，数据库项目未被修改。');
+    return;
+  }
+
+  const projects = unwrap(await window.api.project.list());
+  if (projects && projects.length > 0) {
+    await loadProject(projects[0]);
+    showToast(`已打开最近项目：${projects[0].name}`, 'success');
+  } else {
+    await openVideo();
+  }
+}
+
+async function startDetection(): Promise<void> {
+  if (!activeProject.value || detecting.value) return;
+  stopDetectionPolling();
+  detecting.value = true;
+  applyingDetection.value = false;
+  detectionError.value = null;
+  detectionResult.value = null;
+  detectionProgress.value = {
+    jobId: '',
+    stage: 'extractFrames',
+    percent: 0,
+  };
+  const started = unwrap(
+    await window.api.detect.run({
+      projectId: activeProject.value.id,
+      dryRun: true,
+      options: {
+        sensitivity: 0.62,
+        minShotSeconds: 0.5,
+        filterTransitions: true,
+        weights: { s: 0.3, c: 0.3, h: 0.4 },
+        intervalMs: 500,
+      },
+    }),
+  );
+  if (!started) {
+    detecting.value = false;
+    detectionError.value = '无法启动镜头检测';
+    return;
+  }
+  detectionJobId.value = started.jobId;
+  detectionPollTimer = setInterval(async () => {
+    if (!detectionJobId.value) return;
+    const result = await window.api.detect.getJob({ jobId: detectionJobId.value });
+    if (!result.ok) {
+      detectionError.value = result.error.message;
+      detecting.value = false;
+      stopDetectionPolling();
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    if (result.data.status === 'error') {
+      detectionError.value = result.data.error ?? '镜头检测失败';
+      detecting.value = false;
+      stopDetectionPolling();
+      showToast(detectionError.value, 'error', '镜头检测失败');
+    } else if (result.data.status === 'cancelled') {
+      detecting.value = false;
+      stopDetectionPolling();
+    }
+  }, 500);
+}
+
+async function cancelDetection(): Promise<void> {
+  if (!detectionJobId.value) return;
+  unwrap(await window.api.detect.cancel({ jobId: detectionJobId.value }));
+  stopDetectionPolling();
+  detecting.value = false;
+  detectionOpen.value = false;
+  showToast('镜头检测已取消。');
+}
+
+function closeDetection(): void {
+  if (detecting.value) {
+    void cancelDetection();
+    return;
+  }
+  stopDetectionPolling();
+  detectionOpen.value = false;
+}
+
+async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<void> {
+  if (!activeProject.value || !detectionResult.value || applyingDetection.value) return;
+  applyingDetection.value = true;
+  try {
+    const result = unwrap(
+      await window.api.detect.apply({
+        projectId: activeProject.value.id,
+        shotIds: shotIds.map(String),
+        sceneIds: sceneIds.map(String),
+      }),
+    );
+    if (!result) return;
+    const project = activeProject.value;
+    detectionOpen.value = false;
+    stopDetectionPolling();
+    await loadProject(project);
+    showToast(`已应用 ${result.applied} 个检测镜头。`, 'success');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    detectionError.value = message;
+    showToast(message, 'error', '镜头应用失败');
+  } finally {
+    applyingDetection.value = false;
+  }
 }
 
 function setPlayerBounds(bounds: RenderBounds): void {
@@ -984,6 +1175,7 @@ onMounted(async () => {
       if (active && active.id !== selectedId.value) selectedId.value = active.id;
     }),
     api.player.onLoaded((media: MediaInfo) => {
+      loadedPlaybackPath.value = media.path;
       player.hasFile = true;
       player.durationMs = media.durationMs;
       player.width = media.width;
@@ -991,6 +1183,24 @@ onMounted(async () => {
       player.fps = media.fps;
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
+    api.media.onProgress((event) => {
+      if (transcoding.value && event.stage === 'transcode') {
+        transcodeProgress.value = event;
+      }
+    }),
+    api.detect.onProgress((event) => {
+      if (!detectionOpen.value || !detecting.value) return;
+      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      detectionProgress.value = event;
+    }),
+    api.detect.onDone((event) => {
+      if (!detectionOpen.value || !detecting.value) return;
+      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      detectionResult.value = event.result;
+      detectionProgress.value = { jobId: event.jobId, stage: 'analyze', percent: 100 };
+      detecting.value = false;
+      stopDetectionPolling();
+    }),
     api.still.onCreated((still) => upsertStill(still)),
     api.export.onProgress((event) => {
       if (exporting.value) exportProgress.value = event;
@@ -1016,6 +1226,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown);
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
+  stopDetectionPolling();
 });
 </script>
 
@@ -1036,9 +1247,16 @@ onBeforeUnmount(() => {
           <AppIcon name="folder" :size="16" />
           导入影片
         </button>
-        <button class="nav-item primary" type="button" @click="openSmartCut">
-          <AppIcon name="scissors" :size="16" />
-          镜头切分
+        <button class="nav-item" type="button" @click="showUrlImportPending">
+          <AppIcon name="link" :size="15" />
+          链接导入
+        </button>
+        <button class="nav-item" type="button" @click="toggleDemoWorkspace">
+          {{ demoMode ? '最近项目' : '示例模式' }}
+        </button>
+        <button class="nav-item primary" type="button" @click="openDetection">
+          <img class="nav-image-icon" :src="cutIcon" alt="" />
+          镜头检测
         </button>
         <button class="nav-item" type="button" @click="captureStill">
           <AppIcon name="camera" :size="16" />
@@ -1084,9 +1302,10 @@ onBeforeUnmount(() => {
         :shots="shots"
         :selected-id="selectedId"
         :current-time-ms="displayTimeMs"
+        :empty-image="emptyShotsImage"
         @select="selectShot"
         @add-shot="addShotAtPlayhead"
-        @detect="openSmartCut"
+        @detect="openDetection"
         @collapse="leftCollapsed = true"
       />
 
@@ -1095,7 +1314,7 @@ onBeforeUnmount(() => {
         :shots="shots"
         :markers="markers"
         :selected-shot="selectedShot"
-        :poster="poster"
+        :poster="videoPoster"
         :display-duration-ms="displayDurationMs"
         :display-time-ms="displayTimeMs"
         :busy="busy"
@@ -1108,7 +1327,6 @@ onBeforeUnmount(() => {
         @boundary-commit="commitBoundary"
         @bounds="setPlayerBounds"
         @capture="captureStill"
-        @collapse="rightCollapsed = true"
       />
 
       <ShotDetailPanel
@@ -1117,7 +1335,8 @@ onBeforeUnmount(() => {
         :terms="terms"
         :tags="tags"
         :still="selectedStill"
-        :thumbnail="poster"
+        :thumbnail="detailPoster"
+        :empty-image="emptyStillsImage"
         :saving="savingNote"
         :demo-mode="demoMode"
         @update-note="updateNote"
@@ -1151,6 +1370,19 @@ onBeforeUnmount(() => {
       </div>
     </footer>
 
+    <transition name="toast">
+      <div v-if="transcoding" class="transfer-toast">
+        <div class="transfer-head">
+          <span>正在生成播放代理</span>
+          <strong>{{ transcodeProgress?.percent ?? 0 }}%</strong>
+        </div>
+        <div class="transfer-track">
+          <i :style="{ width: `${transcodeProgress?.percent ?? 0}%` }"></i>
+        </div>
+        <small>{{ transcodeProgress?.message ?? '准备转码…' }}</small>
+      </div>
+    </transition>
+
     <TermEditorModal
       :open="termEditorOpen"
       :term="editingTerm"
@@ -1158,6 +1390,20 @@ onBeforeUnmount(() => {
       @close="termEditorOpen = false"
       @save="saveTerm"
       @delete="deleteTerm"
+    />
+
+    <DetectionModal
+      :open="detectionOpen"
+      :project-name="activeProject?.name ?? ''"
+      :running="detecting"
+      :applying="applyingDetection"
+      :progress="detectionProgress"
+      :result="detectionResult"
+      :error="detectionError"
+      @close="closeDetection"
+      @cancel="cancelDetection"
+      @retry="startDetection"
+      @apply="applyDetection"
     />
 
     <ExportModal

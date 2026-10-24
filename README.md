@@ -118,18 +118,21 @@ npm run smoke
 | `feature/detect` | 镜头/场景检测 | OpenCV 检测服务（色彩特征 / 差异曲线 / 峰值 / 聚类） |
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
+| `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
 
 ## 智能体工作目录
 
-| 智能体 | 工作分支 | 工作目录 | 职责 |
-|---|---|---|---|
-| dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 |
-| codex | `feature/ui`、`feature/detect` | `src/renderer`、`src/preload`、`src/main/detect`、`src/main/app.ts` | 界面与镜头检测：三栏工作台、时间轴、DetectService |
-| dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 |
+| 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
+|---|---|---|---|---|
+| dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
+| codex | `feature/ui`、`feature/detect`、`feature/integration` | `src/renderer`、`src/preload`、`src/main/detect`、`src/main/app.ts` | 界面、镜头检测与集成联调 | **已完成（S14）** |
+| dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
 
 > S07 状态（2026-10-24）：`feature/detect` 已完成 DetectService、Python 算法、`detect:*` IPC、migration 003 与合成帧单测；真实样例 dry-run/apply 已通过。UI 接入仍按计划留给 S14。
+
+> S14 状态（2026-10-24）：**已完成**。`feature/integration` 已接通本地导入 / 代理转码 / 检测预览与确认写库 / 三栏真实数据 / 截图标注 / PDF 与 Word 导出；UI 类型检查、Electron 冒烟与真实项目联调通过。
 
 ## 提交规范
 

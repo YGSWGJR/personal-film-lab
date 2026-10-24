@@ -78,7 +78,7 @@ function submit(): void {
   if (props.busy || selectedIds.value.length === 0) return;
   emit('submit', {
     format: format.value,
-    shotIds: selectedIds.value,
+    shotIds: [...selectedIds.value],
     headers: headers.map((header) => ({ ...header })),
     imageStrategy: imageStrategy.value,
   });

@@ -7,6 +7,7 @@ const props = defineProps<{
   shots: WorkspaceShot[];
   selectedId: string | null;
   currentTimeMs: number;
+  emptyImage: string;
 }>();
 
 const emit = defineEmits<{
@@ -64,7 +65,12 @@ function durationText(ms: number): string {
     </header>
 
     <div ref="scrollEl" class="shot-scroll" role="listbox" aria-label="镜头列表" @scroll="onScroll">
-      <div class="shot-spacer" :style="{ height: `${totalHeight}px` }">
+      <div v-if="shots.length === 0" class="shot-empty">
+        <img :src="emptyImage" alt="" />
+        <p>暂无镜头</p>
+        <span>运行镜头检测，或在播放时手动打点</span>
+      </div>
+      <div v-else class="shot-spacer" :style="{ height: `${totalHeight}px` }">
         <button
           v-for="(shot, offset) in visibleShots"
           :key="shot.id"
@@ -162,6 +168,39 @@ function durationText(ms: number): string {
 .shot-spacer {
   position: relative;
   min-height: 1px;
+}
+
+.shot-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.shot-empty img {
+  width: min(176px, 82%);
+  max-height: 132px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  object-fit: cover;
+  opacity: 0.82;
+}
+
+.shot-empty p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.shot-empty span {
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .shot-row {
