@@ -25,6 +25,16 @@ export const IPC = {
   PLAYER_EVENT_TIME: 'player:event:time',
   PLAYER_EVENT_LOADED: 'player:event:loaded',
   PLAYER_EVENT_ERROR: 'player:event:error',
+
+  /** media 域（I 方向，S01 §5.2） */
+  MEDIA_PROBE: 'media:probe',
+  MEDIA_EXTRACT_FRAME: 'media:extractFrame',
+  MEDIA_EXTRACT_FRAMES: 'media:extractFrames',
+  MEDIA_TRANSCODE_PROXY: 'media:transcodeProxy',
+  MEDIA_CANCEL_JOB: 'media:cancelJob',
+
+  /** media 域（E 方向） */
+  MEDIA_EVENT_PROGRESS: 'media:event:progress',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

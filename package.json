@@ -57,6 +57,14 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "ffmpeg.exe",
+          "ffprobe.exe"
+        ]
       }
     ]
   },

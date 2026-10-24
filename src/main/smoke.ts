@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { app, type BrowserWindow } from 'electron';
 import type { PlayerService } from './player/player-service';
 
@@ -28,12 +28,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   const checks: Record<string, boolean> = {};
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
+  let mediaChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -53,7 +54,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.titleMatched = state?.title === '个人拉片工作台';
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
-    checks.whitelistOnly = state?.apiKeys === 'app,player';
+    checks.whitelistOnly = state?.apiKeys === 'app,media,player';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -62,6 +63,16 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     if (videoPath) {
       playerChecks = await runPlayerChecks(win, videoPath);
       Object.assign(checks, playerChecksAssertions(playerChecks));
+    }
+
+    const mediaVideo = process.env['SMOKE_MEDIA_VIDEO'] ?? videoPath;
+    const mediaOut = process.env['SMOKE_MEDIA_OUT'];
+    if (mediaVideo && mediaOut) {
+      rmSync(mediaOut, { recursive: true, force: true });
+      mkdirSync(mediaOut, { recursive: true });
+      const transcodeSource = process.env['SMOKE_TRANSCODE_VIDEO'] ?? mediaVideo;
+      mediaChecks = await runMediaChecks(win, mediaVideo, transcodeSource, mediaOut);
+      Object.assign(checks, mediaChecksAssertions(mediaChecks));
     }
 
     const shotPath = process.env['SMOKE_SCREENSHOT'];
@@ -77,7 +88,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -92,6 +103,178 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     console.error(error);
     finish(1);
   }
+}
+
+function mediaChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    mediaProbe: result.probeOk === true,
+    mediaProbeMissing: result.probeMissingOk === true,
+    mediaProbeDiagnostics: result.probeMissingHasDiagnostics === true,
+    mediaProbeFailureDiagnostics: result.badProbeDiagnosticsOk === true,
+    mediaExtractFrame: result.frameOk === true,
+    mediaExtractFrames: result.batchOk === true,
+    mediaExtractFramesInvalid: result.batchInvalidOk === true,
+    mediaTranscode: result.transcodeOk === true,
+    mediaTranscodeMissing: result.transcodeMissingOk === true,
+    mediaCancelUnknown: result.cancelUnknownOk === true,
+    mediaCancel: result.cancelOk === true,
+    mediaTimeout: result.timeoutOk === true,
+    mediaProgress: result.progressOk === true,
+  };
+}
+
+async function runMediaChecks(
+  win: BrowserWindow,
+  videoPath: string,
+  transcodeSource: string,
+  outputDir: string,
+): Promise<Record<string, any>> {
+  const outDir = outputDir.replace(/\\/g, '/');
+  const badFile = process.env['SMOKE_BAD_FILE'] ?? '';
+  const cancelVideo = process.env['SMOKE_CANCEL_VIDEO'] ?? '';
+
+  const script = `
+    (async () => {
+      const out = {};
+      const api = window.api.media;
+      let progressCount = 0;
+      const stages = [];
+      const progressMax = {};
+      const unsubscribe = api.onProgress((event) => {
+        progressCount += 1;
+        progressMax[event.stage] = Math.max(progressMax[event.stage] || 0, event.percent);
+        if (!stages.includes(event.stage)) stages.push(event.stage);
+      });
+      try {
+        const probe = await api.probe({ path: ${JSON.stringify(videoPath)} });
+        out.probe = probe.ok ? probe.data : probe.error;
+        out.probeOk = probe.ok === true
+          && probe.data.hasVideo === true
+          && probe.data.durationMs > 0
+          && probe.data.width > 0
+          && probe.data.height > 0
+          && probe.data.fps > 0
+          && Boolean(probe.data.videoCodec)
+          && Boolean(probe.data.container);
+
+        const missing = await api.probe({ path: 'D:/__dsh_media_missing__/nope.mp4' });
+        out.probeMissingOk = missing.ok === false && missing.error.code === 'INPUT_NOT_FOUND';
+        out.probeMissingHasDiagnostics = missing.ok === false
+          && Boolean(missing.error.details && (missing.error.details.command || missing.error.details.path));
+
+        if (${JSON.stringify(badFile)}) {
+          const badProbe = await api.probe({ path: ${JSON.stringify(badFile)} });
+          out.badProbe = badProbe.ok ? badProbe.data : badProbe.error;
+          out.badProbeDiagnosticsOk = badProbe.ok === false
+            && (badProbe.error.code === 'PROBE_FAILED' || badProbe.error.code === 'PROBE_PARSE_FAILED')
+            && Boolean(badProbe.error.details && badProbe.error.details.command && badProbe.error.details.stderr);
+        } else {
+          out.badProbeDiagnosticsOk = true;
+        }
+
+        const frame = await api.extractFrame({
+          path: ${JSON.stringify(videoPath)},
+          timeMs: 2000,
+          outputPath: ${JSON.stringify(outDir + '/frame-2000ms.jpg')},
+        });
+        out.frame = frame.ok ? frame.data : frame.error;
+        out.frameOk = frame.ok === true
+          && frame.data.sizeBytes > 0
+          && frame.data.width > 0
+          && frame.data.height > 0
+          && frame.data.requestedTimeMs === 2000;
+
+        const batch = await api.extractFrames({
+          path: ${JSON.stringify(videoPath)},
+          outputDir: ${JSON.stringify(outDir + '/frames')},
+          intervalMs: 1000,
+        });
+        out.batch = batch.ok ? { count: batch.data.count, first: batch.data.frames[0], last: batch.data.frames[batch.data.frames.length - 1] } : batch.error;
+        out.batchOk = batch.ok === true
+          && batch.data.count >= 6
+          && batch.data.frames.length === batch.data.count
+          && batch.data.frames.every((item) => item.sizeBytes > 0 && item.timeMs >= 0);
+
+        const invalidBatch = await api.extractFrames({
+          path: ${JSON.stringify(videoPath)},
+          outputDir: ${JSON.stringify(outDir + '/bad-frames')},
+          intervalMs: 10,
+        });
+        out.batchInvalidOk = invalidBatch.ok === false;
+
+        const transcode = await api.transcodeProxy({
+          sourcePath: ${JSON.stringify(transcodeSource)},
+          outputPath: ${JSON.stringify(outDir + '/proxy.mp4')},
+          maxHeight: 360,
+        });
+        out.transcode = transcode.ok ? transcode.data : transcode.error;
+        out.transcodeOk = transcode.ok === true
+          && transcode.data.sizeBytes > 0
+          && transcode.data.durationMs > 0
+          && transcode.data.width > 0
+          && transcode.data.height > 0
+          && transcode.data.height <= 360
+          && transcode.data.sourceSizeBytes > 0;
+
+        const missingTranscode = await api.transcodeProxy({ sourcePath: 'D:/__dsh_media_missing__/nope.mp4' });
+        out.transcodeMissingOk = missingTranscode.ok === false && missingTranscode.error.code === 'INPUT_NOT_FOUND';
+
+        const cancelUnknown = await api.cancelJob({ jobId: 'no-such-job' });
+        out.cancelUnknownOk = cancelUnknown.ok === true && cancelUnknown.data.cancelled === false;
+
+        const timeoutProbe = await api.probe({ path: ${JSON.stringify(videoPath)}, timeoutMs: 1 });
+        out.timeoutProbe = timeoutProbe.ok ? timeoutProbe.data : timeoutProbe.error;
+        out.timeoutOk = timeoutProbe.ok === false
+          && timeoutProbe.error.code === 'PROBE_TIMEOUT'
+          && Boolean(timeoutProbe.error.details && timeoutProbe.error.details.timedOut === true);
+
+        if (${JSON.stringify(cancelVideo)}) {
+          let cancelJobId = null;
+          const unsubCancel = api.onProgress((event) => {
+            if (event.stage === 'transcode' && !cancelJobId) cancelJobId = event.jobId;
+          });
+          const pendingTranscode = api.transcodeProxy({
+            sourcePath: ${JSON.stringify(cancelVideo)},
+            outputPath: ${JSON.stringify(outDir + '/proxy-cancel.mp4')},
+            maxHeight: 360,
+          });
+          const cancelDeadline = Date.now() + 20000;
+          while (!cancelJobId && Date.now() < cancelDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          const cancelResult = cancelJobId ? await api.cancelJob({ jobId: cancelJobId }) : null;
+          const cancelledTranscode = await pendingTranscode;
+          unsubCancel();
+          out.cancelJobId = cancelJobId;
+          out.cancelOk = Boolean(
+            cancelResult
+              && cancelResult.ok === true
+              && cancelResult.data.cancelled === true
+              && cancelledTranscode.ok === false
+              && cancelledTranscode.error.code === 'CANCELLED'
+          );
+        } else {
+          out.cancelOk = true;
+        }
+
+        out.progressCount = progressCount;
+        out.progressStages = stages;
+        out.progressMax = progressMax;
+        out.progressOk = progressCount > 0
+          && progressMax.extractFrames === 100
+          && progressMax.transcode === 100
+          && stages.includes('extractFrames')
+          && stages.includes('transcode');
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      } finally {
+        unsubscribe();
+      }
+    })()
+  `;
+  return (await win.webContents.executeJavaScript(script)) as Record<string, any>;
 }
 
 function playerChecksAssertions(result: Record<string, any>): Record<string, boolean> {

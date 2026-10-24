@@ -43,3 +43,47 @@ export const playerSetBoundsArgsSchema = z.object({
   width: z.number().finite().min(0),
   height: z.number().finite().min(0),
 });
+/** media:probe */
+export const mediaProbeArgsSchema = z.object({
+  path: z.string().min(1),
+  timeoutMs: z.number().int().positive().max(600_000).optional(),
+});
+
+/** media:extractFrame */
+export const mediaExtractFrameArgsSchema = z.object({
+  path: z.string().min(1),
+  timeMs: z.number().finite().min(0),
+  outputPath: z.string().min(1).optional(),
+  format: z.enum(['jpg', 'jpeg', 'png']).optional(),
+  quality: z.number().int().min(1).max(31).optional(),
+  timeoutMs: z.number().int().positive().max(600_000).optional(),
+});
+
+/** media:extractFrames */
+export const mediaExtractFramesArgsSchema = z.object({
+  path: z.string().min(1),
+  outputDir: z.string().min(1),
+  intervalMs: z.number().int().min(50).max(3_600_000),
+  startMs: z.number().finite().min(0).optional(),
+  endMs: z.number().finite().min(0).optional(),
+  format: z.enum(['jpg', 'jpeg', 'png']).optional(),
+  prefix: z.string().min(1).max(80).optional(),
+  quality: z.number().int().min(1).max(31).optional(),
+  maxFrames: z.number().int().min(1).max(20_000).optional(),
+  timeoutMs: z.number().int().positive().max(4 * 3_600_000).optional(),
+});
+
+/** media:transcodeProxy */
+export const mediaTranscodeProxyArgsSchema = z.object({
+  sourcePath: z.string().min(1),
+  outputPath: z.string().min(1).optional(),
+  maxHeight: z.number().int().min(120).max(4320).optional(),
+  crf: z.number().int().min(1).max(51).optional(),
+  preset: z.string().min(1).max(20).optional(),
+  timeoutMs: z.number().int().positive().max(6 * 3_600_000).optional(),
+});
+
+/** media:cancelJob */
+export const mediaCancelJobArgsSchema = z.object({
+  jobId: z.string().min(1),
+});

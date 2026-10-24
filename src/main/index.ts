@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import { createMainWindow } from './app';
 import { registerIpcHandlers } from './ipc';
+import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
 import { runSmokeTest } from './smoke';
 
@@ -14,6 +15,7 @@ app.commandLine.appendSwitch('disable-direct-composition');
 
 let mainWindow: BrowserWindow | null = null;
 let playerService: PlayerService | null = null;
+let mediaService: MediaService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -21,11 +23,14 @@ function ensureMainWindow(): BrowserWindow {
   const win = createMainWindow();
   mainWindow = win;
   playerService = new PlayerService(win);
+  mediaService = new MediaService(() => mainWindow);
 
   win.on('closed', () => {
     if (mainWindow === win) {
       mainWindow = null;
       playerService = null;
+      mediaService?.dispose();
+      mediaService = null;
     }
   });
 
@@ -35,6 +40,7 @@ function ensureMainWindow(): BrowserWindow {
 registerIpcHandlers({
   getWindow: () => mainWindow,
   getPlayer: () => playerService,
+  getMedia: () => mediaService,
 });
 
 app.whenReady().then(() => {

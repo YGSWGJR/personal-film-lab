@@ -1,13 +1,30 @@
 import { app, ipcMain, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import { withEnvelope } from '../../shared/ipc-result';
-import type { AppInfo, MediaInfo, PlayerState, RenderBounds } from '../../shared/types';
+import type {
+  AppInfo,
+  CancelJobResult,
+  ExtractFrameArgs,
+  ExtractFramesArgs,
+  ExtractFramesResult,
+  ExtractFrameResult,
+  MediaInfo,
+  MediaProbeArgs,
+  MediaProbeResult,
+  PlayerState,
+  RenderBounds,
+  TranscodeProxyArgs,
+  TranscodeProxyResult,
+} from '../../shared/types';
+import { MediaError } from '../media/media-error';
 import { PlayerError } from '../player/mpv-lib';
+import type { MediaService } from '../media/media-service';
 import type { PlayerService } from '../player/player-service';
 
 export interface IpcDeps {
   getWindow(): BrowserWindow | null;
   getPlayer(): PlayerService | null;
+  getMedia(): MediaService | null;
 }
 
 /**
@@ -81,5 +98,32 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.PLAYER_SET_BOUNDS,
     withEnvelope((bounds: RenderBounds): void => requirePlayer().setBounds(bounds)),
+  );
+
+  const requireMedia = (): MediaService => {
+    const media = deps.getMedia();
+    if (!media) throw new MediaError('MEDIA_UNAVAILABLE', '媒体服务尚未初始化');
+    return media;
+  };
+
+  ipcMain.handle(
+    IPC.MEDIA_PROBE,
+    withEnvelope((args: MediaProbeArgs): Promise<MediaProbeResult> => requireMedia().probe(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_EXTRACT_FRAME,
+    withEnvelope((args: ExtractFrameArgs): Promise<ExtractFrameResult> => requireMedia().extractFrame(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_EXTRACT_FRAMES,
+    withEnvelope((args: ExtractFramesArgs): Promise<ExtractFramesResult> => requireMedia().extractFrames(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_TRANSCODE_PROXY,
+    withEnvelope((args: TranscodeProxyArgs): Promise<TranscodeProxyResult> => requireMedia().transcodeProxy(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_CANCEL_JOB,
+    withEnvelope((args: { jobId: string }): CancelJobResult => requireMedia().cancelJob(args.jobId)),
   );
 }

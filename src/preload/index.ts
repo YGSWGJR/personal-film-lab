@@ -4,6 +4,11 @@ import { IPC } from '../shared/ipc-channels';
 import { fail } from '../shared/ipc-result';
 import {
   emptyArgsSchema,
+  mediaCancelJobArgsSchema,
+  mediaExtractFrameArgsSchema,
+  mediaExtractFramesArgsSchema,
+  mediaProbeArgsSchema,
+  mediaTranscodeProxyArgsSchema,
   playerFrameStepArgsSchema,
   playerOpenArgsSchema,
   playerSeekArgsSchema,
@@ -12,14 +17,23 @@ import {
 } from '../shared/schemas';
 import type {
   AppInfo,
+  CancelJobResult,
+  ExtractFrameArgs,
+  ExtractFramesArgs,
+  ExtractFramesResult,
+  ExtractFrameResult,
   FrameInfo,
   IpcResult,
   MediaInfo,
+  MediaProbeResult,
+  MediaProgressEvent,
   PlayerErrorEvent,
   PlayerOpenArgs,
   PlayerState,
   PlayerTimeEvent,
   RenderBounds,
+  TranscodeProxyArgs,
+  TranscodeProxyResult,
   WindowApi,
 } from '../shared/types';
 
@@ -47,6 +61,11 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.PLAYER_GET_FRAME]: emptyArgsSchema,
   [IPC.PLAYER_SET_VOLUME]: playerSetVolumeArgsSchema,
   [IPC.PLAYER_SET_BOUNDS]: playerSetBoundsArgsSchema,
+  [IPC.MEDIA_PROBE]: mediaProbeArgsSchema,
+  [IPC.MEDIA_EXTRACT_FRAME]: mediaExtractFrameArgsSchema,
+  [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
+  [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
+  [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
 };
 
 /** 主进程 → 渲染层事件白名单 */
@@ -55,6 +74,7 @@ const EVENT_WHITELIST = {
   onTime: IPC.PLAYER_EVENT_TIME,
   onLoaded: IPC.PLAYER_EVENT_LOADED,
   onError: IPC.PLAYER_EVENT_ERROR,
+  onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
 } as const;
 
 async function invoke<T>(channel: string, args: unknown[] = []): Promise<IpcResult<T>> {
@@ -104,9 +124,20 @@ const playerApi = {
   onError: (listener: (event: PlayerErrorEvent) => void) => subscribe<PlayerErrorEvent>(EVENT_WHITELIST.onError, listener),
 };
 
+const mediaApi = {
+  probe: (args: { path: string; timeoutMs?: number }) => invoke<MediaProbeResult>(IPC.MEDIA_PROBE, [args]),
+  extractFrame: (args: ExtractFrameArgs) => invoke<ExtractFrameResult>(IPC.MEDIA_EXTRACT_FRAME, [args]),
+  extractFrames: (args: ExtractFramesArgs) => invoke<ExtractFramesResult>(IPC.MEDIA_EXTRACT_FRAMES, [args]),
+  transcodeProxy: (args: TranscodeProxyArgs) => invoke<TranscodeProxyResult>(IPC.MEDIA_TRANSCODE_PROXY, [args]),
+  cancelJob: (args: { jobId: string }) => invoke<CancelJobResult>(IPC.MEDIA_CANCEL_JOB, [args]),
+  onProgress: (listener: (event: MediaProgressEvent) => void) =>
+    subscribe<MediaProgressEvent>(EVENT_WHITELIST.onMediaProgress, listener),
+};
+
 const api: WindowApi = {
   app: appApi,
   player: playerApi,
+  media: mediaApi,
 };
 
 contextBridge.exposeInMainWorld('api', api);

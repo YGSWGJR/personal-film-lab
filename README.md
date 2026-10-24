@@ -42,13 +42,35 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - **安装记录（2026-10-24）**：GitHub / gyan.dev 直连下载不稳定，改经 winget 安装 `Gyan.FFmpeg` 9.0.2（`winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements --disable-interactivity`），从安装目录 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*\ffmpeg-9.0.2-full_build\bin\` 拷贝 `ffmpeg.exe` / `ffprobe.exe` 至 `resources/ffmpeg/`。系统 PATH 已注册全局 `ffmpeg` / `ffprobe` / `ffplay` 别名，与仓库内二进制不冲突。
 - 集成约定：主进程媒体服务直接 spawn `resources/ffmpeg/ffmpeg.exe`（开发期取仓库路径，打包后取 `process.resourcesPath`）；失败时输出 stderr 便于排查。
 
-### 播放器冒烟（PowerShell）
+### 媒体处理服务（MediaService）
+
+实现位于 `src/main/media/`，IPC 通道见 S01 §6.2 `media` 域，统一 Promise 接口：
+
+| 能力 | 通道 | 说明 |
+|---|---|---|
+| 元信息探测 | `media:probe` | 时长 / 分辨率 / 帧率 / 容器 / 视频与音频编码 / 码率 / 大小 / 是否含音视频轨 |
+| 精确抽帧 | `media:extractFrame` | 按毫秒时间点抽单帧 JPG/PNG；默认落 `userData/lapian/frames/` |
+| 批量抽帧 | `media:extractFrames` | 按固定间隔抽帧（最小 50ms、最多 20000 帧保护），供镜头检测采样；调用方指定 `outputDir` |
+| 转码代理 | `media:transcodeProxy` | H.264 + yuv420p + 最高 720p（不放大）+ AAC 128k + faststart；只写新文件，绝不修改源文件；默认落 `userData/lapian/proxies/` |
+
+统一特性：
+
+- **超时**：探测默认 30s、单帧 60s、批量抽帧 30min、转码 60min，均可用 `timeoutMs` 覆盖；超时返回 `*_TIMEOUT` 错误并结束进程树。
+- **失败诊断**：错误信封 `error.details` 带 `command` / `exitCode` / `stderr` 尾部 / `elapsedMs` / `timeoutMs` / `path`，便于定位编码或路径问题。
+- **进度与取消**：批量抽帧/转码通过 `media:event:progress` 推送 `{ jobId, stage, percent, message }`（约 1% 或 250ms 节流）；`media:cancelJob` 可中止任务，返回 `CANCELLED`。
+- **错误码**：`FFMPEG_NOT_FOUND` / `INPUT_NOT_FOUND` / `INPUT_EMPTY` / `PROBE_FAILED` / `PROBE_TIMEOUT` / `NO_VIDEO_STREAM` / `EXTRACT_FRAME_FAILED` / `EXTRACT_FRAMES_FAILED` / `TRANSCODE_FAILED` / `CANCELLED` 等。
+
+### 冒烟（播放器 + 媒体，PowerShell）
 
 ```powershell
-$env:SMOKE_VIDEO = 'D:\path\clip.mp4'      # 追加播放器全链路断言
-$env:SMOKE_BAD_FILE = 'D:\path\bad.mp4'    # 非法格式错误处理断言（可选）
-$env:SMOKE_RESULT = 'D:\tmp\smoke.json'    # 结果 JSON
-$env:SMOKE_HOLD_MS = '15000'               # 保持窗口，便于外部截屏目检（可选）
+$env:SMOKE_VIDEO = 'D:\path\clip.mp4'            # 播放器链路断言
+$env:SMOKE_BAD_FILE = 'D:\path\bad.mp4'          # 播放器/媒体错误处理断言（可选）
+$env:SMOKE_MEDIA_VIDEO = 'D:\path\clip.mp4'      # 媒体探测/抽帧断言
+$env:SMOKE_TRANSCODE_VIDEO = 'D:\path\clip2.mp4' # 代理转码断言，默认同 SMOKE_MEDIA_VIDEO
+$env:SMOKE_CANCEL_VIDEO = 'D:\path\long.mp4'     # 取消任务断言（可选）
+$env:SMOKE_MEDIA_OUT = 'D:\tmp\media-smoke'      # 抽帧/代理输出目录
+$env:SMOKE_RESULT = 'D:\tmp\smoke.json'          # 结果 JSON
+$env:SMOKE_HOLD_MS = '15000'                     # 保持窗口，便于外部截屏目检（可选）
 npm run smoke
 ```
 
