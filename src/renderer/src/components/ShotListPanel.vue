@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { WorkspaceShot } from '../types/workspace';
 
@@ -8,6 +8,7 @@ const props = defineProps<{
   selectedId: string | null;
   currentTimeMs: number;
   emptyImage: string;
+  initialScrollTop?: number;
 }>();
 
 const emit = defineEmits<{
@@ -15,6 +16,7 @@ const emit = defineEmits<{
   addShot: [];
   detect: [];
   collapse: [];
+  scrollPosition: [value: number];
 }>();
 
 const ROW_HEIGHT = 44;
@@ -31,16 +33,27 @@ const totalHeight = computed(() => props.shots.length * ROW_HEIGHT);
 
 function onScroll(): void {
   scrollTop.value = scrollEl.value?.scrollTop ?? 0;
+  emit('scrollPosition', scrollTop.value);
 }
 
 onMounted(() => {
   if (!scrollEl.value) return;
+  scrollEl.value.scrollTop = props.initialScrollTop ?? 0;
   viewportHeight.value = scrollEl.value.clientHeight;
   resizeObserver = new ResizeObserver(() => {
     viewportHeight.value = scrollEl.value?.clientHeight ?? viewportHeight.value;
   });
   resizeObserver.observe(scrollEl.value);
 });
+
+watch(
+  () => props.initialScrollTop,
+  (value) => {
+    if (!scrollEl.value || value === undefined) return;
+    if (Math.abs(scrollEl.value.scrollTop - value) < 1) return;
+    scrollEl.value.scrollTop = value;
+  },
+);
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();

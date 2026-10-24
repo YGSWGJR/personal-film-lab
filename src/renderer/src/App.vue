@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import emptyProjectImage from '../../../assets/design/design_empty_project_1024x768.png';
 import emptyShotsImage from '../../../assets/design/design_empty_shots_1024x768.png';
 import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x768.png';
@@ -8,6 +8,7 @@ import AppIcon from './components/AppIcon.vue';
 import DetectionModal from './components/DetectionModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
+import SettingsModal from './components/SettingsModal.vue';
 import ShotDetailPanel from './components/ShotDetailPanel.vue';
 import ShotListPanel from './components/ShotListPanel.vue';
 import TermEditorModal from './components/TermEditorModal.vue';
@@ -24,6 +25,7 @@ import type { SkeletonState } from './env';
 import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from './types/workspace';
 import type {
   AppInfo,
+  AudioWaveform,
   DetectProgressEvent,
   DetectResult,
   ExportProgressEvent,
@@ -31,15 +33,19 @@ import type {
   MediaInfo,
   MediaProgressEvent,
   Note,
+  OverlayLayer,
   PlayerErrorEvent,
   PlayerState,
   Project,
   RenderBounds,
+  Settings,
+  SettingsSetArgs,
   Shot,
   Still,
   StoryboardExportArgs,
   Tag,
   Term,
+  WorkspaceState,
 } from '../../shared/types';
 
 const info = ref<AppInfo | null>(null);
@@ -82,7 +88,18 @@ const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
 const detectionJobId = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
+const audioWaveform = ref<AudioWaveform | null>(null);
+const audioLoading = ref(false);
+const settingsOpen = ref(false);
+const settings = ref<Settings | null>(null);
+const settingsSaving = ref(false);
+const settingsError = ref<string | null>(null);
+const shotScrollTop = ref(0);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
+let audioGeneration = 0;
+let lastPlayerBounds: RenderBounds | null = null;
+let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let restoringSession = true;
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -95,6 +112,7 @@ const player = reactive<PlayerState>({
   width: 0,
   height: 0,
   fps: 0,
+  layer: 'normal',
 });
 
 const skeleton: SkeletonState = {
@@ -287,9 +305,46 @@ async function loadTags(): Promise<void> {
   tags.value = loaded ?? createDemoTags();
 }
 
-async function loadProject(project: Project): Promise<void> {
+function resetAudioWaveform(): void {
+  audioGeneration += 1;
+  audioWaveform.value = null;
+  audioLoading.value = false;
+}
+
+function prepareAudioWaveform(project: Project): void {
+  resetAudioWaveform();
+  const path = project.source.path || project.media.proxyPath;
+  if (!path) return;
+  void loadAudioWaveform(path, audioGeneration);
+}
+
+async function loadAudioWaveform(path: string, generation: number): Promise<void> {
+  audioLoading.value = true;
+  try {
+    const result = await window.api.scope.extractAudioWaveform({ path, bucketMs: 100 });
+    if (generation !== audioGeneration) return;
+    if (!result.ok) {
+      console.warn(`[scope] 音频波形提取失败：${result.error.code} ${result.error.message}`);
+      return;
+    }
+    audioWaveform.value = result.data;
+  } catch (error) {
+    if (generation === audioGeneration) {
+      console.warn('[scope] 音频波形提取异常', error);
+    }
+  } finally {
+    if (generation === audioGeneration) audioLoading.value = false;
+  }
+}
+
+async function loadProject(
+  project: Project,
+  restoreState: WorkspaceState | null = null,
+): Promise<void> {
+  const projectChanged = activeProject.value?.id !== project.id;
   activeProject.value = project;
   demoMode.value = false;
+  if (projectChanged) prepareAudioWaveform(project);
   const [shotResult, stillResult, noteResult] = await Promise.all([
     window.api.shot.list({ projectId: project.id }),
     window.api.still.list({ projectId: project.id }),
@@ -305,25 +360,36 @@ async function loadProject(project: Project): Promise<void> {
   projectStills.value = loadedStills;
   seedDemoNoteMap(mapped, loadedNotes);
   markers.value = markersFromData(mapped, loadedStills, loadedNotes);
-  selectedId.value = mapped[0]?.id ?? null;
-  previewTimeMs.value = mapped[0]?.startMs ?? 0;
+  const restoredShot = restoreState
+    ? mapped.find((shot) => shot.id === restoreState.selectedShotId) ?? null
+    : null;
+  selectedId.value = restoredShot?.id ?? mapped[0]?.id ?? null;
+  previewTimeMs.value = restoreState?.timeMs ?? mapped[0]?.startMs ?? 0;
   await Promise.all([loadTerms(true, true), loadTags()]);
 
   const playbackCandidates = [project.media.proxyPath, project.source.path]
     .filter((path): path is string => Boolean(path))
     .filter((path, index, paths) => paths.findIndex((item) => samePath(item, path)) === index);
+  let playbackReady = false;
   for (const [index, path] of playbackCandidates.entries()) {
-    if (player.hasFile && samePath(loadedPlaybackPath.value, path)) return;
+    if (player.hasFile && samePath(loadedPlaybackPath.value, path)) {
+      playbackReady = true;
+      break;
+    }
     if (await openMediaPath(path, false, false)) {
       if (index > 0) showToast('代理文件不可用，已切换为源文件播放。');
-      return;
+      playbackReady = true;
+      break;
     }
   }
-  if (playbackCandidates.length > 0) {
+  if (!playbackReady && playbackCandidates.length > 0) {
     await closePlayer();
     showToast('项目媒体文件无法打开，请检查文件是否已移动。', 'error', '播放器打开失败');
   } else if (player.hasFile) {
-    await closePlayer();
+    if (playbackCandidates.length === 0) await closePlayer();
+  }
+  if (restoreState && playbackReady) {
+    await restorePlaybackState(restoreState);
   }
 }
 
@@ -447,6 +513,7 @@ async function closePlayer(): Promise<void> {
     width: 0,
     height: 0,
     fps: 0,
+    layer: 'normal',
   });
 }
 
@@ -951,23 +1018,28 @@ function showUrlImportPending(): void {
   showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
 }
 
+function enterDemoWorkspace(): void {
+  const fallback = createDemoShots();
+  activeProject.value = null;
+  demoMode.value = true;
+  detectionOpen.value = false;
+  shots.value = fallback;
+  markers.value = createDemoMarkers(fallback);
+  projectStills.value = [];
+  selectedId.value = fallback[2]?.id ?? null;
+  previewTimeMs.value = fallback[2]?.startMs ?? 0;
+  for (const key of Object.keys(notes)) delete notes[key];
+  for (const shot of fallback) notes[shot.id] = shot.remark ?? '';
+  tags.value = createDemoTags();
+  terms.value = createDemoTerms();
+}
+
 async function toggleDemoWorkspace(): Promise<void> {
   if (!demoMode.value) {
     if (detecting.value) await cancelDetection();
     await closePlayer();
-    activeProject.value = null;
-    demoMode.value = true;
-    detectionOpen.value = false;
-    const fallback = createDemoShots();
-    shots.value = fallback;
-    markers.value = createDemoMarkers(fallback);
-    projectStills.value = [];
-    selectedId.value = fallback[2]?.id ?? null;
-    previewTimeMs.value = fallback[2]?.startMs ?? 0;
-    for (const key of Object.keys(notes)) delete notes[key];
-    for (const shot of fallback) notes[shot.id] = shot.remark ?? '';
-    tags.value = createDemoTags();
-    terms.value = createDemoTerms();
+    resetAudioWaveform();
+    enterDemoWorkspace();
     showToast('已切换到示例工作区，数据库项目未被修改。');
     return;
   }
@@ -980,6 +1052,128 @@ async function toggleDemoWorkspace(): Promise<void> {
     await openVideo();
   }
 }
+
+async function loadSettings(): Promise<void> {
+  const result = await window.api.settings.get();
+  if (result.ok) {
+    settings.value = result.data;
+  } else {
+    settingsError.value = result.error.message;
+    console.warn(`[settings] ${result.error.code} ${result.error.message}`);
+  }
+}
+
+async function openSettings(): Promise<void> {
+  settingsError.value = null;
+  if (!settings.value) await loadSettings();
+  settingsOpen.value = true;
+  await nextTick();
+  void window.api.player.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+}
+
+async function closeSettings(): Promise<void> {
+  settingsOpen.value = false;
+  await nextTick();
+  if (lastPlayerBounds) void window.api.player.setBounds(lastPlayerBounds);
+}
+
+async function saveSettings(value: SettingsSetArgs): Promise<void> {
+  if (settingsSaving.value) return;
+  const previousRoot = settings.value?.dataRoot;
+  const willChangeDataRoot = Boolean(previousRoot && previousRoot !== value.dataRoot);
+  settingsSaving.value = true;
+  settingsError.value = null;
+  try {
+    if (willChangeDataRoot && detecting.value) await cancelDetection();
+    const result = await window.api.settings.set(value);
+    if (!result.ok) {
+      settingsError.value = result.error.message;
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    settings.value = result.data;
+    const dataRootChanged = Boolean(previousRoot && previousRoot !== result.data.dataRoot);
+    if (!dataRootChanged) {
+      await closeSettings();
+      showToast('设置已保存，新的缓存、导出和截图路径已生效。', 'success');
+      return;
+    }
+
+    await closePlayer();
+    settingsOpen.value = false;
+    resetAudioWaveform();
+    enterDemoWorkspace();
+    const projects = unwrap(await window.api.project.list());
+    if (projects && projects[0]) {
+      await loadProject(projects[0]);
+    }
+    showToast(
+      '数据目录已切换。现有项目不会自动迁移，新项目将写入新位置。',
+      'success',
+      '设置已生效',
+    );
+  } finally {
+    settingsSaving.value = false;
+  }
+}
+
+function workspaceStateSnapshot(): WorkspaceState {
+  return {
+    projectId: demoMode.value ? null : activeProject.value?.id ?? null,
+    timeMs: Math.max(0, Math.round(displayTimeMs.value)),
+    selectedShotId: selectedId.value,
+    leftCollapsed: leftCollapsed.value,
+    rightCollapsed: rightCollapsed.value,
+    volume: player.volume,
+    shotScrollTop: shotScrollTop.value,
+  };
+}
+
+function scheduleWorkspaceSave(immediate = false): void {
+  if (restoringSession) return;
+  const save = (): void => {
+    sessionSaveTimer = null;
+    void window.api.session.save(workspaceStateSnapshot()).catch((error) => {
+      console.warn('[session] 工作区状态保存失败', error);
+    });
+  };
+  if (immediate) {
+    if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+    save();
+  } else if (!sessionSaveTimer) {
+    sessionSaveTimer = setTimeout(save, 350);
+  }
+}
+
+async function restorePlaybackState(state: WorkspaceState): Promise<void> {
+  if (!player.hasFile) return;
+  const bounded = Math.max(0, Math.min(state.timeMs, displayDurationMs.value));
+  const seeked = await window.api.player.seek({ timeMs: bounded });
+  if (seeked.ok) Object.assign(player, seeked.data);
+  previewTimeMs.value = bounded;
+  const volume = await window.api.player.setVolume({ volume: state.volume });
+  if (volume.ok) Object.assign(player, volume.data);
+}
+
+window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
+
+watch(
+  [
+    () => activeProject.value?.id,
+    selectedId,
+    leftCollapsed,
+    rightCollapsed,
+    () => player.volume,
+    shotScrollTop,
+  ],
+  () => scheduleWorkspaceSave(true),
+  { flush: 'post' },
+);
+
+watch(
+  () => player.timeMs,
+  () => scheduleWorkspaceSave(),
+);
 
 async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
@@ -1079,7 +1273,13 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
 }
 
 function setPlayerBounds(bounds: RenderBounds): void {
+  lastPlayerBounds = bounds;
   void window.api.player.setBounds(bounds);
+}
+
+async function setPlayerLayer(level: OverlayLayer): Promise<void> {
+  const state = unwrap(await window.api.player.setLayer({ level }));
+  if (state) Object.assign(player, state);
 }
 
 function handleKeydown(event: KeyboardEvent): void {
@@ -1153,9 +1353,40 @@ onMounted(async () => {
     skeleton.ready = true;
   }
 
+  await loadSettings();
+
+  let savedSession: WorkspaceState | null = null;
+  const sessionResult = await api.session.get();
+  if (sessionResult.ok) {
+    savedSession = sessionResult.data;
+  } else {
+    console.warn(`[session] 读取失败：${sessionResult.error.code} ${sessionResult.error.message}`);
+  }
   try {
     const projectResult = await api.project.list();
-    if (projectResult.ok && projectResult.data.length > 0) {
+    if (savedSession?.projectId) {
+      const project = projectResult.ok
+        ? projectResult.data.find((item) => item.id === savedSession?.projectId) ?? null
+        : null;
+      if (project) {
+        leftCollapsed.value = savedSession.leftCollapsed;
+        rightCollapsed.value = savedSession.rightCollapsed;
+        shotScrollTop.value = savedSession.shotScrollTop ?? 0;
+        await loadProject(project, savedSession);
+      } else {
+        leftCollapsed.value = false;
+        rightCollapsed.value = false;
+        shotScrollTop.value = 0;
+        enterDemoWorkspace();
+        void api.session.clear();
+      }
+    } else if (savedSession) {
+      leftCollapsed.value = false;
+      rightCollapsed.value = false;
+      shotScrollTop.value = 0;
+      enterDemoWorkspace();
+      void api.session.clear();
+    } else if (projectResult.ok && projectResult.data.length > 0) {
       await loadProject(projectResult.data[0]);
     } else {
       await loadTerms();
@@ -1217,16 +1448,25 @@ onMounted(async () => {
   );
 
   await nextTick();
+  restoringSession = false;
   window.addEventListener('keydown', handleKeydown);
+  window.addEventListener('beforeunload', handleBeforeUnload);
 });
+
+function handleBeforeUnload(): void {
+  scheduleWorkspaceSave(true);
+}
 
 onBeforeUnmount(() => {
   for (const unsubscribe of unsubscribers) unsubscribe();
   unsubscribers.length = 0;
   window.removeEventListener('keydown', handleKeydown);
+  window.removeEventListener('beforeunload', handleBeforeUnload);
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
   stopDetectionPolling();
+  audioGeneration += 1;
+  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
 });
 </script>
 
@@ -1291,7 +1531,7 @@ onBeforeUnmount(() => {
         <button class="nav-item icon-only" type="button" title="学习统计">
           <AppIcon name="chart" :size="16" />
         </button>
-        <button class="nav-item icon-only" type="button" title="设置">
+        <button class="nav-item icon-only" type="button" title="设置" @click="openSettings">
           <AppIcon name="settings" :size="16" />
         </button>
       </div>
@@ -1303,10 +1543,12 @@ onBeforeUnmount(() => {
         :selected-id="selectedId"
         :current-time-ms="displayTimeMs"
         :empty-image="emptyShotsImage"
+        :initial-scroll-top="shotScrollTop"
         @select="selectShot"
         @add-shot="addShotAtPlayhead"
         @detect="openDetection"
         @collapse="leftCollapsed = true"
+        @scroll-position="shotScrollTop = $event"
       />
 
       <PlayerWorkspace
@@ -1318,6 +1560,8 @@ onBeforeUnmount(() => {
         :display-duration-ms="displayDurationMs"
         :display-time-ms="displayTimeMs"
         :busy="busy"
+        :audio-waveform="audioWaveform"
+        :audio-loading="audioLoading"
         @open="openVideo"
         @toggle="togglePlayback"
         @step="stepFrame"
@@ -1327,6 +1571,7 @@ onBeforeUnmount(() => {
         @boundary-commit="commitBoundary"
         @bounds="setPlayerBounds"
         @capture="captureStill"
+        @set-layer="setPlayerLayer"
       />
 
       <ShotDetailPanel
@@ -1390,6 +1635,15 @@ onBeforeUnmount(() => {
       @close="termEditorOpen = false"
       @save="saveTerm"
       @delete="deleteTerm"
+    />
+
+    <SettingsModal
+      :open="settingsOpen"
+      :settings="settings"
+      :saving="settingsSaving"
+      :error="settingsError"
+      @close="closeSettings"
+      @save="saveSettings"
     />
 
     <DetectionModal

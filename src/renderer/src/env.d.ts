@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { AppInfo, WindowApi } from '../../shared/types';
+import type { AppInfo, WindowApi, WorkspaceState } from '../../shared/types';
 
 /** 冒烟测试可读的运行时状态（仅骨架阶段使用） */
 export interface SkeletonState {
@@ -18,6 +18,7 @@ declare global {
     /** preload 白名单桥（docs/S01 §3.2） */
     api: WindowApi;
     __SKELETON_STATE__?: SkeletonState;
+    __CAPTURE_WORKSPACE_STATE__?: () => WorkspaceState;
   }
 }
 

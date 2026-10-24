@@ -8,6 +8,7 @@ import type {
   PlayerState,
   RenderBounds,
   PlayerErrorEvent,
+  OverlayLayer,
 } from '../../shared/types';
 import { MpvClient } from './mpv-client';
 import { NativeOverlay, toPhysicalRect, windowHandleOf } from './native-overlay';
@@ -29,6 +30,7 @@ export class PlayerService {
   private overlay: NativeOverlay | null = null;
   private bounds: RenderBounds | null = null;
   private media: MediaInfo | null = null;
+  private layer: OverlayLayer = 'normal';
   private timeTimer: NodeJS.Timeout | null = null;
   private lastDecodeErrorAt = 0;
 
@@ -36,7 +38,7 @@ export class PlayerService {
   private readonly handleWindowHide = (): void => this.overlay?.hide();
   private readonly handleWindowShow = (): void => {
     if (this.media && this.bounds && this.bounds.width > 2 && this.bounds.height > 2) {
-      this.overlay?.show();
+      this.syncOverlayBounds();
     }
   };
 
@@ -76,6 +78,13 @@ export class PlayerService {
     }
   }
 
+  setLayer(level: OverlayLayer): PlayerState {
+    this.layer = level;
+    this.syncOverlayBounds();
+    this.emitState();
+    return this.getState();
+  }
+
   private syncOverlayBounds(): void {
     if (!this.overlay || !this.bounds) return;
     const physical = toPhysicalRect(this.win, this.bounds);
@@ -84,7 +93,7 @@ export class PlayerService {
       return;
     }
     this.overlay.setBounds(physical);
-    this.overlay.show();
+    this.overlay.setZ(this.layer);
   }
 
   // ---------- 播放控制 ----------
@@ -205,6 +214,7 @@ export class PlayerService {
     this.media = null;
     this.stopTimeEvents();
     this.overlay?.hide();
+    this.layer = 'normal';
     this.emitState();
   }
 
@@ -221,6 +231,7 @@ export class PlayerService {
         width: 0,
         height: 0,
         fps: 0,
+        layer: this.layer,
       };
     }
     return {
@@ -233,6 +244,7 @@ export class PlayerService {
       width: this.media.width,
       height: this.media.height,
       fps: this.media.fps,
+      layer: this.layer,
     };
   }
 

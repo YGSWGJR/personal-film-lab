@@ -1,7 +1,7 @@
 import { screen, type BrowserWindow } from 'electron';
 import koffi from 'koffi';
 import { PlayerError } from './mpv-lib';
-import type { RenderBounds } from '../../shared/types';
+import type { OverlayLayer, RenderBounds } from '../../shared/types';
 
 /**
  * 原生子窗口（Win32 child HWND）：
@@ -31,6 +31,10 @@ const WS_EX_NOACTIVATE = 0x08000000;
 
 const SW_SHOW = 5;
 const SW_HIDE = 0;
+const HWND_TOP = 0n;
+const HWND_BOTTOM = 1n;
+const SWP_NOSIZE = 0x0001;
+const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 
@@ -61,6 +65,7 @@ export function toPhysicalRect(win: BrowserWindow, bounds: RenderBounds): Physic
 export class NativeOverlay {
   private hwnd: bigint;
   private visible = false;
+  private zLevel: OverlayLayer = 'normal';
 
   private constructor(hwnd: bigint) {
     this.hwnd = hwnd;
@@ -103,6 +108,29 @@ export class NativeOverlay {
     SetWindowPos(this.hwnd, 0n, rect.x, rect.y, rect.width, rect.height, SWP_NOZORDER | SWP_NOACTIVATE);
   }
 
+  setZ(level: OverlayLayer): void {
+    this.zLevel = level;
+    if (level === 'hidden') {
+      this.hide();
+      return;
+    }
+    this.show();
+    const insertAfter = level === 'bottom' ? HWND_BOTTOM : HWND_TOP;
+    if (
+      SetWindowPos(
+        this.hwnd,
+        insertAfter,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+      ) === 0
+    ) {
+      throw new PlayerError('OVERLAY_LAYER_FAILED', `设置视频画面层级失败：${level}`);
+    }
+  }
+
   /** 读取子窗口当前物理矩形（调试用） */
   getRect(): PhysicalRect | null {
     if (!this.hwnd || this.hwnd === 0n) return null;
@@ -117,6 +145,7 @@ export class NativeOverlay {
   }
 
   show(): void {
+    if (this.zLevel === 'hidden') return;
     if (this.visible) return;
     ShowWindow(this.hwnd, SW_SHOW);
     this.visible = true;

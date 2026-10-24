@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { app, type BrowserWindow } from 'electron';
 import type { PlayerService } from './player/player-service';
 
@@ -30,13 +30,16 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
   let mediaChecks: Record<string, unknown> = {};
+  let scopeChecks: Record<string, unknown> = {};
+  let settingsChecks: Record<string, unknown> = {};
+  let sessionChecks: Record<string, unknown> = {};
   let dataChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, dataChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -57,10 +60,27 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'app,detect,export,media,note,player,project,shot,still,tag,term';
+      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,session,settings,shot,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
+    const settingsResult = (await win.webContents.executeJavaScript(
+      'window.api.settings.get()',
+    )) as { ok: boolean; data?: { dataRoot: string; environmentOverride: boolean }; error?: unknown };
+    settingsChecks = settingsResult;
+    checks.settingsGet = settingsResult.ok === true;
+    const dataRootOverride = process.env['DSH_DATA_ROOT'];
+    if (dataRootOverride) {
+      checks.settingsEnvPriority =
+        settingsResult.ok === true &&
+        settingsResult.data?.environmentOverride === true &&
+        resolve(settingsResult.data.dataRoot) === resolve(dataRootOverride);
+    }
+    const sessionResult = (await win.webContents.executeJavaScript(
+      'window.api.session.get()',
+    )) as { ok: boolean; data?: unknown; error?: unknown };
+    sessionChecks = sessionResult;
+    checks.sessionGet = sessionResult.ok === true;
 
     const videoPath = process.env['SMOKE_VIDEO'];
     if (videoPath) {
@@ -76,6 +96,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       const transcodeSource = process.env['SMOKE_TRANSCODE_VIDEO'] ?? mediaVideo;
       mediaChecks = await runMediaChecks(win, mediaVideo, transcodeSource, mediaOut);
       Object.assign(checks, mediaChecksAssertions(mediaChecks));
+    }
+
+    const scopeVideo = process.env['SMOKE_SCOPE_VIDEO'];
+    if (scopeVideo) {
+      scopeChecks = await runScopeAudioChecks(win, scopeVideo);
+      Object.assign(checks, {
+        scopeAudio: scopeChecks.audioOk === true,
+      });
     }
 
     const dataPkg = process.env['SMOKE_DATA_PKG'];
@@ -105,7 +133,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, dataChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -120,6 +148,33 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     console.error(error);
     finish(1);
   }
+}
+
+async function runScopeAudioChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        const audio = await window.api.scope.extractAudioWaveform({
+          path: ${JSON.stringify(videoPath)},
+          bucketMs: 100
+        });
+        out.audio = audio.ok ? {
+          buckets: audio.data.buckets.length,
+          bucketMs: audio.data.bucketMs,
+          totalMs: audio.data.totalMs,
+          first: audio.data.buckets[0]
+        } : audio.error;
+        out.audioOk = audio.ok === true
+          && audio.data.bucketMs === 100
+          && audio.data.buckets.length > 0
+          && audio.data.totalMs > 0;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
 }
 
 function dataChecksAssertions(result: Record<string, any>): Record<string, boolean> {
@@ -508,6 +563,9 @@ function playerChecksAssertions(result: Record<string, any>): Record<string, boo
     playerPause: result.pauseOk === true,
     playerVolume: result.volumeOk === true,
     playerBoundary: result.boundaryOk === true,
+    playerLayerBottom: result.layerBottomOk === true,
+    playerLayerHidden: result.layerHiddenOk === true,
+    playerLayerRestore: result.layerRestoreOk === true,
     playerFileNotFound: result.fileNotFoundOk === true,
     playerUnsupported: result.unsupportedOk === true,
   };
@@ -565,6 +623,17 @@ async function runPlayerChecks(win: BrowserWindow, videoPath: string): Promise<R
         const vol = await api.setVolume({ volume: 0.3 });
         const volState = await api.getState();
         out.volumeOk = vol.ok === true && volState.ok === true && Math.abs(volState.data.volume - 0.3) <= 0.03;
+
+        const bottom = await api.setLayer({ level: 'bottom' });
+        out.layerBottomOk = bottom.ok === true && bottom.data.layer === 'bottom' && bottom.data.hasFile === true;
+        const hidden = await api.setLayer({ level: 'hidden' });
+        const hiddenState = await api.getState();
+        out.layerHiddenOk = hidden.ok === true
+          && hidden.data.layer === 'hidden'
+          && hiddenState.ok === true
+          && hiddenState.data.hasFile === true;
+        const restored = await api.setLayer({ level: 'normal' });
+        out.layerRestoreOk = restored.ok === true && restored.data.layer === 'normal';
 
         return out;
       } catch (error) {

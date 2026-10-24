@@ -41,10 +41,16 @@ import {
   playerOpenArgsSchema,
   playerSeekArgsSchema,
   playerSetBoundsArgsSchema,
+  playerSetLayerArgsSchema,
   playerSetVolumeArgsSchema,
+  scopeExtractAudioWaveformArgsSchema,
+  settingsChooseDirectoryArgsSchema,
+  settingsSetArgsSchema,
+  workspaceStateSchema,
 } from '../shared/schemas';
 import type {
   AppInfo,
+  AudioWaveform,
   CancelJobResult,
   DetectApplyArgs,
   DetectApplyResult,
@@ -65,8 +71,14 @@ import type {
   PlayerErrorEvent,
   PlayerOpenArgs,
   PlayerState,
+  OverlayLayer,
   PlayerTimeEvent,
   RenderBounds,
+  ScopeExtractAudioWaveformArgs,
+  Settings,
+  SettingsChooseDirectoryArgs,
+  SettingsSetArgs,
+  WorkspaceState,
   TranscodeProxyArgs,
   TranscodeProxyResult,
   WindowApi,
@@ -112,6 +124,12 @@ import type {
 /** 白名单：通道 → 入参校验 schema；未登记的通道不会转发 */
 const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.APP_INFO]: emptyArgsSchema,
+  [IPC.SETTINGS_GET]: emptyArgsSchema,
+  [IPC.SETTINGS_SET]: settingsSetArgsSchema,
+  [IPC.SETTINGS_CHOOSE_DIRECTORY]: settingsChooseDirectoryArgsSchema,
+  [IPC.SESSION_GET]: emptyArgsSchema,
+  [IPC.SESSION_SAVE]: workspaceStateSchema,
+  [IPC.SESSION_CLEAR]: emptyArgsSchema,
   [IPC.PLAYER_OPEN]: playerOpenArgsSchema,
   [IPC.PLAYER_OPEN_DIALOG]: emptyArgsSchema,
   [IPC.PLAYER_CLOSE]: emptyArgsSchema,
@@ -124,11 +142,13 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.PLAYER_GET_FRAME]: emptyArgsSchema,
   [IPC.PLAYER_SET_VOLUME]: playerSetVolumeArgsSchema,
   [IPC.PLAYER_SET_BOUNDS]: playerSetBoundsArgsSchema,
+  [IPC.PLAYER_SET_LAYER]: playerSetLayerArgsSchema,
   [IPC.MEDIA_PROBE]: mediaProbeArgsSchema,
   [IPC.MEDIA_EXTRACT_FRAME]: mediaExtractFrameArgsSchema,
   [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
   [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
+  [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
   [IPC.DETECT_CANCEL]: detectCancelArgsSchema,
@@ -222,6 +242,19 @@ const appApi = {
   getInfo: () => invoke<AppInfo>(IPC.APP_INFO),
 };
 
+const settingsApi = {
+  get: () => invoke<Settings>(IPC.SETTINGS_GET),
+  set: (args: SettingsSetArgs) => invoke<Settings>(IPC.SETTINGS_SET, [args]),
+  chooseDirectory: (args: SettingsChooseDirectoryArgs) =>
+    invoke<string | null>(IPC.SETTINGS_CHOOSE_DIRECTORY, [args]),
+};
+
+const sessionApi = {
+  get: () => invoke<WorkspaceState | null>(IPC.SESSION_GET),
+  save: (state: WorkspaceState) => invoke<WorkspaceState>(IPC.SESSION_SAVE, [state]),
+  clear: () => invoke<{ cleared: true }>(IPC.SESSION_CLEAR),
+};
+
 const playerApi = {
   open: (args: PlayerOpenArgs) => invoke<MediaInfo>(IPC.PLAYER_OPEN, [args]),
   openDialog: () => invoke<MediaInfo | null>(IPC.PLAYER_OPEN_DIALOG),
@@ -235,6 +268,7 @@ const playerApi = {
   getFrame: () => invoke<FrameInfo>(IPC.PLAYER_GET_FRAME),
   setVolume: (args: { volume: number }) => invoke<PlayerState>(IPC.PLAYER_SET_VOLUME, [args]),
   setBounds: (bounds: RenderBounds) => invoke<void>(IPC.PLAYER_SET_BOUNDS, [bounds]),
+  setLayer: (args: { level: OverlayLayer }) => invoke<PlayerState>(IPC.PLAYER_SET_LAYER, [args]),
   onState: (listener: (state: PlayerState) => void) => subscribe<PlayerState>(EVENT_WHITELIST.onState, listener),
   onTime: (listener: (event: PlayerTimeEvent) => void) => subscribe<PlayerTimeEvent>(EVENT_WHITELIST.onTime, listener),
   onLoaded: (listener: (info: MediaInfo) => void) => subscribe<MediaInfo>(EVENT_WHITELIST.onLoaded, listener),
@@ -260,6 +294,11 @@ const detectApi = {
     subscribe<DetectProgressEvent>(EVENT_WHITELIST.onDetectProgress, listener),
   onDone: (listener: (event: DetectDoneEvent) => void) =>
     subscribe<DetectDoneEvent>(EVENT_WHITELIST.onDetectDone, listener),
+};
+
+const scopeApi = {
+  extractAudioWaveform: (args: ScopeExtractAudioWaveformArgs) =>
+    invoke<AudioWaveform>(IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM, [args]),
 };
 
 const projectApi = {
@@ -333,8 +372,11 @@ const exportApi = {
 
 const api: WindowApi = {
   app: appApi,
+  settings: settingsApi,
+  session: sessionApi,
   player: playerApi,
   media: mediaApi,
+  scope: scopeApi,
   detect: detectApi,
   project: projectApi,
   shot: shotApi,

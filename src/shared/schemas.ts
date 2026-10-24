@@ -10,6 +10,32 @@ export const emptyArgsSchema = z.tuple([]);
 /** app:info 入参 schema */
 export const appInfoArgsSchema = emptyArgsSchema;
 
+const settingsDirectorySchema = z.string().trim().min(1).max(2000);
+
+export const settingsSchema = z.object({
+  dataRoot: settingsDirectorySchema,
+  cacheDir: settingsDirectorySchema,
+  exportDir: settingsDirectorySchema,
+  stillDir: settingsDirectorySchema,
+});
+
+export const settingsSetArgsSchema = settingsSchema;
+
+export const settingsChooseDirectoryArgsSchema = z.object({
+  title: z.string().trim().min(1).max(100).optional(),
+  defaultPath: z.string().trim().min(1).max(2000).optional(),
+});
+
+export const workspaceStateSchema = z.object({
+  projectId: z.string().min(1).nullable(),
+  timeMs: z.number().finite().min(0),
+  selectedShotId: z.string().min(1).nullable(),
+  leftCollapsed: z.boolean(),
+  rightCollapsed: z.boolean(),
+  volume: z.number().finite().min(0).max(1),
+  shotScrollTop: z.number().finite().min(0).optional(),
+});
+
 /** player:open：mediaPath 与 projectId 至少给一个（项目能力阶段 2 之后再接） */
 export const playerOpenArgsSchema = z
   .object({
@@ -42,6 +68,11 @@ export const playerSetBoundsArgsSchema = z.object({
   y: z.number().finite(),
   width: z.number().finite().min(0),
   height: z.number().finite().min(0),
+});
+
+/** player:setLayer */
+export const playerSetLayerArgsSchema = z.object({
+  level: z.enum(['normal', 'bottom', 'hidden']),
 });
 /** media:probe */
 export const mediaProbeArgsSchema = z.object({
@@ -86,6 +117,11 @@ export const mediaTranscodeProxyArgsSchema = z.object({
 /** media:cancelJob */
 export const mediaCancelJobArgsSchema = z.object({
   jobId: z.string().min(1),
+});
+
+export const scopeExtractAudioWaveformArgsSchema = z.object({
+  path: z.string().min(1),
+  bucketMs: z.number().int().min(20).max(5000).optional(),
 });
 
 const detectWeightsSchema = z.object({

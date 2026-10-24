@@ -33,6 +33,7 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - 运行时依赖 `resources/mpv/libmpv-2.dll`（官方 dev 包，**文件名是 `libmpv-2.dll`，不是 `mpv-2.dll`**；静态链接单文件，无需额外运行时库）。该 DLL 体积约 120MB，按二进制资源处理、不入库，放置到 `resources/mpv/` 即可；打包时由 electron-builder `extraResources` 复制到安装包 `resources/mpv/`。
 - 主进程用 `koffi` 直接调用 libmpv client API；画面经 `wid` 交给 mpv 的 vo/gpu（D3D11）渲染到 Win32 子窗口，渲染层通过 `player:setBounds` 上报播放器区域。因 Chromium DirectComposition 会遮挡原生子窗口，主进程启动时关闭该特性。
 - 帧级能力：`player:frameStep` 前后各 1 帧（等待 `playback-restart` + `time-pos` 稳定 + 帧号实际变化），`player:seek` 使用 `absolute+exact` 精确落帧；25fps 与 23.81fps 素材实测单帧步进稳定。
+- 画面层级：`player:setLayer` 支持 `normal / bottom / hidden`。置底使用 `SetWindowPos(HWND_BOTTOM)`，隐藏使用 `ShowWindow(SW_HIDE)`；播放与声音保持运行，窗口最小化/恢复后按保存层级重新应用，关闭视频重置为 `normal`。
 - 快捷键（渲染层捕获后经 IPC 执行）：`Space` 播放/暂停、`←/→` 逐帧、`Shift+←/→` ±1 秒。
 
 ### 媒体处理（FFmpeg）
@@ -67,6 +68,26 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - `detect:apply` 使用预览 id 确认写库：未锁定镜头被本次结果替换，`locked=1` 镜头保留且重叠候选跳过；场景按确认结果整体替换。
 - Python 依赖：OpenCV ≥ 5.0、NumPy ≥ 2.5。开发期使用 `DSH_PYTHON`、`PYTHON` 或系统 `python`；打包时将 `src/main/detect/python/*.py` 复制到 `resources/detect/python/`。
 
+### 音频波形轨（ScopeService，S21）
+
+- `scope:extractAudioWaveform` 以 8kHz 单声道 f32le 流式读取音频，默认按 100ms 桶计算 peak/RMS；时间轴第四轨共享缩放、平移与播放头，Ctrl+滚轮缩放，Shift+滚轮平移。
+- 音频包络在项目导入/打开后一次提取，主进程按文件路径、大小、修改时间与 bucketMs 做内存与磁盘缓存（`cacheDir/audio-waveforms`）；不使用实时逐帧分析。
+- S20 实验性的逐帧示波器三图已移除，S07 镜头检测算法和原有三层时间轴保持不变。
+
+### 设置与可配置路径（S22）
+
+- `settings:get` / `settings:set` / `settings:chooseDirectory` 提供四类路径设置，配置持久化到 `userData/settings.json`。
+- 可配置项目数据根目录、媒体缓存目录、导出根目录和截图根目录；导出与截图目录按项目 ID 自动建立子目录。
+- 所有服务统一经 `src/main/paths.ts` 解析路径；数据根目录切换会即时重建 DataLayer 与依赖服务，不迁移既有项目。
+- `DSH_DATA_ROOT` 环境变量始终保持最高优先级，启用时设置界面会禁用路径编辑，确保冒烟和隔离测试不受用户配置影响。
+
+### 工作区会话恢复（S23）
+
+- `session:get` / `session:save` / `session:clear` 将当前项目、播放位置、选中镜头、左右栏折叠、音量与镜头滚动位置保存到 `userData/session.json`。
+- 渲染层对连续变化节流保存；主进程在窗口关闭/退出时通过 `__CAPTURE_WORKSPACE_STATE__` 读取最终快照，退出写盘失败不会阻止程序关闭。
+- `session.json` 使用临时文件 + `rename` 原子替换；损坏、项目不存在或无项目时静默回到默认工作区，不弹错误。
+- 启动恢复成功后自动 seek 到上次位置、恢复选中镜头、音量、面板折叠和镜头列表滚动位置。
+
 ### 数据层（SQLite / better-sqlite3）
 
 - 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
@@ -96,6 +117,7 @@ $env:SMOKE_RESULT = 'D:\tmp\smoke.json'          # 结果 JSON
 $env:SMOKE_HOLD_MS = '15000'                     # 保持窗口，便于外部截屏目检（可选）
 $env:DSH_DATA_ROOT = 'D:\tmp\data-smoke'          # 数据层测试根目录（隔离主库）
 $env:SMOKE_DATA_PKG = 'D:\tmp\data-smoke\pkg\project.lapian'  # 项目包保存/打开往返
+$env:SMOKE_SCOPE_VIDEO = 'D:\path\clip.mp4'       # 音频波形包络断言
 npm run smoke
 ```
 
@@ -119,13 +141,14 @@ npm run smoke
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
 | `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
+| `feature/scope` | 音频波形、设置、会话与画面层级 | 第四层音频包络、可配置路径、工作区恢复、视频层控制（S24） |
 
 ## 智能体工作目录
 
 | 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
 |---|---|---|---|---|
 | dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
-| codex | `feature/ui`、`feature/detect`、`feature/integration` | `src/renderer`、`src/preload`、`src/main/detect`、`src/main/app.ts` | 界面、镜头检测与集成联调 | **已完成（S14）** |
+| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings,session,player}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络、设置、会话与画面层级 | **已完成（S24）** |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
@@ -133,6 +156,16 @@ npm run smoke
 > S07 状态（2026-10-24）：`feature/detect` 已完成 DetectService、Python 算法、`detect:*` IPC、migration 003 与合成帧单测；真实样例 dry-run/apply 已通过。UI 接入仍按计划留给 S14。
 
 > S14 状态（2026-10-24）：**已完成**。`feature/integration` 已接通本地导入 / 代理转码 / 检测预览与确认写库 / 三栏真实数据 / 截图标注 / PDF 与 Word 导出；UI 类型检查、Electron 冒烟与真实项目联调通过。
+
+> S20 状态（2026-10-24）：逐帧示波器三图因抽帧延迟无法满足实时要求，已由 S21 移除。
+
+> S21 状态（2026-10-24）：**已完成**。`feature/scope` 保留音频波形提取、会话缓存、时间轴第四轨、播放头与缩放/平移联动；逐帧分析 UI、IPC、Python 和测试残留已清除。
+
+> S22 状态（2026-10-24）：**已完成**。设置界面可持久化数据、缓存、导出、截图四类路径；数据根目录切换即时重建服务，导出/截图/缓存路径按新设置生效，`DSH_DATA_ROOT` 保持最高优先级。
+
+> S23 状态（2026-10-24）：**已完成**。工作区会话退出时原子保存、启动时自动恢复项目/时码/镜头/面板/音量/滚动位置；失效或损坏会话静默忽略。
+
+> S24 状态（2026-10-24）：**已完成**。原生视频窗口支持正常/置底/隐藏三态，隐藏时显示占位且播放继续；最小化恢复后层级保持，关闭视频重置。
 
 ## 提交规范
 

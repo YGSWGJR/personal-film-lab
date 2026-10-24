@@ -19,6 +19,7 @@ import type {
   Note,
   NoteUpsertArgs,
   PlayerState,
+  OverlayLayer,
   Project,
   ProjectCreateArgs,
   ProjectOpenArgs,
@@ -27,6 +28,10 @@ import type {
   ProjectSaveResult,
   ProjectUpdateArgs,
   RenderBounds,
+  ScopeExtractAudioWaveformArgs,
+  Settings,
+  SettingsChooseDirectoryArgs,
+  SettingsSetArgs,
   Shot,
   ShotCreateArgs,
   ShotUpdateArgs,
@@ -48,6 +53,8 @@ import type {
   TranscodeProxyResult,
   StoryboardExportArgs,
   StoryboardExportResult,
+  AudioWaveform,
+  WorkspaceState,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import type { CaptureService } from '../capture/capture-service';
@@ -59,6 +66,9 @@ import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
+import type { ScopeService } from '../scope/scope-service';
+import { SettingsError, type SettingsService } from '../settings/settings-service';
+import { SessionError, type SessionService } from '../session/session-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
@@ -71,6 +81,9 @@ export interface IpcDeps {
   getTermTransfer(): TermTransferService | null;
   getExport(): ExportService | null;
   getDetect(): DetectService | null;
+  getScope(): ScopeService | null;
+  getSettings(): SettingsService | null;
+  getSession(): SessionService | null;
 }
 
 /**
@@ -118,6 +131,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     if (!service) throw new DataError('DATA_UNAVAILABLE', '镜头检测服务尚未初始化');
     return service;
   };
+  const requireScope = (): ScopeService => {
+    const service = deps.getScope();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '示波器服务尚未初始化');
+    return service;
+  };
+  const requireSettings = (): SettingsService => {
+    const service = deps.getSettings();
+    if (!service) throw new SettingsError('SETTINGS_UNAVAILABLE', '设置服务尚未初始化');
+    return service;
+  };
+  const requireSession = (): SessionService => {
+    const service = deps.getSession();
+    if (!service) throw new SessionError('SESSION_UNAVAILABLE', '会话服务尚未初始化');
+    return service;
+  };
 
   ipcMain.handle(
     IPC.APP_INFO,
@@ -126,6 +154,36 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       platform: process.platform,
       appDataPath: app.getPath('userData'),
     })),
+  );
+
+  // ---------- settings ----------
+  ipcMain.handle(
+    IPC.SETTINGS_GET,
+    withEnvelope((): Settings => requireSettings().get()),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_SET,
+    withEnvelope((args: SettingsSetArgs): Settings => requireSettings().set(args)),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_CHOOSE_DIRECTORY,
+    withEnvelope((args: SettingsChooseDirectoryArgs): Promise<string | null> =>
+      requireSettings().chooseDirectory(args),
+    ),
+  );
+
+  // ---------- session ----------
+  ipcMain.handle(
+    IPC.SESSION_GET,
+    withEnvelope((): WorkspaceState | null => requireSession().get()),
+  );
+  ipcMain.handle(
+    IPC.SESSION_SAVE,
+    withEnvelope((state: WorkspaceState): WorkspaceState => requireSession().save(state)),
+  );
+  ipcMain.handle(
+    IPC.SESSION_CLEAR,
+    withEnvelope((): { cleared: true } => requireSession().clear()),
   );
 
   // ---------- player ----------
@@ -181,6 +239,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     IPC.PLAYER_SET_BOUNDS,
     withEnvelope((bounds: RenderBounds): void => requirePlayer().setBounds(bounds)),
   );
+  ipcMain.handle(
+    IPC.PLAYER_SET_LAYER,
+    withEnvelope((args: { level: OverlayLayer }): PlayerState =>
+      requirePlayer().setLayer(args.level),
+    ),
+  );
 
   // ---------- media ----------
   ipcMain.handle(
@@ -202,6 +266,14 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.MEDIA_CANCEL_JOB,
     withEnvelope((args: { jobId: string }): CancelJobResult => requireMedia().cancelJob(args.jobId)),
+  );
+
+  // ---------- scope ----------
+  ipcMain.handle(
+    IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM,
+    withEnvelope((args: ScopeExtractAudioWaveformArgs): Promise<AudioWaveform> =>
+      requireScope().extractAudioWaveform(args),
+    ),
   );
 
   // ---------- detect ----------

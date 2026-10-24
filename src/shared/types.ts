@@ -10,6 +10,49 @@ export interface AppInfo {
   appDataPath: string;
 }
 
+export interface Settings {
+  dataRoot: string;
+  cacheDir: string;
+  exportDir: string;
+  stillDir: string;
+  /** DSH_DATA_ROOT 环境变量生效时，路径设置被环境覆盖 */
+  environmentOverride: boolean;
+}
+
+export interface SettingsSetArgs {
+  dataRoot: string;
+  cacheDir: string;
+  exportDir: string;
+  stillDir: string;
+}
+
+export interface SettingsChooseDirectoryArgs {
+  title?: string;
+  defaultPath?: string;
+}
+
+export interface SettingsApi {
+  get(): Promise<IpcResult<Settings>>;
+  set(args: SettingsSetArgs): Promise<IpcResult<Settings>>;
+  chooseDirectory(args: SettingsChooseDirectoryArgs): Promise<IpcResult<string | null>>;
+}
+
+export interface WorkspaceState {
+  projectId: string | null;
+  timeMs: number;
+  selectedShotId: string | null;
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+  volume: number;
+  shotScrollTop?: number;
+}
+
+export interface SessionApi {
+  get(): Promise<IpcResult<WorkspaceState | null>>;
+  save(state: WorkspaceState): Promise<IpcResult<WorkspaceState>>;
+  clear(): Promise<IpcResult<{ cleared: true }>>;
+}
+
 /** IPC 错误体（S01 §6.1） */
 export interface IpcError {
   code: string;
@@ -42,6 +85,8 @@ export interface MediaProbeResult extends MediaInfo {
   hasAudio: boolean;
 }
 
+export type OverlayLayer = 'normal' | 'bottom' | 'hidden';
+
 /** 播放器状态（player:getState / player:event:state） */
 export interface PlayerState {
   hasFile: boolean;
@@ -53,6 +98,7 @@ export interface PlayerState {
   width: number;
   height: number;
   fps: number;
+  layer: OverlayLayer;
 }
 
 /** 当前帧信息（player:getFrame / player:frameStep 返回） */
@@ -213,6 +259,7 @@ export interface PlayerApi {
   getFrame(): Promise<IpcResult<FrameInfo>>;
   setVolume(args: { volume: number }): Promise<IpcResult<PlayerState>>;
   setBounds(bounds: RenderBounds): Promise<IpcResult<void>>;
+  setLayer(args: { level: OverlayLayer }): Promise<IpcResult<PlayerState>>;
   onState(listener: (state: PlayerState) => void): () => void;
   onTime(listener: (event: PlayerTimeEvent) => void): () => void;
   onLoaded(listener: (info: MediaInfo) => void): () => void;
@@ -228,10 +275,30 @@ export interface MediaApi {
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
 }
 
+export interface AudioWaveformBucket {
+  startMs: number;
+  peak: number;
+  rms: number;
+}
+
+export interface AudioWaveform {
+  buckets: AudioWaveformBucket[];
+  bucketMs: number;
+  totalMs: number;
+}
+
+export interface ScopeExtractAudioWaveformArgs {
+  path: string;
+  bucketMs?: number;
+}
+
 export interface WindowApi {
   app: AppApi;
+  settings: SettingsApi;
+  session: SessionApi;
   player: PlayerApi;
   media: MediaApi;
+  scope: ScopeApi;
   project: ProjectApi;
   shot: ShotApi;
   still: StillApi;
@@ -721,4 +788,8 @@ export interface DetectApi {
   apply(args: DetectApplyArgs): Promise<IpcResult<DetectApplyResult>>;
   onProgress(listener: (event: DetectProgressEvent) => void): () => void;
   onDone(listener: (event: DetectDoneEvent) => void): () => void;
+}
+
+export interface ScopeApi {
+  extractAudioWaveform(args: ScopeExtractAudioWaveformArgs): Promise<IpcResult<AudioWaveform>>;
 }

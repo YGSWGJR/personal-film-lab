@@ -6,6 +6,16 @@ export const IPC = {
   /** app 域：返回版本 / 平台 / 用户数据目录（I 方向） */
   APP_INFO: 'app:info',
 
+  /** settings 域 */
+  SETTINGS_GET: 'settings:get',
+  SETTINGS_SET: 'settings:set',
+  SETTINGS_CHOOSE_DIRECTORY: 'settings:chooseDirectory',
+
+  /** session 域：工作区会话恢复 */
+  SESSION_GET: 'session:get',
+  SESSION_SAVE: 'session:save',
+  SESSION_CLEAR: 'session:clear',
+
   /** player 域（I 方向） */
   PLAYER_OPEN: 'player:open',
   PLAYER_OPEN_DIALOG: 'player:openDialog',
@@ -19,6 +29,7 @@ export const IPC = {
   PLAYER_GET_FRAME: 'player:getFrame',
   PLAYER_SET_VOLUME: 'player:setVolume',
   PLAYER_SET_BOUNDS: 'player:setBounds',
+  PLAYER_SET_LAYER: 'player:setLayer',
 
   /** player 域（E 方向，主进程 → 渲染层） */
   PLAYER_EVENT_STATE: 'player:event:state',
@@ -43,6 +54,9 @@ export const IPC = {
   DETECT_APPLY: 'detect:apply',
   DETECT_EVENT_PROGRESS: 'detect:event:progress',
   DETECT_EVENT_DONE: 'detect:event:done',
+
+  /** scope 域（S21）：音频包络 */
+  SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',
 
   /** data 域：项目 / 镜头 / 静帧 / 标签 / 笔记 / 术语（I 方向，S01 §6.2） */
   PROJECT_CREATE: 'project:create',

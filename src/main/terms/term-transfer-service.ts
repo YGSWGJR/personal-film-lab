@@ -1,9 +1,10 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
-import { app, dialog, type BrowserWindow } from 'electron';
+import { dialog, type BrowserWindow } from 'electron';
 import type { DataLayer } from '../../data/db';
 import { DataError } from '../../data/errors';
 import type { TermExportResult, TermImportResult, TermJsonEntry } from '../../shared/types';
+import { resolveTermExportDir } from '../paths';
 
 const JSON_FILTERS = [{ name: '术语库 JSON', extensions: ['json'] }];
 
@@ -15,8 +16,11 @@ export class TermTransferService {
 
   async importJson(): Promise<TermImportResult> {
     const win = this.requireWindow();
+    const defaultDir = resolveTermExportDir();
+    mkdirSync(defaultDir, { recursive: true });
     const selection = await dialog.showOpenDialog(win, {
       title: '导入术语库',
+      defaultPath: defaultDir,
       properties: ['openFile'],
       filters: JSON_FILTERS,
     });
@@ -67,9 +71,11 @@ export class TermTransferService {
     const win = this.requireWindow();
     const terms = this.data.terms.list();
     const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const defaultDir = resolveTermExportDir();
+    mkdirSync(defaultDir, { recursive: true });
     const result = await dialog.showSaveDialog(win, {
       title: '导出术语库',
-      defaultPath: join(app.getPath('documents'), `lapian-terms-${stamp}.json`),
+      defaultPath: join(defaultDir, `lapian-terms-${stamp}.json`),
       filters: JSON_FILTERS,
     });
     if (result.canceled || !result.filePath) {
