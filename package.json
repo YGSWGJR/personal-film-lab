@@ -11,8 +11,9 @@
     "start": "electron-vite build && electron-vite preview",
     "smoke": "electron-vite build && electron . --smoke-test --disable-gpu",
     "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
-    "build": "electron-vite build && electron-builder",
-    "build:dir": "electron-vite build && electron-builder --dir"
+    "prepare:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-python-runtime.ps1",
+    "build": "electron-vite build && npm run prepare:python && electron-builder",
+    "build:dir": "electron-vite build && npm run prepare:python && electron-builder --dir"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -73,6 +74,13 @@
         "to": "detect/python",
         "filter": [
           "*.py"
+        ]
+      },
+      {
+        "from": "resources/python",
+        "to": "python",
+        "filter": [
+          "**/*"
         ]
       }
     ],

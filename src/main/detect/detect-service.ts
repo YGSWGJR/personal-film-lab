@@ -28,6 +28,8 @@ import { DetectError } from './detect-error';
 
 const DEFAULT_WEIGHTS = { s: 0.15, c: 0.15, h: 0.25, hv: 0.2, edge: 0.1, grid: 0.15 };
 const ANALYSIS_TIMEOUT_MS = 10 * 60_000;
+const EMBEDDED_PYTHON_BOOTSTRAP =
+  "import runpy,sys; sys.path.insert(0,sys.argv[1]); runpy.run_path(sys.argv[2],run_name='__main__')";
 
 interface InternalDetectJob {
   jobId: string;
@@ -359,17 +361,23 @@ export class DetectService {
     options: ResolvedDetectOptions,
   ): Promise<PythonAnalyzeResult> {
     const python = resolvePythonExecutable();
+    const embeddedPython = embeddedPythonExecutable();
+    const embedded = embeddedPython !== null && python === embeddedPython;
+    console.info(`[detect] python runtime: ${embedded ? 'embedded' : 'external'} (${python})`);
     const script = resolveServerScript();
     if (!existsSync(script)) {
       throw new DetectError('DETECT_SERVER_NOT_FOUND', `检测服务不存在：${script}`, { script });
     }
-    const child = spawn(python, [script], {
-      cwd: dirname(script),
+    const scriptDir = dirname(script);
+    const pythonArgs = embedded ? ['-c', EMBEDDED_PYTHON_BOOTSTRAP, scriptDir, script] : [script];
+    const child = spawn(python, pythonArgs, {
+      cwd: scriptDir,
       windowsHide: true,
       env: {
         ...process.env,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUNBUFFERED: '1',
+        ...(embedded ? { PYTHONPATH: join(process.resourcesPath, 'python', 'Lib', 'site-packages') } : {}),
       },
     });
     job.child = child;
@@ -563,7 +571,14 @@ export function resolveIntervalMs(
   return Math.max(50, Math.round((1000 / Math.max(1, fps)) * frameStep));
 }
 
-function resolvePythonExecutable(): string {
+function embeddedPythonExecutable(resourcesPath = process.resourcesPath): string | null {
+  const executable = join(resourcesPath, 'python', 'python.exe');
+  return existsSync(executable) ? executable : null;
+}
+
+export function resolvePythonExecutable(resourcesPath = process.resourcesPath): string {
+  const embedded = embeddedPythonExecutable(resourcesPath);
+  if (embedded) return embedded;
   return process.env['DSH_PYTHON'] || process.env['PYTHON'] || 'python';
 }
 
