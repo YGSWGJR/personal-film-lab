@@ -113,6 +113,8 @@ export interface ExtractFrameArgs {
   format?: FrameFormat;
   /** JPG 质量，1（最好）..31（最差），默认 2 */
   quality?: number;
+  /** 可选最大输出宽度，用于示波器等低分辨率分析；默认保持原始宽度 */
+  maxWidth?: number;
   /** 默认 60s */
   timeoutMs?: number;
 }
@@ -228,10 +230,90 @@ export interface MediaApi {
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
 }
 
+export interface ScopeHistogram {
+  y: number[];
+  r: number[];
+  g: number[];
+  b: number[];
+}
+
+export interface ScopeWaveformPoint {
+  x: number;
+  min: number;
+  max: number;
+  mean: number;
+}
+
+export interface ScopeVectorPoint {
+  u: number;
+  v: number;
+  w: number;
+}
+
+export interface ScopeParadePoint {
+  min: number;
+  max: number;
+  mean: number;
+}
+
+export interface ScopeParade {
+  r: ScopeParadePoint[];
+  g: ScopeParadePoint[];
+  b: ScopeParadePoint[];
+}
+
+export interface ScopeCiePoint {
+  x: number;
+  y: number;
+  w: number;
+}
+
+export interface ScopeCiePoint2D {
+  x: number;
+  y: number;
+}
+
+export interface ScopeCieAnalysis {
+  points: ScopeCiePoint[];
+  /** sRGB 三角 R/G/B + D65 白点 */
+  gamut: ScopeCiePoint2D[];
+}
+
+export interface ScopeAnalysis {
+  histogram: ScopeHistogram;
+  waveform: ScopeWaveformPoint[];
+  vectorscope: ScopeVectorPoint[];
+  parade: ScopeParade;
+  cie: ScopeCieAnalysis;
+}
+
+export interface ScopeAnalyzeFrameArgs {
+  path: string;
+  timeMs: number;
+}
+
+export interface AudioWaveformBucket {
+  startMs: number;
+  peak: number;
+  rms: number;
+}
+
+export interface AudioWaveform {
+  buckets: AudioWaveformBucket[];
+  bucketMs: number;
+  totalMs: number;
+}
+
+export interface ScopeExtractAudioWaveformArgs {
+  path: string;
+  bucketMs?: number;
+}
+
 export interface WindowApi {
   app: AppApi;
   player: PlayerApi;
   media: MediaApi;
+  scope: ScopeApi;
   project: ProjectApi;
   shot: ShotApi;
   still: StillApi;
@@ -721,4 +803,9 @@ export interface DetectApi {
   apply(args: DetectApplyArgs): Promise<IpcResult<DetectApplyResult>>;
   onProgress(listener: (event: DetectProgressEvent) => void): () => void;
   onDone(listener: (event: DetectDoneEvent) => void): () => void;
+}
+
+export interface ScopeApi {
+  analyzeFrame(args: ScopeAnalyzeFrameArgs): Promise<IpcResult<ScopeAnalysis>>;
+  extractAudioWaveform(args: ScopeExtractAudioWaveformArgs): Promise<IpcResult<AudioWaveform>>;
 }

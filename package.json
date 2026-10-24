@@ -74,6 +74,13 @@
         "filter": [
           "*.py"
         ]
+      },
+      {
+        "from": "src/main/scope/python",
+        "to": "scope/python",
+        "filter": [
+          "*.py"
+        ]
       }
     ],
     "npmRebuild": false

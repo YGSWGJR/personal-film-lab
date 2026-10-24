@@ -42,9 +42,12 @@ import {
   playerSeekArgsSchema,
   playerSetBoundsArgsSchema,
   playerSetVolumeArgsSchema,
+  scopeAnalyzeFrameArgsSchema,
+  scopeExtractAudioWaveformArgsSchema,
 } from '../shared/schemas';
 import type {
   AppInfo,
+  AudioWaveform,
   CancelJobResult,
   DetectApplyArgs,
   DetectApplyResult,
@@ -67,6 +70,9 @@ import type {
   PlayerState,
   PlayerTimeEvent,
   RenderBounds,
+  ScopeAnalysis,
+  ScopeAnalyzeFrameArgs,
+  ScopeExtractAudioWaveformArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
   WindowApi,
@@ -129,6 +135,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
   [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
+  [IPC.SCOPE_ANALYZE_FRAME]: scopeAnalyzeFrameArgsSchema,
+  [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
   [IPC.DETECT_CANCEL]: detectCancelArgsSchema,
@@ -262,6 +270,13 @@ const detectApi = {
     subscribe<DetectDoneEvent>(EVENT_WHITELIST.onDetectDone, listener),
 };
 
+const scopeApi = {
+  analyzeFrame: (args: ScopeAnalyzeFrameArgs) =>
+    invoke<ScopeAnalysis>(IPC.SCOPE_ANALYZE_FRAME, [args]),
+  extractAudioWaveform: (args: ScopeExtractAudioWaveformArgs) =>
+    invoke<AudioWaveform>(IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM, [args]),
+};
+
 const projectApi = {
   create: (args: ProjectCreateArgs) => invoke<Project>(IPC.PROJECT_CREATE, [args]),
   list: () => invoke<Project[]>(IPC.PROJECT_LIST),
@@ -335,6 +350,7 @@ const api: WindowApi = {
   app: appApi,
   player: playerApi,
   media: mediaApi,
+  scope: scopeApi,
   detect: detectApi,
   project: projectApi,
   shot: shotApi,

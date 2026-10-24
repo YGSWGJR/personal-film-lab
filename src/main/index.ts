@@ -11,6 +11,7 @@ import { ExportService } from './export/export-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
+import { ScopeService } from './scope/scope-service';
 import { runSmokeTest } from './smoke';
 import { TermTransferService } from './terms/term-transfer-service';
 
@@ -32,6 +33,7 @@ let captureService: CaptureService | null = null;
 let termTransferService: TermTransferService | null = null;
 let exportService: ExportService | null = null;
 let detectService: DetectService | null = null;
+let scopeService: ScopeService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -40,6 +42,7 @@ function ensureMainWindow(): BrowserWindow {
   mainWindow = win;
   playerService = new PlayerService(win);
   mediaService = new MediaService(() => mainWindow);
+  scopeService = new ScopeService(mediaService);
   captureService =
     dataLayer && mediaService
       ? new CaptureService(dataLayer, mediaService, (still) => {
@@ -81,6 +84,8 @@ function ensureMainWindow(): BrowserWindow {
       exportService = null;
       detectService?.dispose();
       detectService = null;
+      scopeService?.dispose();
+      scopeService = null;
       mediaService?.dispose();
       mediaService = null;
     }
@@ -99,6 +104,7 @@ registerIpcHandlers({
   getTermTransfer: () => termTransferService,
   getExport: () => exportService,
   getDetect: () => detectService,
+  getScope: () => scopeService,
 });
 
 app.whenReady().then(() => {
@@ -138,4 +144,6 @@ app.on('before-quit', () => {
   exportService = null;
   detectService?.dispose();
   detectService = null;
+  scopeService?.dispose();
+  scopeService = null;
 });

@@ -27,6 +27,9 @@ import type {
   ProjectSaveResult,
   ProjectUpdateArgs,
   RenderBounds,
+  ScopeAnalysis,
+  ScopeAnalyzeFrameArgs,
+  ScopeExtractAudioWaveformArgs,
   Shot,
   ShotCreateArgs,
   ShotUpdateArgs,
@@ -48,6 +51,7 @@ import type {
   TranscodeProxyResult,
   StoryboardExportArgs,
   StoryboardExportResult,
+  AudioWaveform,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import type { CaptureService } from '../capture/capture-service';
@@ -59,6 +63,7 @@ import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
+import type { ScopeService } from '../scope/scope-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
@@ -71,6 +76,7 @@ export interface IpcDeps {
   getTermTransfer(): TermTransferService | null;
   getExport(): ExportService | null;
   getDetect(): DetectService | null;
+  getScope(): ScopeService | null;
 }
 
 /**
@@ -116,6 +122,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireDetect = (): DetectService => {
     const service = deps.getDetect();
     if (!service) throw new DataError('DATA_UNAVAILABLE', '镜头检测服务尚未初始化');
+    return service;
+  };
+  const requireScope = (): ScopeService => {
+    const service = deps.getScope();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '示波器服务尚未初始化');
     return service;
   };
 
@@ -202,6 +213,20 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.MEDIA_CANCEL_JOB,
     withEnvelope((args: { jobId: string }): CancelJobResult => requireMedia().cancelJob(args.jobId)),
+  );
+
+  // ---------- scope ----------
+  ipcMain.handle(
+    IPC.SCOPE_ANALYZE_FRAME,
+    withEnvelope((args: ScopeAnalyzeFrameArgs): Promise<ScopeAnalysis> =>
+      requireScope().analyzeFrame(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM,
+    withEnvelope((args: ScopeExtractAudioWaveformArgs): Promise<AudioWaveform> =>
+      requireScope().extractAudioWaveform(args),
+    ),
   );
 
   // ---------- detect ----------
