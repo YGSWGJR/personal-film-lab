@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import emptyProjectImage from '../../../assets/design/design_empty_project_1024x768.png';
 import emptyShotsImage from '../../../assets/design/design_empty_shots_1024x768.png';
 import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x768.png';
@@ -44,6 +44,7 @@ import type {
   StoryboardExportArgs,
   Tag,
   Term,
+  WorkspaceState,
 } from '../../shared/types';
 
 const info = ref<AppInfo | null>(null);
@@ -92,9 +93,12 @@ const settingsOpen = ref(false);
 const settings = ref<Settings | null>(null);
 const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
+const shotScrollTop = ref(0);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
 let lastPlayerBounds: RenderBounds | null = null;
+let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let restoringSession = true;
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -331,7 +335,10 @@ async function loadAudioWaveform(path: string, generation: number): Promise<void
   }
 }
 
-async function loadProject(project: Project): Promise<void> {
+async function loadProject(
+  project: Project,
+  restoreState: WorkspaceState | null = null,
+): Promise<void> {
   const projectChanged = activeProject.value?.id !== project.id;
   activeProject.value = project;
   demoMode.value = false;
@@ -351,25 +358,36 @@ async function loadProject(project: Project): Promise<void> {
   projectStills.value = loadedStills;
   seedDemoNoteMap(mapped, loadedNotes);
   markers.value = markersFromData(mapped, loadedStills, loadedNotes);
-  selectedId.value = mapped[0]?.id ?? null;
-  previewTimeMs.value = mapped[0]?.startMs ?? 0;
+  const restoredShot = restoreState
+    ? mapped.find((shot) => shot.id === restoreState.selectedShotId) ?? null
+    : null;
+  selectedId.value = restoredShot?.id ?? mapped[0]?.id ?? null;
+  previewTimeMs.value = restoreState?.timeMs ?? mapped[0]?.startMs ?? 0;
   await Promise.all([loadTerms(true, true), loadTags()]);
 
   const playbackCandidates = [project.media.proxyPath, project.source.path]
     .filter((path): path is string => Boolean(path))
     .filter((path, index, paths) => paths.findIndex((item) => samePath(item, path)) === index);
+  let playbackReady = false;
   for (const [index, path] of playbackCandidates.entries()) {
-    if (player.hasFile && samePath(loadedPlaybackPath.value, path)) return;
+    if (player.hasFile && samePath(loadedPlaybackPath.value, path)) {
+      playbackReady = true;
+      break;
+    }
     if (await openMediaPath(path, false, false)) {
       if (index > 0) showToast('代理文件不可用，已切换为源文件播放。');
-      return;
+      playbackReady = true;
+      break;
     }
   }
-  if (playbackCandidates.length > 0) {
+  if (!playbackReady && playbackCandidates.length > 0) {
     await closePlayer();
     showToast('项目媒体文件无法打开，请检查文件是否已移动。', 'error', '播放器打开失败');
   } else if (player.hasFile) {
-    await closePlayer();
+    if (playbackCandidates.length === 0) await closePlayer();
+  }
+  if (restoreState && playbackReady) {
+    await restorePlaybackState(restoreState);
   }
 }
 
@@ -1096,6 +1114,64 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
   }
 }
 
+function workspaceStateSnapshot(): WorkspaceState {
+  return {
+    projectId: demoMode.value ? null : activeProject.value?.id ?? null,
+    timeMs: Math.max(0, Math.round(displayTimeMs.value)),
+    selectedShotId: selectedId.value,
+    leftCollapsed: leftCollapsed.value,
+    rightCollapsed: rightCollapsed.value,
+    volume: player.volume,
+    shotScrollTop: shotScrollTop.value,
+  };
+}
+
+function scheduleWorkspaceSave(immediate = false): void {
+  if (restoringSession) return;
+  const save = (): void => {
+    sessionSaveTimer = null;
+    void window.api.session.save(workspaceStateSnapshot()).catch((error) => {
+      console.warn('[session] 工作区状态保存失败', error);
+    });
+  };
+  if (immediate) {
+    if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+    save();
+  } else if (!sessionSaveTimer) {
+    sessionSaveTimer = setTimeout(save, 350);
+  }
+}
+
+async function restorePlaybackState(state: WorkspaceState): Promise<void> {
+  if (!player.hasFile) return;
+  const bounded = Math.max(0, Math.min(state.timeMs, displayDurationMs.value));
+  const seeked = await window.api.player.seek({ timeMs: bounded });
+  if (seeked.ok) Object.assign(player, seeked.data);
+  previewTimeMs.value = bounded;
+  const volume = await window.api.player.setVolume({ volume: state.volume });
+  if (volume.ok) Object.assign(player, volume.data);
+}
+
+window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
+
+watch(
+  [
+    () => activeProject.value?.id,
+    selectedId,
+    leftCollapsed,
+    rightCollapsed,
+    () => player.volume,
+    shotScrollTop,
+  ],
+  () => scheduleWorkspaceSave(true),
+  { flush: 'post' },
+);
+
+watch(
+  () => player.timeMs,
+  () => scheduleWorkspaceSave(),
+);
+
 async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
   stopDetectionPolling();
@@ -1271,9 +1347,38 @@ onMounted(async () => {
 
   await loadSettings();
 
+  let savedSession: WorkspaceState | null = null;
+  const sessionResult = await api.session.get();
+  if (sessionResult.ok) {
+    savedSession = sessionResult.data;
+  } else {
+    console.warn(`[session] 读取失败：${sessionResult.error.code} ${sessionResult.error.message}`);
+  }
   try {
     const projectResult = await api.project.list();
-    if (projectResult.ok && projectResult.data.length > 0) {
+    if (savedSession?.projectId) {
+      const project = projectResult.ok
+        ? projectResult.data.find((item) => item.id === savedSession?.projectId) ?? null
+        : null;
+      if (project) {
+        leftCollapsed.value = savedSession.leftCollapsed;
+        rightCollapsed.value = savedSession.rightCollapsed;
+        shotScrollTop.value = savedSession.shotScrollTop ?? 0;
+        await loadProject(project, savedSession);
+      } else {
+        leftCollapsed.value = false;
+        rightCollapsed.value = false;
+        shotScrollTop.value = 0;
+        enterDemoWorkspace();
+        void api.session.clear();
+      }
+    } else if (savedSession) {
+      leftCollapsed.value = false;
+      rightCollapsed.value = false;
+      shotScrollTop.value = 0;
+      enterDemoWorkspace();
+      void api.session.clear();
+    } else if (projectResult.ok && projectResult.data.length > 0) {
       await loadProject(projectResult.data[0]);
     } else {
       await loadTerms();
@@ -1335,17 +1440,25 @@ onMounted(async () => {
   );
 
   await nextTick();
+  restoringSession = false;
   window.addEventListener('keydown', handleKeydown);
+  window.addEventListener('beforeunload', handleBeforeUnload);
 });
+
+function handleBeforeUnload(): void {
+  scheduleWorkspaceSave(true);
+}
 
 onBeforeUnmount(() => {
   for (const unsubscribe of unsubscribers) unsubscribe();
   unsubscribers.length = 0;
   window.removeEventListener('keydown', handleKeydown);
+  window.removeEventListener('beforeunload', handleBeforeUnload);
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
   stopDetectionPolling();
   audioGeneration += 1;
+  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
 });
 </script>
 
@@ -1422,10 +1535,12 @@ onBeforeUnmount(() => {
         :selected-id="selectedId"
         :current-time-ms="displayTimeMs"
         :empty-image="emptyShotsImage"
+        :initial-scroll-top="shotScrollTop"
         @select="selectShot"
         @add-shot="addShotAtPlayhead"
         @detect="openDetection"
         @collapse="leftCollapsed = true"
+        @scroll-position="shotScrollTop = $event"
       />
 
       <PlayerWorkspace
