@@ -6,6 +6,7 @@ import type {
   CancelJobResult,
   DetectApplyArgs,
   DetectApplyResult,
+  DetectEnvCheck,
   DetectJobSnapshot,
   DetectRunArgs,
   DetectRunResult,
@@ -292,6 +293,10 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
 
   // ---------- detect ----------
+  ipcMain.handle(
+    IPC.DETECT_CHECK_ENV,
+    withEnvelope((): Promise<DetectEnvCheck> => requireDetect().checkEnvironment()),
+  );
   ipcMain.handle(
     IPC.DETECT_RUN,
     withEnvelope((args: DetectRunArgs): DetectRunResult => requireDetect().run(args)),

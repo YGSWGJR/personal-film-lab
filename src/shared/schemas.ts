@@ -154,6 +154,8 @@ export const detectRunArgsSchema = z.object({
   dryRun: z.boolean().optional(),
 });
 
+export const detectCheckEnvArgsSchema = z.object({});
+
 export const detectCancelArgsSchema = z.object({
   jobId: z.string().min(1),
 });

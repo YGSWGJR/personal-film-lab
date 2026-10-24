@@ -5,6 +5,7 @@ import { fail } from '../shared/ipc-result';
 import {
   emptyArgsSchema,
   detectApplyArgsSchema,
+  detectCheckEnvArgsSchema,
   detectCancelArgsSchema,
   detectGetJobArgsSchema,
   detectRunArgsSchema,
@@ -54,6 +55,7 @@ import type {
   AudioWaveform,
   CancelJobResult,
   DetectApplyArgs,
+  DetectEnvCheck,
   DetectApplyResult,
   DetectDoneEvent,
   DetectJobSnapshot,
@@ -157,6 +159,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
+  [IPC.DETECT_CHECK_ENV]: detectCheckEnvArgsSchema,
   [IPC.DETECT_CANCEL]: detectCancelArgsSchema,
   [IPC.DETECT_GET_JOB]: detectGetJobArgsSchema,
   [IPC.DETECT_APPLY]: detectApplyArgsSchema,
@@ -296,6 +299,7 @@ const mediaApi = {
 };
 
 const detectApi = {
+  checkEnv: () => invoke<DetectEnvCheck>(IPC.DETECT_CHECK_ENV, [{}]),
   run: (args: DetectRunArgs) => invoke<DetectRunResult>(IPC.DETECT_RUN, [args]),
   cancel: (args: { jobId: string }) => invoke<void>(IPC.DETECT_CANCEL, [args]),
   getJob: (args: { jobId: string }) => invoke<DetectJobSnapshot>(IPC.DETECT_GET_JOB, [args]),

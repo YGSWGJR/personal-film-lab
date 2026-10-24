@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -8,6 +8,7 @@ import type {
   DetectApplyArgs,
   DetectApplyResult,
   DetectDoneEvent,
+  DetectEnvCheck,
   DetectJobSnapshot,
   DetectJobStatus,
   DetectOptions,
@@ -28,8 +29,11 @@ import { DetectError } from './detect-error';
 
 const DEFAULT_WEIGHTS = { s: 0.15, c: 0.15, h: 0.25, hv: 0.2, edge: 0.1, grid: 0.15 };
 const ANALYSIS_TIMEOUT_MS = 10 * 60_000;
+const ENV_CHECK_TIMEOUT_MS = 8_000;
+const ENV_CACHE_TTL_MS = 10_000;
 const EMBEDDED_PYTHON_BOOTSTRAP =
   "import runpy,sys; sys.path.insert(0,sys.argv[1]); runpy.run_path(sys.argv[2],run_name='__main__')";
+const environmentCache = new Map<string, { expiresAt: number; result: DetectEnvCheck }>();
 
 interface InternalDetectJob {
   jobId: string;
@@ -153,6 +157,30 @@ export class DetectService {
     return { applied };
   }
 
+  async checkEnvironment(): Promise<DetectEnvCheck> {
+    const pythonPath = resolvePythonExecutable();
+    const cacheKey = `${pythonPath}|${process.resourcesPath}`;
+    const cached = environmentCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      console.info('[env] cache hit');
+      return cached.result;
+    }
+
+    const result = probePythonEnvironment(pythonPath);
+    environmentCache.set(cacheKey, {
+      expiresAt: Date.now() + ENV_CACHE_TTL_MS,
+      result,
+    });
+    if (result.ok) {
+      console.info(
+        `[env] Python ${result.pythonVersion}, OpenCV ${result.cv2Version}, NumPy ${result.numpyVersion}`,
+      );
+    } else {
+      console.warn(`[env] ${result.error?.code}: ${result.error?.message}`);
+    }
+    return result;
+  }
+
   dispose(): void {
     for (const job of this.jobs.values()) {
       job.controller.abort();
@@ -169,6 +197,12 @@ export class DetectService {
     let framesDir: string | null = null;
     try {
       job.status = 'running';
+      const environment = await this.checkEnvironment();
+      if (!environment.ok && environment.error) {
+        throw new DetectError(environment.error.code, `${environment.error.message}。${environment.error.guide}`, {
+          guide: environment.error.guide,
+        });
+      }
       const project = this.data.projects.get(job.projectId);
       const sourcePath = project.source.path || project.media.proxyPath;
       if (!sourcePath) {
@@ -374,10 +408,7 @@ export class DetectService {
       cwd: scriptDir,
       windowsHide: true,
       env: {
-        ...process.env,
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUNBUFFERED: '1',
-        ...(embedded ? { PYTHONPATH: join(process.resourcesPath, 'python', 'Lib', 'site-packages') } : {}),
+        ...buildPythonEnvironment(python),
       },
     });
     job.child = child;
@@ -580,6 +611,116 @@ export function resolvePythonExecutable(resourcesPath = process.resourcesPath): 
   const embedded = embeddedPythonExecutable(resourcesPath);
   if (embedded) return embedded;
   return process.env['DSH_PYTHON'] || process.env['PYTHON'] || 'python';
+}
+
+function buildPythonEnvironment(pythonPath: string): NodeJS.ProcessEnv {
+  const embedded =
+    embeddedPythonExecutable() !== null && pythonPath === embeddedPythonExecutable();
+  return {
+    ...process.env,
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUNBUFFERED: '1',
+    ...(embedded ? { PYTHONPATH: join(process.resourcesPath, 'python', 'Lib', 'site-packages') } : {}),
+  };
+}
+
+function probePythonEnvironment(pythonPath: string): DetectEnvCheck {
+  const installed = embeddedPythonExecutable() !== null;
+  const probe = spawnSync(
+    pythonPath,
+    [
+      '-c',
+      'import sys, cv2, numpy; print(sys.version.split()[0]); print(cv2.__version__); print(numpy.__version__)',
+    ],
+    {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: ENV_CHECK_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+      env: buildPythonEnvironment(pythonPath),
+    },
+  );
+  const errorCode = (probe.error as NodeJS.ErrnoException | undefined)?.code;
+  if (errorCode === 'ETIMEDOUT' || probe.signal === 'SIGTERM') {
+    return environmentFailure(
+      'ENV_PROBE_TIMEOUT',
+      'Python 检测环境响应超时',
+      '检测环境响应超时，请检查 Python 安装状态后重试',
+      pythonPath,
+    );
+  }
+  if (errorCode === 'ENOENT' || probe.error) {
+    return environmentFailure(
+      'PYTHON_NOT_FOUND',
+      '未找到可用的 Python 检测引擎',
+      environmentGuide('PYTHON_NOT_FOUND', installed),
+      pythonPath,
+    );
+  }
+
+  const stderr = String(probe.stderr || '').trim();
+  if (probe.status !== 0) {
+    let code = 'ENV_PROBE_FAILED';
+    let message = 'Python 检测环境无法启动';
+    if (/no module named ['"]?cv2|opencv/i.test(stderr)) {
+      code = 'OPENCV_NOT_FOUND';
+      message = '检测依赖 OpenCV 无法加载';
+    } else if (/no module named ['"]?numpy|numpy/i.test(stderr)) {
+      code = 'NUMPY_NOT_FOUND';
+      message = '检测依赖 NumPy 无法加载';
+    }
+    return environmentFailure(code, message, environmentGuide(code, installed), pythonPath);
+  }
+
+  const lines = String(probe.stdout || '')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 3) {
+    return environmentFailure(
+      'ENV_PROBE_FAILED',
+      'Python 检测环境返回了无效结果',
+      environmentGuide('ENV_PROBE_FAILED', installed),
+      pythonPath,
+    );
+  }
+  return {
+    ok: true,
+    pythonPath,
+    pythonVersion: lines[0],
+    cv2Version: lines[1],
+    numpyVersion: lines[2],
+    error: null,
+  };
+}
+
+function environmentFailure(code: string, message: string, guide: string, pythonPath: string): DetectEnvCheck {
+  return {
+    ok: false,
+    pythonPath,
+    pythonVersion: null,
+    cv2Version: null,
+    numpyVersion: null,
+    error: { code, message, guide },
+  };
+}
+
+function environmentGuide(code: string, installed: boolean): string {
+  if (code === 'PYTHON_NOT_FOUND') {
+    return installed
+      ? '检测引擎未随程序安装，请重新安装本软件或联系维护者'
+      : '未找到 Python，请安装 Python 3.12+ 或设置 DSH_PYTHON 环境变量指向 python.exe';
+  }
+  if (code === 'OPENCV_NOT_FOUND') {
+    return installed ? '检测依赖（OpenCV）缺失，请重新安装本软件' : '请执行 pip install opencv-python 后重试';
+  }
+  if (code === 'NUMPY_NOT_FOUND') {
+    return installed ? '检测依赖（NumPy）缺失，请重新安装本软件' : '请执行 pip install numpy 后重试';
+  }
+  if (code === 'ENV_PROBE_TIMEOUT') {
+    return '检测环境响应超时，请检查 Python 安装状态后重试';
+  }
+  return installed ? '检测引擎异常，请重新安装本软件' : '请检查 Python 与 OpenCV/NumPy 安装后重试';
 }
 
 function resolveServerScript(): string {

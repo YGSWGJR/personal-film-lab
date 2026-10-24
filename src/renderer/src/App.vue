@@ -27,6 +27,7 @@ import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from '
 import type {
   AppInfo,
   AudioWaveform,
+  DetectEnvCheck,
   DetectProgressEvent,
   DetectResult,
   ExportProgressEvent,
@@ -1006,12 +1007,32 @@ function stopDetectionPolling(): void {
   detectionPollTimer = null;
 }
 
-function openDetection(): void {
+async function openDetection(): Promise<void> {
   if (busy.value || transcoding.value) return;
   if (demoMode.value || !activeProject.value) {
     showToast('请先导入本地影片，再运行镜头检测。');
     return;
   }
+  let environment: IpcResult<DetectEnvCheck>;
+  try {
+    environment = await window.api.detect.checkEnv();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error', '检测环境检查失败');
+    return;
+  }
+  if (!environment.ok) {
+    showToast(environment.error.message, 'error', environment.error.code);
+    return;
+  }
+  if (!environment.data.ok && environment.data.error) {
+    detectionError.value = `${environment.data.error.message}。${environment.data.error.guide}`;
+    detectionProgress.value = null;
+    detectionResult.value = null;
+    detecting.value = false;
+    detectionOpen.value = true;
+    return;
+  }
+  detectionError.value = null;
   detectionOpen.value = true;
   void startDetection();
 }
@@ -1681,7 +1702,7 @@ onBeforeUnmount(() => {
       :error="detectionError"
       @close="closeDetection"
       @cancel="cancelDetection"
-      @retry="startDetection"
+      @retry="openDetection"
       @apply="applyDetection"
     />
 

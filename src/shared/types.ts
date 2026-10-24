@@ -373,6 +373,19 @@ export interface DetectWeights {
   grid?: number;
 }
 
+export interface DetectEnvCheck {
+  ok: boolean;
+  pythonPath: string | null;
+  pythonVersion: string | null;
+  cv2Version: string | null;
+  numpyVersion: string | null;
+  error: {
+    code: string;
+    message: string;
+    guide: string;
+  } | null;
+}
+
 export interface DetectOptions {
   sensitivity: number;
   minShotSeconds: number;
@@ -843,6 +856,7 @@ export interface ExportApi {
 }
 
 export interface DetectApi {
+  checkEnv(): Promise<IpcResult<DetectEnvCheck>>;
   run(args: DetectRunArgs): Promise<IpcResult<DetectRunResult>>;
   cancel(args: { jobId: string }): Promise<IpcResult<void>>;
   getJob(args: { jobId: string }): Promise<IpcResult<DetectJobSnapshot>>;

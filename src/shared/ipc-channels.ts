@@ -49,6 +49,7 @@ export const IPC = {
   MEDIA_EVENT_PROGRESS: 'media:event:progress',
 
   /** detect 域（S01 §5.4 / §8.2） */
+  DETECT_CHECK_ENV: 'detect:checkEnv',
   DETECT_RUN: 'detect:run',
   DETECT_CANCEL: 'detect:cancel',
   DETECT_GET_JOB: 'detect:getJob',
