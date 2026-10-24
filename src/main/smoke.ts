@@ -196,7 +196,8 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
         const shotList = await api.shot.list({ projectId: project.id });
         out.shotListOk = shotList.ok === true && shotList.data.length === 2 && shotList.data[0].id === shot1.data.id;
 
-        const tag = await api.tag.create({ category: '景别', name: '特写', color: '#e11d48' });
+        const smokeTagName = '冒烟标签-' + Date.now();
+        const tag = await api.tag.create({ category: '景别', name: smokeTagName, color: '#e11d48' });
         out.tagCreateOk = tag.ok === true;
         const assigned = await api.tag.assign({ shotId: shot1.data.id, tagIds: [tag.data.id] });
         out.tagAssignOk = assigned.ok === true && assigned.data.tagIds.includes(tag.data.id);
@@ -219,7 +220,8 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
         const stillList = await api.still.list({ shotId: shot1.data.id });
         out.stillListOk = stillList.ok === true && stillList.data.length === 1;
 
-        const term = await api.term.create({ term: '景别', definition: '画面的取景范围' });
+        const smokeTermName = '冒烟术语-' + Date.now();
+        const term = await api.term.create({ term: smokeTermName, definition: '画面的取景范围' });
         out.termCreateOk = term.ok === true;
         const termList = await api.term.list({});
         out.termListOk = termList.ok === true && termList.data.some((item) => item.id === term.data.id);
@@ -247,7 +249,8 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
           const openedNotes = await api.note.list({ projectId: opened.data.project.id });
           out.openNotesOk = openedNotes.ok === true && openedNotes.data.length === 1;
           const openedTags = await api.tag.list({ category: '景别' });
-          out.openTagsOk = openedTags.ok === true && openedTags.data.length === 1;
+          out.openTagsOk = openedTags.ok === true
+            && openedTags.data.some((item) => item.category === '景别' && item.name === smokeTagName);
         } else {
           out.openError = opened.error;
         }
