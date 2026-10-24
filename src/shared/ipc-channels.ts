@@ -79,6 +79,10 @@ export const IPC = {
   TERM_DELETE: 'term:delete',
   TERM_IMPORT_JSON: 'term:importJson',
   TERM_EXPORT_JSON: 'term:exportJson',
+
+  EXPORT_STORYBOARD: 'export:storyboard',
+  EXPORT_EVENT_PROGRESS: 'export:event:progress',
+  EXPORT_EVENT_DONE: 'export:event:done',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

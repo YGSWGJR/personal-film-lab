@@ -25,6 +25,7 @@ import {
   stillListArgsSchema,
   stillSetAnnotationArgsSchema,
   stillUpdateArgsSchema,
+  storyboardExportArgsSchema,
   tagAssignArgsSchema,
   tagCreateArgsSchema,
   tagListArgsSchema,
@@ -72,6 +73,10 @@ import type {
   StillCreateArgs,
   StillSetAnnotationArgs,
   StillUpdateArgs,
+  StoryboardExportArgs,
+  StoryboardExportResult,
+  ExportDoneEvent,
+  ExportProgressEvent,
   Tag,
   TagCreateArgs,
   TagUpdateArgs,
@@ -156,6 +161,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.TERM_DELETE]: idArgsSchema,
   [IPC.TERM_IMPORT_JSON]: emptyArgsSchema,
   [IPC.TERM_EXPORT_JSON]: emptyArgsSchema,
+  [IPC.EXPORT_STORYBOARD]: storyboardExportArgsSchema,
 };
 
 /** 主进程 → 渲染层事件白名单 */
@@ -166,6 +172,8 @@ const EVENT_WHITELIST = {
   onError: IPC.PLAYER_EVENT_ERROR,
   onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
   onStillCreated: IPC.STILL_EVENT_CREATED,
+  onExportProgress: IPC.EXPORT_EVENT_PROGRESS,
+  onExportDone: IPC.EXPORT_EVENT_DONE,
 } as const;
 
 async function invoke<T>(channel: string, args: unknown[] = []): Promise<IpcResult<T>> {
@@ -285,6 +293,15 @@ const termApi = {
   exportJson: () => invoke<TermExportResult>(IPC.TERM_EXPORT_JSON),
 };
 
+const exportApi = {
+  storyboard: (args: StoryboardExportArgs) =>
+    invoke<StoryboardExportResult>(IPC.EXPORT_STORYBOARD, [args]),
+  onProgress: (listener: (event: ExportProgressEvent) => void) =>
+    subscribe<ExportProgressEvent>(EVENT_WHITELIST.onExportProgress, listener),
+  onDone: (listener: (event: ExportDoneEvent) => void) =>
+    subscribe<ExportDoneEvent>(EVENT_WHITELIST.onExportDone, listener),
+};
+
 const api: WindowApi = {
   app: appApi,
   player: playerApi,
@@ -295,6 +312,7 @@ const api: WindowApi = {
   tag: tagApi,
   note: noteApi,
   term: termApi,
+  export: exportApi,
 };
 
 contextBridge.exposeInMainWorld('api', api);

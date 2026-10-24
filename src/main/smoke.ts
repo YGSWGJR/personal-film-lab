@@ -56,7 +56,8 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.titleMatched = state?.title === '个人拉片工作台';
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
-    checks.whitelistOnly = state?.apiKeys === 'app,media,note,player,project,shot,still,tag,term';
+    checks.whitelistOnly =
+      state?.apiKeys === 'app,export,media,note,player,project,shot,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );

@@ -6,6 +6,7 @@ import { IPC } from '../shared/ipc-channels';
 import { createMainWindow } from './app';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
+import { ExportService } from './export/export-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
@@ -28,6 +29,7 @@ let dataLayer: DataLayer | null = null;
 let packageService: ProjectPackageService | null = null;
 let captureService: CaptureService | null = null;
 let termTransferService: TermTransferService | null = null;
+let exportService: ExportService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -42,12 +44,26 @@ function ensureMainWindow(): BrowserWindow {
           if (!win.isDestroyed()) win.webContents.send(IPC.STILL_EVENT_CREATED, still);
         })
       : null;
+  exportService =
+    dataLayer && captureService
+      ? new ExportService(
+          dataLayer,
+          captureService,
+          (event) => {
+            if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_PROGRESS, event);
+          },
+          (event) => {
+            if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_DONE, event);
+          },
+        )
+      : null;
 
   win.on('closed', () => {
     if (mainWindow === win) {
       mainWindow = null;
       playerService = null;
       captureService = null;
+      exportService = null;
       mediaService?.dispose();
       mediaService = null;
     }
@@ -64,6 +80,7 @@ registerIpcHandlers({
   getPackage: () => packageService,
   getCapture: () => captureService,
   getTermTransfer: () => termTransferService,
+  getExport: () => exportService,
 });
 
 app.whenReady().then(() => {
@@ -100,4 +117,5 @@ app.on('before-quit', () => {
   packageService = null;
   captureService = null;
   termTransferService = null;
+  exportService = null;
 });

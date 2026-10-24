@@ -41,9 +41,12 @@ import type {
   TermUpdateArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
+  StoryboardExportArgs,
+  StoryboardExportResult,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import type { CaptureService } from '../capture/capture-service';
+import type { ExportService } from '../export/export-service';
 import { DataError } from '../../data/errors';
 import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
@@ -60,6 +63,7 @@ export interface IpcDeps {
   getPackage(): ProjectPackageService | null;
   getCapture(): CaptureService | null;
   getTermTransfer(): TermTransferService | null;
+  getExport(): ExportService | null;
 }
 
 /**
@@ -95,6 +99,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireTermTransfer = (): TermTransferService => {
     const service = deps.getTermTransfer();
     if (!service) throw new DataError('DATA_UNAVAILABLE', '术语导入导出服务尚未初始化');
+    return service;
+  };
+  const requireExport = (): ExportService => {
+    const service = deps.getExport();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '导出服务尚未初始化');
     return service;
   };
 
@@ -369,5 +378,13 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.TERM_EXPORT_JSON,
     withEnvelope((): Promise<TermExportResult> => requireTermTransfer().exportJson()),
+  );
+
+  // ---------- export ----------
+  ipcMain.handle(
+    IPC.EXPORT_STORYBOARD,
+    withEnvelope((args: StoryboardExportArgs): Promise<StoryboardExportResult> =>
+      requireExport().exportStoryboard(args),
+    ),
   );
 }

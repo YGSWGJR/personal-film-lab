@@ -238,6 +238,7 @@ export interface WindowApi {
   tag: TagApi;
   note: NoteApi;
   term: TermApi;
+  export: ExportApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
@@ -532,6 +533,55 @@ export interface TermExportResult {
   count: number;
 }
 
+export type StoryboardFormat = 'pdf' | 'docx';
+export type StoryboardImageStrategy = 'both' | 'thumbnail' | 'full';
+export type StoryboardColumnKey =
+  | 'index'
+  | 'duration'
+  | 'thumbnail'
+  | 'shotSize'
+  | 'cameraMethod'
+  | 'image'
+  | 'dialogue'
+  | 'remark';
+
+export interface StoryboardHeader {
+  key: StoryboardColumnKey;
+  label: string;
+}
+
+export interface StoryboardExportArgs {
+  projectId: string;
+  format: StoryboardFormat;
+  range?: {
+    shotIds?: string[];
+  };
+  headers?: StoryboardHeader[];
+  imageStrategy?: StoryboardImageStrategy;
+}
+
+export interface StoryboardExportResult {
+  jobId: string;
+  canceled: boolean;
+  filePath: string | null;
+  format: StoryboardFormat;
+  rowCount: number;
+}
+
+export interface ExportProgressEvent {
+  jobId: string;
+  percent: number;
+  stage: 'prepare' | 'thumbnails' | 'render' | 'write';
+  message: string;
+}
+
+export interface ExportDoneEvent {
+  jobId: string;
+  filePath: string;
+  format: StoryboardFormat;
+  rowCount: number;
+}
+
 export interface ProjectApi {
   create(args: ProjectCreateArgs): Promise<IpcResult<Project>>;
   list(): Promise<IpcResult<Project[]>>;
@@ -586,4 +636,10 @@ export interface TermApi {
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
   importJson(): Promise<IpcResult<TermImportResult>>;
   exportJson(): Promise<IpcResult<TermExportResult>>;
+}
+
+export interface ExportApi {
+  storyboard(args: StoryboardExportArgs): Promise<IpcResult<StoryboardExportResult>>;
+  onProgress(listener: (event: ExportProgressEvent) => void): () => void;
+  onDone(listener: (event: ExportDoneEvent) => void): () => void;
 }

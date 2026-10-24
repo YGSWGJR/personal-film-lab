@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import AppIcon from './components/AppIcon.vue';
+import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import ShotDetailPanel from './components/ShotDetailPanel.vue';
 import ShotListPanel from './components/ShotListPanel.vue';
@@ -18,6 +19,7 @@ import type { SkeletonState } from './env';
 import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from './types/workspace';
 import type {
   AppInfo,
+  ExportProgressEvent,
   IpcResult,
   MediaInfo,
   Note,
@@ -27,6 +29,7 @@ import type {
   RenderBounds,
   Shot,
   Still,
+  StoryboardExportArgs,
   Tag,
   Term,
 } from '../../shared/types';
@@ -58,6 +61,9 @@ let pendingNoteShotId: string | null = null;
 const termEditorOpen = ref(false);
 const editingTerm = ref<Term | null>(null);
 const termSaving = ref(false);
+const exportOpen = ref(false);
+const exporting = ref(false);
+const exportProgress = ref<ExportProgressEvent | null>(null);
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -90,7 +96,10 @@ const selectedStill = computed(() => {
   return (
     projectStills.value
       .filter((still) => still.shotId === selectedShot.value?.id)
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null
+      .sort((left, right) => {
+        if (left.role !== right.role) return left.role === 'main' ? -1 : 1;
+        return right.createdAt.localeCompare(left.createdAt);
+      })[0] ?? null
   );
 });
 const poster = computed(() =>
@@ -681,6 +690,41 @@ async function exportTerms(): Promise<void> {
   showToast(`已导出 ${result.count} 条术语：${result.path}`, 'success');
 }
 
+function openExport(): void {
+  if (demoMode.value || !activeProject.value) {
+    showToast('请先打开一个本地影片项目，再导出分镜本。');
+    return;
+  }
+  exportProgress.value = null;
+  exportOpen.value = true;
+}
+
+async function runStoryboardExport(args: Omit<StoryboardExportArgs, 'projectId'>): Promise<void> {
+  if (!activeProject.value || exporting.value) return;
+  exporting.value = true;
+  exportProgress.value = {
+    jobId: '',
+    percent: 0,
+    stage: 'prepare',
+    message: '正在准备分镜本',
+  };
+  try {
+    const result = unwrap(
+      await window.api.export.storyboard({
+        ...args,
+        projectId: activeProject.value.id,
+      }),
+    );
+    if (result && !result.canceled) {
+      exportOpen.value = false;
+      showToast(`分镜本已导出：${result.filePath}`, 'success');
+    }
+  } finally {
+    exporting.value = false;
+    exportProgress.value = null;
+  }
+}
+
 function updateNote(value: string): void {
   if (!selectedId.value) return;
   notes[selectedId.value] = value;
@@ -946,6 +990,18 @@ onMounted(async () => {
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
     api.still.onCreated((still) => upsertStill(still)),
+    api.export.onProgress((event) => {
+      if (exporting.value) exportProgress.value = event;
+    }),
+    api.export.onDone((event) => {
+      if (!exporting.value) return;
+      exportProgress.value = {
+        jobId: event.jobId,
+        percent: 100,
+        stage: 'write',
+        message: `已写入 ${event.filePath}`,
+      };
+    }),
   );
 
   await nextTick();
@@ -987,7 +1043,7 @@ onBeforeUnmount(() => {
           静帧截图
           <kbd>S</kbd>
         </button>
-        <button class="nav-item" type="button">导出分镜本</button>
+        <button class="nav-item" type="button" @click="openExport">导出分镜本</button>
       </nav>
 
       <div class="topbar-right">
@@ -1100,6 +1156,16 @@ onBeforeUnmount(() => {
       @close="termEditorOpen = false"
       @save="saveTerm"
       @delete="deleteTerm"
+    />
+
+    <ExportModal
+      :open="exportOpen"
+      :project-name="activeProject?.name ?? ''"
+      :shots="shots"
+      :busy="exporting"
+      :progress="exportProgress"
+      @close="exportOpen = false"
+      @submit="runStoryboardExport"
     />
 
     <transition name="toast">

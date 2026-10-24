@@ -69,6 +69,13 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - 项目文件：`project:save` / `project:saveAs` 导出单个 `.lapian`（zip）= `manifest.json` + 项目 SQLite 快照 `project.db` + `assets/` 资源目录；`project:open` 导入并重映射 id（冲突时自动换新 id、名称加「（导入）」）。默认导出目录 `userData/lapian/packages/`。
 - 原生模块：better-sqlite3 v13 内置 N-API 预编译，Electron 45 直接可用；打包配置 `asarUnpack: node_modules/better-sqlite3/**`、`npmRebuild: false`，已用打包产物冒烟验证。
 
+### 分镜本导出（PDF / Word）
+
+- `export:storyboard` 从项目数据装配固定八列：镜号 / 时长 / 缩略图 / 景别 / 摄法 / 画面内容 / 台词 / 备注。
+- 缩略图缺失时自动调用 `still:captureAt` 生成镜头中点 `role=auto-thumb` JPEG；画面内容使用靠近中点的 `role=main` PNG。
+- PDF 使用 Electron `webContents.printToPDF`（A4 竖版、封面、重复表头），Word 使用 `docx` 生成可编辑表格，显式指定 Microsoft YaHei。
+- 导出文件写入 `projects/<projectId>/exports/`，渲染层提供镜头范围、表头、图片策略与格式配置界面。
+
 ### 冒烟（播放器 + 媒体 + 数据层，PowerShell）
 
 ```powershell

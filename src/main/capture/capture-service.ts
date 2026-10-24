@@ -25,6 +25,18 @@ export class CaptureService {
     shotId?: string | null;
     caption?: string | null;
   }): Promise<Still> {
+    return this.captureWithRole(args, 'main');
+  }
+
+  private async captureWithRole(
+    args: {
+      projectId: string;
+      timeMs: number;
+      shotId?: string | null;
+      caption?: string | null;
+    },
+    role: 'main' | 'auto-thumb',
+  ): Promise<Still> {
     const project = this.data.projects.get(args.projectId);
     const sourcePath = project.source.path || project.media.proxyPath;
     if (!sourcePath) {
@@ -72,7 +84,7 @@ export class CaptureService {
         width: frame.width,
         height: frame.height,
         caption: args.caption ?? null,
-        role: 'main',
+        role,
         annotations: [],
       });
       try {
@@ -90,12 +102,22 @@ export class CaptureService {
 
   async captureAt(args: { shotId: string; caption?: string | null }): Promise<Still> {
     const shot = this.data.shots.get(args.shotId);
-    return this.capture({
+    const existing = this.data.stills
+      .list({ shotId: shot.id })
+      .find(
+        (still) =>
+          still.role === 'auto-thumb' &&
+          existsSync(this.resolveStillPath(still.projectId, still.filePath)) &&
+          Boolean(still.thumbPath) &&
+          existsSync(this.resolveStillPath(still.projectId, still.thumbPath as string)),
+      );
+    if (existing) return existing;
+    return this.captureWithRole({
       projectId: shot.projectId,
       shotId: shot.id,
       timeMs: Math.round((shot.startMs + shot.endMs) / 2),
-      caption: args.caption,
-    });
+      caption: args.caption ?? `镜头 ${String(shot.index).padStart(2, '0')} 自动缩略图`,
+    }, 'auto-thumb');
   }
 
   setAnnotations(id: string, annotations: Annotation[]): Still {
@@ -108,5 +130,11 @@ export class CaptureService {
     } catch {
       // 清理失败不覆盖原始领域错误
     }
+  }
+
+  private resolveStillPath(projectId: string, filePath: string): string {
+    return /^[a-zA-Z]:[\\/]/u.test(filePath) || filePath.startsWith('/')
+      ? filePath
+      : join(this.data.dataRoot, 'projects', projectId, filePath);
   }
 }

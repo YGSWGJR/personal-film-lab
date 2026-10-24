@@ -319,4 +319,35 @@ export const termUpdateArgsSchema = z.object({
   }),
 });
 
+const storyboardColumnKeySchema = z.enum([
+  'index',
+  'duration',
+  'thumbnail',
+  'shotSize',
+  'cameraMethod',
+  'image',
+  'dialogue',
+  'remark',
+]);
+
+export const storyboardExportArgsSchema = z.object({
+  projectId: z.string().min(1),
+  format: z.enum(['pdf', 'docx']),
+  range: z
+    .object({
+      shotIds: z.array(z.string().min(1)).max(100_000).optional(),
+    })
+    .optional(),
+  headers: z
+    .array(
+      z.object({
+        key: storyboardColumnKeySchema,
+        label: z.string().min(1).max(80),
+      }),
+    )
+    .max(8)
+    .optional(),
+  imageStrategy: z.enum(['both', 'thumbnail', 'full']).optional(),
+});
+
 export const emptyObjectSchema = z.object({}).optional();
