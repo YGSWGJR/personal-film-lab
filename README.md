@@ -67,6 +67,13 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - `detect:apply` 使用预览 id 确认写库：未锁定镜头被本次结果替换，`locked=1` 镜头保留且重叠候选跳过；场景按确认结果整体替换。
 - Python 依赖：OpenCV ≥ 5.0、NumPy ≥ 2.5。开发期使用 `DSH_PYTHON`、`PYTHON` 或系统 `python`；打包时将 `src/main/detect/python/*.py` 复制到 `resources/detect/python/`。
 
+### 示波器与音频波形（ScopeService，S20）
+
+- `scope:analyzeFrame` 使用 `media:extractFrame` 生成最大 640px 宽的临时帧，经独立常驻 Python JSON-RPC 服务计算 Luma/R/G/B 64-bin 直方图、128 列亮度波形、色度矢量密度、RGB Parade 与 CIE 1931 散点。
+- 渲染层提供直方图 / 波形图 / 矢量图 / 分量图 / CIE 1931 五个 Tab；播放中按 300ms 调度并带 ±500ms 帧缓存，暂停与 seek 立即刷新，失败保留上一次成功画面。
+- `scope:extractAudioWaveform` 以 8kHz 单声道 f32le 流式读取音频，默认按 100ms 桶计算 peak/RMS；时间轴第四轨共享缩放、平移与播放头，Ctrl+滚轮缩放，Shift+滚轮平移。
+- Python 脚本位于 `src/main/scope/python/`，打包时复制到 `resources/scope/python/`；S07 检测算法目录保持不变。
+
 ### 数据层（SQLite / better-sqlite3）
 
 - 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
@@ -96,6 +103,7 @@ $env:SMOKE_RESULT = 'D:\tmp\smoke.json'          # 结果 JSON
 $env:SMOKE_HOLD_MS = '15000'                     # 保持窗口，便于外部截屏目检（可选）
 $env:DSH_DATA_ROOT = 'D:\tmp\data-smoke'          # 数据层测试根目录（隔离主库）
 $env:SMOKE_DATA_PKG = 'D:\tmp\data-smoke\pkg\project.lapian'  # 项目包保存/打开往返
+$env:SMOKE_SCOPE_VIDEO = 'D:\path\clip.mp4'       # 示波器分析/缓存/音频波形断言
 npm run smoke
 ```
 
@@ -119,13 +127,14 @@ npm run smoke
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
 | `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
+| `feature/scope` | 示波器与音频 | 五类示波器、当前帧分析缓存、第四层音频包络（S20） |
 
 ## 智能体工作目录
 
 | 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
 |---|---|---|---|---|
 | dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
-| codex | `feature/ui`、`feature/detect`、`feature/integration` | `src/renderer`、`src/preload`、`src/main/detect`、`src/main/app.ts` | 界面、镜头检测与集成联调 | **已完成（S14）** |
+| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope}`、`src/main/app.ts` | 界面、镜头检测、集成联调与示波器 | **已完成（S20）** |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
@@ -133,6 +142,8 @@ npm run smoke
 > S07 状态（2026-10-24）：`feature/detect` 已完成 DetectService、Python 算法、`detect:*` IPC、migration 003 与合成帧单测；真实样例 dry-run/apply 已通过。UI 接入仍按计划留给 S14。
 
 > S14 状态（2026-10-24）：**已完成**。`feature/integration` 已接通本地导入 / 代理转码 / 检测预览与确认写库 / 三栏真实数据 / 截图标注 / PDF 与 Word 导出；UI 类型检查、Electron 冒烟与真实项目联调通过。
+
+> S20 状态（2026-10-24）：**已完成**。`feature/scope` 已交付五类 canvas 示波器、常驻 Python 帧分析、±500ms 缓存、第四层音频包络与缩放联动；黑/白/红帧数值、CIE、IPC 冒烟与真实播放节流联调通过。
 
 ## 提交规范
 
