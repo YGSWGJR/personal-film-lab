@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { app, type BrowserWindow } from 'electron';
 import type { PlayerService } from './player/player-service';
 
@@ -29,12 +30,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
   let mediaChecks: Record<string, unknown> = {};
+  let dataChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, dataChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -54,7 +56,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.titleMatched = state?.title === '个人拉片工作台';
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
-    checks.whitelistOnly = state?.apiKeys === 'app,media,player';
+    checks.whitelistOnly = state?.apiKeys === 'app,media,note,player,project,shot,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -75,6 +77,20 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, mediaChecksAssertions(mediaChecks));
     }
 
+    const dataPkg = process.env['SMOKE_DATA_PKG'];
+    if (process.env['DSH_DATA_ROOT'] && dataPkg) {
+      rmSync(dataPkg, { force: true });
+      mkdirSync(dirname(dataPkg), { recursive: true });
+      dataChecks = await runDataChecks(win, dataPkg);
+      if (dataChecks.openOk === true && typeof dataChecks.openedProjectId === 'string') {
+        Object.assign(
+          dataChecks,
+          await runAssetPackageCheck(win, process.env['DSH_DATA_ROOT'] as string, dataChecks.openedProjectId, dataPkg + '.assets.lapian'),
+        );
+      }
+      Object.assign(checks, dataChecksAssertions(dataChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -88,7 +104,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, dataChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -103,6 +119,206 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     console.error(error);
     finish(1);
   }
+}
+
+function dataChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    dataCreate: result.createOk === true,
+    dataList: result.listOk === true,
+    dataUpdate: result.updateOk === true,
+    dataShotCreate: result.shotCreateOk === true,
+    dataShotUpdate: result.shotUpdateOk === true,
+    dataShotList: result.shotListOk === true,
+    dataTagCreate: result.tagCreateOk === true,
+    dataTagAssign: result.tagAssignOk === true,
+    dataTagList: result.tagListOk === true,
+    dataNoteSave: result.noteSaveOk === true,
+    dataNoteUpdate: result.noteUpdateOk === true,
+    dataNoteList: result.noteListOk === true,
+    dataStillCreate: result.stillCreateOk === true,
+    dataStillList: result.stillListOk === true,
+    dataTermCreate: result.termCreateOk === true,
+    dataTermList: result.termListOk === true,
+    dataTxGuard: result.txGuardOk === true,
+    dataForeignKey: result.fkOk === true,
+    dataSave: result.saveOk === true,
+    dataOpen: result.openOk === true,
+    dataOpenShots: result.openShotsOk === true,
+    dataOpenNotes: result.openNotesOk === true,
+    dataOpenTags: result.openTagsOk === true,
+    dataDelete: result.deleteOk === true,
+    dataCascade: result.cascadeOk === true,
+    dataAssetPackage: result.assetOk === true,
+    dataAssetRestored: result.assetRestoredOk === true,
+  };
+}
+
+async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<Record<string, any>> {
+  const pkg = packagePath.replace(/\\/g, '/');
+  const script = `
+    (async () => {
+      const out = {};
+      const api = {
+        project: window.api.project,
+        shot: window.api.shot,
+        still: window.api.still,
+        tag: window.api.tag,
+        note: window.api.note,
+        term: window.api.term,
+      };
+      try {
+        const created = await api.project.create({
+          name: '冒烟项目',
+          source: { path: 'D:/media/demo.mkv' },
+          media: { filename: 'demo.mkv', durationMs: 8000, width: 640, height: 360, fps: 25, videoCodec: 'h264', sizeBytes: 123 },
+        });
+        out.createOk = created.ok === true;
+        if (!created.ok) { out.createError = created.error; return out; }
+        const project = created.data;
+
+        const list = await api.project.list();
+        out.listOk = list.ok === true && list.data.some((item) => item.id === project.id);
+
+        const updatedProject = await api.project.update({ id: project.id, patch: { name: '冒烟项目改' } });
+        out.updateOk = updatedProject.ok === true && updatedProject.data.name === '冒烟项目改';
+
+        const shot1 = await api.shot.create({
+          projectId: project.id, startMs: 0, endMs: 1000,
+          shotSize: '全景', cameraMethod: '固定', dialogue: '台词1', remark: '备注1',
+        });
+        const shot2 = await api.shot.create({ projectId: project.id, startMs: 1000, endMs: 2000 });
+        out.shotCreateOk = shot1.ok === true && shot2.ok === true && shot1.data.durationMs === 1000;
+
+        const shotUpdate = await api.shot.update({ id: shot1.data.id, patch: { endMs: 1500, remark: '改过' } });
+        out.shotUpdateOk = shotUpdate.ok === true && shotUpdate.data.durationMs === 1500 && shotUpdate.data.remark === '改过';
+
+        const shotList = await api.shot.list({ projectId: project.id });
+        out.shotListOk = shotList.ok === true && shotList.data.length === 2 && shotList.data[0].id === shot1.data.id;
+
+        const tag = await api.tag.create({ category: '景别', name: '特写', color: '#e11d48' });
+        out.tagCreateOk = tag.ok === true;
+        const assigned = await api.tag.assign({ shotId: shot1.data.id, tagIds: [tag.data.id] });
+        out.tagAssignOk = assigned.ok === true && assigned.data.tagIds.includes(tag.data.id);
+        const tagList = await api.tag.list({ category: '景别' });
+        out.tagListOk = tagList.ok === true && tagList.data.some((item) => item.id === tag.data.id);
+
+        const note = await api.note.save({ projectId: project.id, shotId: shot1.data.id, text: '笔记内容' });
+        out.noteSaveOk = note.ok === true;
+        const noteUpdate = await api.note.save({ id: note.data.id, projectId: project.id, shotId: shot1.data.id, text: '笔记2' });
+        out.noteUpdateOk = noteUpdate.ok === true && noteUpdate.data.text === '笔记2';
+        const noteList = await api.note.list({ shotId: shot1.data.id });
+        out.noteListOk = noteList.ok === true && noteList.data.length === 1;
+
+        const still = await api.still.create({
+          projectId: project.id, shotId: shot1.data.id, timeMs: 500,
+          filePath: 'D:/__dsh_still__/frame.jpg', width: 640, height: 360, caption: 'caption',
+          annotations: [{ type: 'box', x: 0.1, y: 0.1, w: 0.2, h: 0.2 }],
+        });
+        out.stillCreateOk = still.ok === true && still.data.annotations.length === 1;
+        const stillList = await api.still.list({ shotId: shot1.data.id });
+        out.stillListOk = stillList.ok === true && stillList.data.length === 1;
+
+        const term = await api.term.create({ term: '景别', definition: '画面的取景范围' });
+        out.termCreateOk = term.ok === true;
+        const termList = await api.term.list({});
+        out.termListOk = termList.ok === true && termList.data.some((item) => item.id === term.data.id);
+
+        const badShot = await api.shot.create({ projectId: project.id, startMs: 2000, endMs: 1000 });
+        const afterBad = await api.shot.list({ projectId: project.id });
+        out.txGuardOk = badShot.ok === false && badShot.error.code === 'INVALID_ARGUMENT'
+          && afterBad.ok === true && afterBad.data.length === 2;
+
+        const missingProject = await api.shot.create({ projectId: 'no-such-project', startMs: 0, endMs: 100 });
+        out.fkOk = missingProject.ok === false
+          && ['PROJECT_NOT_FOUND', 'SHOT_CREATE_FAILED'].includes(missingProject.error.code);
+
+        const saved = await api.project.save({ id: project.id, targetPath: ${JSON.stringify(pkg)} });
+        out.saveOk = saved.ok === true && saved.data.sizeBytes > 0;
+        out.savedPath = saved.ok ? saved.data.path : null;
+        out.saveError = saved.ok ? null : saved.error;
+
+        const opened = await api.project.open({ path: ${JSON.stringify(pkg)} });
+        out.openOk = opened.ok === true && opened.data.renamed === true && opened.data.project.id !== project.id;
+        if (opened.ok) {
+          out.openedProjectId = opened.data.project.id;
+          const openedShots = await api.shot.list({ projectId: opened.data.project.id });
+          out.openShotsOk = openedShots.ok === true && openedShots.data.length === 2;
+          const openedNotes = await api.note.list({ projectId: opened.data.project.id });
+          out.openNotesOk = openedNotes.ok === true && openedNotes.data.length === 1;
+          const openedTags = await api.tag.list({ category: '景别' });
+          out.openTagsOk = openedTags.ok === true && openedTags.data.length === 1;
+        } else {
+          out.openError = opened.error;
+        }
+
+        const deleted = await api.project.delete({ id: project.id });
+        out.deleteOk = deleted.ok === true;
+        const afterDelete = await api.shot.list({ projectId: project.id });
+        out.cascadeOk = afterDelete.ok === false || afterDelete.data.length === 0;
+
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `;
+  return (await win.webContents.executeJavaScript(script)) as Record<string, any>;
+}
+
+async function runAssetPackageCheck(
+  win: BrowserWindow,
+  dataRoot: string,
+  openedProjectId: string,
+  packagePath: string,
+): Promise<Record<string, any>> {
+  const clearPackage = packagePath;
+  rmSync(clearPackage, { force: true });
+  mkdirSync(dirname(clearPackage), { recursive: true });
+  const relativeStill = 'stills/asset-test.jpg';
+  const sourceFile = join(dataRoot, 'projects', openedProjectId, relativeStill);
+  mkdirSync(dirname(sourceFile), { recursive: true });
+  writeFileSync(sourceFile, 'smoke-image-bytes', 'utf8');
+
+  const result = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        const still = await window.api.still.create({
+          projectId: ${JSON.stringify(openedProjectId)},
+          timeMs: 100,
+          filePath: ${JSON.stringify(relativeStill)},
+          caption: 'asset-test',
+        });
+        out.stillOk = still.ok === true;
+        const saved = await window.api.project.save({
+          id: ${JSON.stringify(openedProjectId)},
+          targetPath: ${JSON.stringify(clearPackage.replace(/\\/g, '/'))},
+        });
+        out.savedOk = saved.ok === true;
+        const reopened = await window.api.project.open({ path: ${JSON.stringify(clearPackage.replace(/\\/g, '/'))} });
+        out.reopenedOk = reopened.ok === true;
+        if (reopened.ok) {
+          out.reopenedProjectId = reopened.data.project.id;
+          const stills = await window.api.still.list({ projectId: reopened.data.project.id });
+          out.stillsCount = stills.ok ? stills.data.length : -1;
+          out.assetRestoredOk = stills.ok === true && stills.data.some((item) => item.filePath === ${JSON.stringify(relativeStill)});
+        }
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
+
+  result.assetOk = result.stillOk === true && result.savedOk === true && result.reopenedOk === true;
+  if (result.reopenedOk === true && typeof result.reopenedProjectId === 'string') {
+    const restoredFile = join(dataRoot, 'projects', result.reopenedProjectId, relativeStill);
+    result.assetRestoredOk = result.assetRestoredOk === true && existsSync(restoredFile);
+  } else {
+    result.assetRestoredOk = false;
+  }
+  return result;
 }
 
 function mediaChecksAssertions(result: Record<string, any>): Record<string, boolean> {

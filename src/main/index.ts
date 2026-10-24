@@ -1,4 +1,7 @@
+import { join } from 'node:path';
 import { app, BrowserWindow } from 'electron';
+import { DataLayer } from '../data/db';
+import { ProjectPackageService } from '../data/project-package';
 import { createMainWindow } from './app';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
@@ -16,6 +19,8 @@ app.commandLine.appendSwitch('disable-direct-composition');
 let mainWindow: BrowserWindow | null = null;
 let playerService: PlayerService | null = null;
 let mediaService: MediaService | null = null;
+let dataLayer: DataLayer | null = null;
+let packageService: ProjectPackageService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -41,9 +46,17 @@ registerIpcHandlers({
   getWindow: () => mainWindow,
   getPlayer: () => playerService,
   getMedia: () => mediaService,
+  getData: () => dataLayer,
+  getPackage: () => packageService,
 });
 
 app.whenReady().then(() => {
+  if (!dataLayer) {
+    const dataRoot = process.env['DSH_DATA_ROOT'] ?? join(app.getPath('userData'), 'lapian');
+    dataLayer = new DataLayer(dataRoot);
+    packageService = new ProjectPackageService(dataLayer);
+  }
+
   const win = ensureMainWindow();
 
   if (IS_SMOKE_TEST) {
@@ -61,4 +74,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', () => {
+  dataLayer?.close();
+  dataLayer = null;
+  packageService = null;
 });

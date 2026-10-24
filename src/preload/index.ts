@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { ZodType } from 'zod';
+import { z, type ZodType } from 'zod';
 import { IPC } from '../shared/ipc-channels';
 import { fail } from '../shared/ipc-result';
 import {
@@ -9,7 +9,27 @@ import {
   mediaExtractFramesArgsSchema,
   mediaProbeArgsSchema,
   mediaTranscodeProxyArgsSchema,
+  noteListArgsSchema,
+  noteSaveArgsSchema,
   playerFrameStepArgsSchema,
+  projectCreateArgsSchema,
+  projectOpenArgsSchema,
+  projectSaveArgsSchema,
+  projectSaveAsArgsSchema,
+  projectUpdateArgsSchema,
+  shotCreateArgsSchema,
+  shotUpdateArgsSchema,
+  stillCreateArgsSchema,
+  stillListArgsSchema,
+  stillUpdateArgsSchema,
+  tagAssignArgsSchema,
+  tagCreateArgsSchema,
+  tagListArgsSchema,
+  tagUpdateArgsSchema,
+  termCreateArgsSchema,
+  termListArgsSchema,
+  termUpdateArgsSchema,
+  idArgsSchema,
   playerOpenArgsSchema,
   playerSeekArgsSchema,
   playerSetBoundsArgsSchema,
@@ -35,6 +55,25 @@ import type {
   TranscodeProxyArgs,
   TranscodeProxyResult,
   WindowApi,
+  ProjectCreateArgs,
+  ProjectUpdateArgs,
+  ProjectSaveArgs,
+  ProjectOpenResult,
+  Project,
+  Shot,
+  ShotCreateArgs,
+  ShotUpdateArgs,
+  Still,
+  StillCreateArgs,
+  StillUpdateArgs,
+  Tag,
+  TagCreateArgs,
+  TagUpdateArgs,
+  Note,
+  NoteSaveArgs,
+  Term,
+  TermCreateArgs,
+  TermUpdateArgs,
 } from '../shared/types';
 
 /**
@@ -66,6 +105,43 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
   [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
+
+  [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
+  [IPC.PROJECT_LIST]: emptyArgsSchema,
+  [IPC.PROJECT_GET]: idArgsSchema,
+  [IPC.PROJECT_UPDATE]: projectUpdateArgsSchema,
+  [IPC.PROJECT_DELETE]: idArgsSchema,
+  [IPC.PROJECT_SAVE]: projectSaveArgsSchema,
+  [IPC.PROJECT_SAVE_AS]: projectSaveAsArgsSchema,
+  [IPC.PROJECT_OPEN]: projectOpenArgsSchema,
+
+  [IPC.SHOT_LIST]: z.object({ projectId: z.string().min(1) }),
+  [IPC.SHOT_GET]: idArgsSchema,
+  [IPC.SHOT_CREATE]: shotCreateArgsSchema,
+  [IPC.SHOT_UPDATE]: shotUpdateArgsSchema,
+  [IPC.SHOT_DELETE]: idArgsSchema,
+
+  [IPC.STILL_LIST]: stillListArgsSchema,
+  [IPC.STILL_GET]: idArgsSchema,
+  [IPC.STILL_CREATE]: stillCreateArgsSchema,
+  [IPC.STILL_UPDATE]: stillUpdateArgsSchema,
+  [IPC.STILL_DELETE]: idArgsSchema,
+
+  [IPC.TAG_LIST]: tagListArgsSchema,
+  [IPC.TAG_CREATE]: tagCreateArgsSchema,
+  [IPC.TAG_UPDATE]: tagUpdateArgsSchema,
+  [IPC.TAG_DELETE]: idArgsSchema,
+  [IPC.TAG_ASSIGN]: tagAssignArgsSchema,
+  [IPC.TAG_UNASSIGN]: tagAssignArgsSchema,
+
+  [IPC.NOTE_LIST]: noteListArgsSchema,
+  [IPC.NOTE_SAVE]: noteSaveArgsSchema,
+  [IPC.NOTE_DELETE]: idArgsSchema,
+
+  [IPC.TERM_LIST]: termListArgsSchema,
+  [IPC.TERM_CREATE]: termCreateArgsSchema,
+  [IPC.TERM_UPDATE]: termUpdateArgsSchema,
+  [IPC.TERM_DELETE]: idArgsSchema,
 };
 
 /** 主进程 → 渲染层事件白名单 */
@@ -134,10 +210,68 @@ const mediaApi = {
     subscribe<MediaProgressEvent>(EVENT_WHITELIST.onMediaProgress, listener),
 };
 
+const projectApi = {
+  create: (args: ProjectCreateArgs) => invoke<Project>(IPC.PROJECT_CREATE, [args]),
+  list: () => invoke<Project[]>(IPC.PROJECT_LIST),
+  get: (args: { id: string }) => invoke<Project>(IPC.PROJECT_GET, [args]),
+  update: (args: ProjectUpdateArgs) => invoke<Project>(IPC.PROJECT_UPDATE, [args]),
+  delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.PROJECT_DELETE, [args]),
+  save: (args: ProjectSaveArgs) => invoke<ProjectSaveArgs extends never ? never : { path: string; sizeBytes: number; projectId: string }>(IPC.PROJECT_SAVE, [args]),
+  saveAs: (args: { id: string; targetPath: string }) =>
+    invoke<{ path: string; sizeBytes: number; projectId: string }>(IPC.PROJECT_SAVE_AS, [args]),
+  open: (args: { path: string }) => invoke<ProjectOpenResult>(IPC.PROJECT_OPEN, [args]),
+};
+
+const shotApi = {
+  list: (args: { projectId: string }) => invoke<Shot[]>(IPC.SHOT_LIST, [args]),
+  get: (args: { id: string }) => invoke<Shot>(IPC.SHOT_GET, [args]),
+  create: (args: ShotCreateArgs) => invoke<Shot>(IPC.SHOT_CREATE, [args]),
+  update: (args: ShotUpdateArgs) => invoke<Shot>(IPC.SHOT_UPDATE, [args]),
+  delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.SHOT_DELETE, [args]),
+};
+
+const stillApi = {
+  list: (args: { projectId?: string; shotId?: string }) => invoke<Still[]>(IPC.STILL_LIST, [args]),
+  get: (args: { id: string }) => invoke<Still>(IPC.STILL_GET, [args]),
+  create: (args: StillCreateArgs) => invoke<Still>(IPC.STILL_CREATE, [args]),
+  update: (args: StillUpdateArgs) => invoke<Still>(IPC.STILL_UPDATE, [args]),
+  delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.STILL_DELETE, [args]),
+};
+
+const tagApi = {
+  list: (args: { category?: string } = {}) => invoke<Tag[]>(IPC.TAG_LIST, [args]),
+  create: (args: TagCreateArgs) => invoke<Tag>(IPC.TAG_CREATE, [args]),
+  update: (args: TagUpdateArgs) => invoke<Tag>(IPC.TAG_UPDATE, [args]),
+  delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.TAG_DELETE, [args]),
+  assign: (args: { shotId: string; tagIds: string[] }) =>
+    invoke<{ shotId: string; tagIds: string[] }>(IPC.TAG_ASSIGN, [args]),
+  unassign: (args: { shotId: string; tagIds: string[] }) =>
+    invoke<{ shotId: string; tagIds: string[] }>(IPC.TAG_UNASSIGN, [args]),
+};
+
+const noteApi = {
+  list: (args: { projectId?: string; shotId?: string }) => invoke<Note[]>(IPC.NOTE_LIST, [args]),
+  save: (args: NoteSaveArgs) => invoke<Note>(IPC.NOTE_SAVE, [args]),
+  delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.NOTE_DELETE, [args]),
+};
+
+const termApi = {
+  list: (args: { category?: string } = {}) => invoke<Term[]>(IPC.TERM_LIST, [args]),
+  create: (args: TermCreateArgs) => invoke<Term>(IPC.TERM_CREATE, [args]),
+  update: (args: TermUpdateArgs) => invoke<Term>(IPC.TERM_UPDATE, [args]),
+  delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.TERM_DELETE, [args]),
+};
+
 const api: WindowApi = {
   app: appApi,
   player: playerApi,
   media: mediaApi,
+  project: projectApi,
+  shot: shotApi,
+  still: stillApi,
+  tag: tagApi,
+  note: noteApi,
+  term: termApi,
 };
 
 contextBridge.exposeInMainWorld('api', api);

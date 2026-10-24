@@ -232,4 +232,314 @@ export interface WindowApi {
   app: AppApi;
   player: PlayerApi;
   media: MediaApi;
+  project: ProjectApi;
+  shot: ShotApi;
+  still: StillApi;
+  tag: TagApi;
+  note: NoteApi;
+  term: TermApi;
+}
+/** ---------- 数据层（S01 §7 / §7.4） ---------- */
+
+export interface ProjectSource {
+  type: 'local' | 'url';
+  path: string | null;
+  url: string | null;
+  platform: string | null;
+}
+
+export interface ProjectMedia {
+  filename: string | null;
+  container: string | null;
+  durationMs: number;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  sizeBytes: number | null;
+  proxyPath: string | null;
+}
+
+export interface DetectWeights {
+  s: number;
+  c: number;
+  h: number;
+}
+
+export interface DetectOptions {
+  sensitivity: number;
+  minShotSeconds: number;
+  filterTransitions: boolean;
+  weights: DetectWeights;
+  frameInterval?: number;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  source: ProjectSource;
+  media: ProjectMedia;
+  detectOptions: DetectOptions;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectCreateArgs {
+  name: string;
+  source?: Partial<ProjectSource>;
+  media?: Partial<ProjectMedia>;
+  detectOptions?: Partial<DetectOptions>;
+}
+
+export interface ProjectUpdateArgs {
+  id: string;
+  patch: {
+    name?: string;
+    source?: Partial<ProjectSource>;
+    media?: Partial<ProjectMedia>;
+    detectOptions?: Partial<DetectOptions>;
+  };
+}
+
+export interface ProjectSaveArgs {
+  id: string;
+  targetPath?: string;
+  /** 是否把项目资源目录（stills/frames/exports）一并打包，默认 true */
+  includeAssets?: boolean;
+  /** 是否把 source/proxy 视频一并打包，默认 false（体积大，通常按原路径引用） */
+  includeMedia?: boolean;
+}
+
+export interface ProjectSaveResult {
+  path: string;
+  sizeBytes: number;
+  projectId: string;
+}
+
+export interface ProjectOpenArgs {
+  path: string;
+}
+
+export interface ProjectOpenResult {
+  project: Project;
+  /** id 冲突时是否重命名生成了新项目 */
+  renamed: boolean;
+}
+
+export interface Shot {
+  id: string;
+  projectId: string;
+  index: number;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  shotSize: string | null;
+  cameraMethod: string | null;
+  dialogue: string | null;
+  remark: string | null;
+  tagIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ShotCreateArgs {
+  projectId: string;
+  startMs: number;
+  endMs: number;
+  index?: number;
+  shotSize?: string | null;
+  cameraMethod?: string | null;
+  dialogue?: string | null;
+  remark?: string | null;
+}
+
+export interface ShotUpdateArgs {
+  id: string;
+  patch: {
+    index?: number;
+    startMs?: number;
+    endMs?: number;
+    shotSize?: string | null;
+    cameraMethod?: string | null;
+    dialogue?: string | null;
+    remark?: string | null;
+  };
+}
+
+export type AnnotationType = 'box' | 'arrow' | 'text';
+export interface Annotation {
+  type: AnnotationType;
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  points?: [number, number][];
+  color?: string;
+  label?: string | null;
+}
+
+export interface Still {
+  id: string;
+  projectId: string;
+  shotId: string | null;
+  timeMs: number;
+  filePath: string;
+  thumbPath: string | null;
+  width: number | null;
+  height: number | null;
+  caption: string | null;
+  role: 'main' | 'auto-thumb';
+  annotations: Annotation[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StillCreateArgs {
+  projectId: string;
+  shotId?: string | null;
+  timeMs: number;
+  filePath: string;
+  thumbPath?: string | null;
+  width?: number | null;
+  height?: number | null;
+  caption?: string | null;
+  role?: 'main' | 'auto-thumb';
+  annotations?: Annotation[];
+}
+
+export interface StillUpdateArgs {
+  id: string;
+  patch: {
+    shotId?: string | null;
+    timeMs?: number;
+    filePath?: string;
+    thumbPath?: string | null;
+    width?: number | null;
+    height?: number | null;
+    caption?: string | null;
+    role?: 'main' | 'auto-thumb';
+    annotations?: Annotation[];
+  };
+}
+
+export interface Tag {
+  id: string;
+  category: string;
+  name: string;
+  color: string | null;
+  builtin: boolean;
+  sortOrder: number;
+  createdAt: string;
+}
+
+export interface TagCreateArgs {
+  category: string;
+  name: string;
+  color?: string | null;
+  builtin?: boolean;
+  sortOrder?: number;
+}
+
+export interface TagUpdateArgs {
+  id: string;
+  patch: {
+    category?: string;
+    name?: string;
+    color?: string | null;
+    sortOrder?: number;
+  };
+}
+
+export interface Note {
+  id: string;
+  projectId: string;
+  shotId: string;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NoteSaveArgs {
+  id?: string;
+  projectId: string;
+  shotId: string;
+  text: string;
+}
+
+export interface Term {
+  id: string;
+  category: string;
+  term: string;
+  definition: string;
+  builtin: boolean;
+  sortOrder: number;
+  createdAt: string;
+}
+
+export interface TermCreateArgs {
+  category?: string;
+  term: string;
+  definition: string;
+  builtin?: boolean;
+  sortOrder?: number;
+}
+
+export interface TermUpdateArgs {
+  id: string;
+  patch: {
+    category?: string;
+    term?: string;
+    definition?: string;
+    sortOrder?: number;
+  };
+}
+
+export interface ProjectApi {
+  create(args: ProjectCreateArgs): Promise<IpcResult<Project>>;
+  list(): Promise<IpcResult<Project[]>>;
+  get(args: { id: string }): Promise<IpcResult<Project>>;
+  update(args: ProjectUpdateArgs): Promise<IpcResult<Project>>;
+  delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  save(args: ProjectSaveArgs): Promise<IpcResult<ProjectSaveResult>>;
+  saveAs(args: { id: string; targetPath: string }): Promise<IpcResult<ProjectSaveResult>>;
+  open(args: ProjectOpenArgs): Promise<IpcResult<ProjectOpenResult>>;
+}
+
+export interface ShotApi {
+  list(args: { projectId: string }): Promise<IpcResult<Shot[]>>;
+  get(args: { id: string }): Promise<IpcResult<Shot>>;
+  create(args: ShotCreateArgs): Promise<IpcResult<Shot>>;
+  update(args: ShotUpdateArgs): Promise<IpcResult<Shot>>;
+  delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+}
+
+export interface StillApi {
+  list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Still[]>>;
+  get(args: { id: string }): Promise<IpcResult<Still>>;
+  create(args: StillCreateArgs): Promise<IpcResult<Still>>;
+  update(args: StillUpdateArgs): Promise<IpcResult<Still>>;
+  delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+}
+
+export interface TagApi {
+  list(args?: { category?: string }): Promise<IpcResult<Tag[]>>;
+  create(args: TagCreateArgs): Promise<IpcResult<Tag>>;
+  update(args: TagUpdateArgs): Promise<IpcResult<Tag>>;
+  delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  assign(args: { shotId: string; tagIds: string[] }): Promise<IpcResult<{ shotId: string; tagIds: string[] }>>;
+  unassign(args: { shotId: string; tagIds: string[] }): Promise<IpcResult<{ shotId: string; tagIds: string[] }>>;
+}
+
+export interface NoteApi {
+  list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Note[]>>;
+  save(args: NoteSaveArgs): Promise<IpcResult<Note>>;
+  delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+}
+
+export interface TermApi {
+  list(args?: { category?: string }): Promise<IpcResult<Term[]>>;
+  create(args: TermCreateArgs): Promise<IpcResult<Term>>;
+  update(args: TermUpdateArgs): Promise<IpcResult<Term>>;
+  delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
 }

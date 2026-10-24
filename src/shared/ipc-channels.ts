@@ -35,6 +35,43 @@ export const IPC = {
 
   /** media 域（E 方向） */
   MEDIA_EVENT_PROGRESS: 'media:event:progress',
+  /** data 域：项目 / 镜头 / 静帧 / 标签 / 笔记 / 术语（I 方向，S01 §6.2） */
+  PROJECT_CREATE: 'project:create',
+  PROJECT_LIST: 'project:list',
+  PROJECT_GET: 'project:get',
+  PROJECT_UPDATE: 'project:update',
+  PROJECT_DELETE: 'project:delete',
+  PROJECT_OPEN: 'project:open',
+  PROJECT_SAVE: 'project:save',
+  PROJECT_SAVE_AS: 'project:saveAs',
+
+  SHOT_LIST: 'shot:list',
+  SHOT_GET: 'shot:get',
+  SHOT_CREATE: 'shot:create',
+  SHOT_UPDATE: 'shot:update',
+  SHOT_DELETE: 'shot:delete',
+
+  STILL_LIST: 'still:list',
+  STILL_GET: 'still:get',
+  STILL_CREATE: 'still:create',
+  STILL_UPDATE: 'still:update',
+  STILL_DELETE: 'still:delete',
+
+  TAG_LIST: 'tag:list',
+  TAG_CREATE: 'tag:create',
+  TAG_UPDATE: 'tag:update',
+  TAG_DELETE: 'tag:delete',
+  TAG_ASSIGN: 'tag:assign',
+  TAG_UNASSIGN: 'tag:unassign',
+
+  NOTE_LIST: 'note:list',
+  NOTE_SAVE: 'note:save',
+  NOTE_DELETE: 'note:delete',
+
+  TERM_LIST: 'term:list',
+  TERM_CREATE: 'term:create',
+  TERM_UPDATE: 'term:update',
+  TERM_DELETE: 'term:delete',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
