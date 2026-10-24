@@ -563,6 +563,9 @@ function playerChecksAssertions(result: Record<string, any>): Record<string, boo
     playerPause: result.pauseOk === true,
     playerVolume: result.volumeOk === true,
     playerBoundary: result.boundaryOk === true,
+    playerLayerBottom: result.layerBottomOk === true,
+    playerLayerHidden: result.layerHiddenOk === true,
+    playerLayerRestore: result.layerRestoreOk === true,
     playerFileNotFound: result.fileNotFoundOk === true,
     playerUnsupported: result.unsupportedOk === true,
   };
@@ -620,6 +623,17 @@ async function runPlayerChecks(win: BrowserWindow, videoPath: string): Promise<R
         const vol = await api.setVolume({ volume: 0.3 });
         const volState = await api.getState();
         out.volumeOk = vol.ok === true && volState.ok === true && Math.abs(volState.data.volume - 0.3) <= 0.03;
+
+        const bottom = await api.setLayer({ level: 'bottom' });
+        out.layerBottomOk = bottom.ok === true && bottom.data.layer === 'bottom' && bottom.data.hasFile === true;
+        const hidden = await api.setLayer({ level: 'hidden' });
+        const hiddenState = await api.getState();
+        out.layerHiddenOk = hidden.ok === true
+          && hidden.data.layer === 'hidden'
+          && hiddenState.ok === true
+          && hiddenState.data.hasFile === true;
+        const restored = await api.setLayer({ level: 'normal' });
+        out.layerRestoreOk = restored.ok === true && restored.data.layer === 'normal';
 
         return out;
       } catch (error) {

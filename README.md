@@ -33,6 +33,7 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - 运行时依赖 `resources/mpv/libmpv-2.dll`（官方 dev 包，**文件名是 `libmpv-2.dll`，不是 `mpv-2.dll`**；静态链接单文件，无需额外运行时库）。该 DLL 体积约 120MB，按二进制资源处理、不入库，放置到 `resources/mpv/` 即可；打包时由 electron-builder `extraResources` 复制到安装包 `resources/mpv/`。
 - 主进程用 `koffi` 直接调用 libmpv client API；画面经 `wid` 交给 mpv 的 vo/gpu（D3D11）渲染到 Win32 子窗口，渲染层通过 `player:setBounds` 上报播放器区域。因 Chromium DirectComposition 会遮挡原生子窗口，主进程启动时关闭该特性。
 - 帧级能力：`player:frameStep` 前后各 1 帧（等待 `playback-restart` + `time-pos` 稳定 + 帧号实际变化），`player:seek` 使用 `absolute+exact` 精确落帧；25fps 与 23.81fps 素材实测单帧步进稳定。
+- 画面层级：`player:setLayer` 支持 `normal / bottom / hidden`。置底使用 `SetWindowPos(HWND_BOTTOM)`，隐藏使用 `ShowWindow(SW_HIDE)`；播放与声音保持运行，窗口最小化/恢复后按保存层级重新应用，关闭视频重置为 `normal`。
 - 快捷键（渲染层捕获后经 IPC 执行）：`Space` 播放/暂停、`←/→` 逐帧、`Shift+←/→` ±1 秒。
 
 ### 媒体处理（FFmpeg）
@@ -140,14 +141,14 @@ npm run smoke
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
 | `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
-| `feature/scope` | 音频波形、设置与会话 | 第四层音频包络、可配置路径、工作区恢复（S23） |
+| `feature/scope` | 音频波形、设置、会话与画面层级 | 第四层音频包络、可配置路径、工作区恢复、视频层控制（S24） |
 
 ## 智能体工作目录
 
 | 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
 |---|---|---|---|---|
 | dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
-| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings,session}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络、设置与会话恢复 | **已完成（S23）** |
+| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings,session,player}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络、设置、会话与画面层级 | **已完成（S24）** |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
@@ -163,6 +164,8 @@ npm run smoke
 > S22 状态（2026-10-24）：**已完成**。设置界面可持久化数据、缓存、导出、截图四类路径；数据根目录切换即时重建服务，导出/截图/缓存路径按新设置生效，`DSH_DATA_ROOT` 保持最高优先级。
 
 > S23 状态（2026-10-24）：**已完成**。工作区会话退出时原子保存、启动时自动恢复项目/时码/镜头/面板/音量/滚动位置；失效或损坏会话静默忽略。
+
+> S24 状态（2026-10-24）：**已完成**。原生视频窗口支持正常/置底/隐藏三态，隐藏时显示占位且播放继续；最小化恢复后层级保持，关闭视频重置。
 
 ## 提交规范
 
