@@ -60,7 +60,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,session,settings,shot,still,tag,term';
+      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,session,settings,shot,stats,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -195,6 +195,9 @@ function dataChecksAssertions(result: Record<string, any>): Record<string, boole
     dataStillList: result.stillListOk === true,
     dataTermCreate: result.termCreateOk === true,
     dataTermList: result.termListOk === true,
+    statsTagDistribution: result.statsTagOk === true,
+    statsRhythm: result.statsRhythmOk === true,
+    statsProgress: result.statsProgressOk === true,
     dataTxGuard: result.txGuardOk === true,
     dataForeignKey: result.fkOk === true,
     dataSave: result.saveOk === true,
@@ -221,6 +224,7 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
         tag: window.api.tag,
         note: window.api.note,
         term: window.api.term,
+        stats: window.api.stats,
       };
       try {
         const created = await api.project.create({
@@ -280,6 +284,20 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
         out.termCreateOk = term.ok === true;
         const termList = await api.term.list({});
         out.termListOk = termList.ok === true && termList.data.some((item) => item.id === term.data.id);
+
+        const tagStats = await api.stats.tagDistribution({ projectId: project.id });
+        out.statsTagOk = tagStats.ok === true
+          && tagStats.data.some((item) => item.category === '景别' && item.name === smokeTagName && item.count === 1);
+        const rhythmStats = await api.stats.rhythm({ projectId: project.id });
+        out.statsRhythmOk = rhythmStats.ok === true
+          && rhythmStats.data.length === 2
+          && rhythmStats.data[0].durationSeconds === 1.5
+          && rhythmStats.data[1].durationSeconds === 1;
+        const progressStats = await api.stats.progress({ projectId: project.id });
+        out.statsProgressOk = progressStats.ok === true
+          && progressStats.data.totalShots === 2
+          && progressStats.data.annotatedShots === 1
+          && progressStats.data.percent === 50;
 
         const badShot = await api.shot.create({ projectId: project.id, startMs: 2000, endMs: 1000 });
         const afterBad = await api.shot.list({ projectId: project.id });
