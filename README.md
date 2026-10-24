@@ -80,6 +80,13 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - 所有服务统一经 `src/main/paths.ts` 解析路径；数据根目录切换会即时重建 DataLayer 与依赖服务，不迁移既有项目。
 - `DSH_DATA_ROOT` 环境变量始终保持最高优先级，启用时设置界面会禁用路径编辑，确保冒烟和隔离测试不受用户配置影响。
 
+### 工作区会话恢复（S23）
+
+- `session:get` / `session:save` / `session:clear` 将当前项目、播放位置、选中镜头、左右栏折叠、音量与镜头滚动位置保存到 `userData/session.json`。
+- 渲染层对连续变化节流保存；主进程在窗口关闭/退出时通过 `__CAPTURE_WORKSPACE_STATE__` 读取最终快照，退出写盘失败不会阻止程序关闭。
+- `session.json` 使用临时文件 + `rename` 原子替换；损坏、项目不存在或无项目时静默回到默认工作区，不弹错误。
+- 启动恢复成功后自动 seek 到上次位置、恢复选中镜头、音量、面板折叠和镜头列表滚动位置。
+
 ### 数据层（SQLite / better-sqlite3）
 
 - 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
@@ -133,14 +140,14 @@ npm run smoke
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
 | `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
-| `feature/scope` | 音频波形与设置 | 第四层音频包络、可配置数据/缓存/导出/截图路径（S22） |
+| `feature/scope` | 音频波形、设置与会话 | 第四层音频包络、可配置路径、工作区恢复（S23） |
 
 ## 智能体工作目录
 
 | 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
 |---|---|---|---|---|
 | dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
-| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络与设置 | **已完成（S22）** |
+| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings,session}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络、设置与会话恢复 | **已完成（S23）** |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
@@ -154,6 +161,8 @@ npm run smoke
 > S21 状态（2026-10-24）：**已完成**。`feature/scope` 保留音频波形提取、会话缓存、时间轴第四轨、播放头与缩放/平移联动；逐帧分析 UI、IPC、Python 和测试残留已清除。
 
 > S22 状态（2026-10-24）：**已完成**。设置界面可持久化数据、缓存、导出、截图四类路径；数据根目录切换即时重建服务，导出/截图/缓存路径按新设置生效，`DSH_DATA_ROOT` 保持最高优先级。
+
+> S23 状态（2026-10-24）：**已完成**。工作区会话退出时原子保存、启动时自动恢复项目/时码/镜头/面板/音量/滚动位置；失效或损坏会话静默忽略。
 
 ## 提交规范
 

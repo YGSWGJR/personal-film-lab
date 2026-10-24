@@ -32,13 +32,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let mediaChecks: Record<string, unknown> = {};
   let scopeChecks: Record<string, unknown> = {};
   let settingsChecks: Record<string, unknown> = {};
+  let sessionChecks: Record<string, unknown> = {};
   let dataChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, dataChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -59,7 +60,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,settings,shot,still,tag,term';
+      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,session,settings,shot,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -75,6 +76,11 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
         settingsResult.data?.environmentOverride === true &&
         resolve(settingsResult.data.dataRoot) === resolve(dataRootOverride);
     }
+    const sessionResult = (await win.webContents.executeJavaScript(
+      'window.api.session.get()',
+    )) as { ok: boolean; data?: unknown; error?: unknown };
+    sessionChecks = sessionResult;
+    checks.sessionGet = sessionResult.ok === true;
 
     const videoPath = process.env['SMOKE_VIDEO'];
     if (videoPath) {
@@ -127,7 +133,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, dataChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
