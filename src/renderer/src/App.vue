@@ -33,6 +33,7 @@ import type {
   MediaInfo,
   MediaProgressEvent,
   Note,
+  OverlayLayer,
   PlayerErrorEvent,
   PlayerState,
   Project,
@@ -111,6 +112,7 @@ const player = reactive<PlayerState>({
   width: 0,
   height: 0,
   fps: 0,
+  layer: 'normal',
 });
 
 const skeleton: SkeletonState = {
@@ -511,6 +513,7 @@ async function closePlayer(): Promise<void> {
     width: 0,
     height: 0,
     fps: 0,
+    layer: 'normal',
   });
 }
 
@@ -1274,6 +1277,11 @@ function setPlayerBounds(bounds: RenderBounds): void {
   void window.api.player.setBounds(bounds);
 }
 
+async function setPlayerLayer(level: OverlayLayer): Promise<void> {
+  const state = unwrap(await window.api.player.setLayer({ level }));
+  if (state) Object.assign(player, state);
+}
+
 function handleKeydown(event: KeyboardEvent): void {
   const tagName = (event.target as HTMLElement | null)?.tagName;
   if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') return;
@@ -1563,6 +1571,7 @@ onBeforeUnmount(() => {
         @boundary-commit="commitBoundary"
         @bounds="setPlayerBounds"
         @capture="captureStill"
+        @set-layer="setPlayerLayer"
       />
 
       <ShotDetailPanel

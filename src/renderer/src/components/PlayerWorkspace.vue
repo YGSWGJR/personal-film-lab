@@ -5,6 +5,7 @@ import TimelineEditor from './TimelineEditor.vue';
 import type { BoundaryChange, TimelineMarker, WorkspaceShot } from '../types/workspace';
 import type {
   AudioWaveform,
+  OverlayLayer,
   PlayerState,
   RenderBounds,
 } from '../../../shared/types';
@@ -32,6 +33,7 @@ const emit = defineEmits<{
   boundaryCommit: [change: BoundaryChange];
   bounds: [bounds: RenderBounds];
   capture: [];
+  setLayer: [level: OverlayLayer];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
@@ -48,6 +50,21 @@ const resolutionText = computed(() => {
   if (!props.player.hasFile) return '1920 × 1080';
   return `${props.player.width} × ${props.player.height}`;
 });
+const layerLabel = computed(() => {
+  if (props.player.layer === 'bottom') return '置底';
+  if (props.player.layer === 'hidden') return '隐藏';
+  return '正常';
+});
+const layerNext = computed<OverlayLayer>(() => {
+  if (props.player.layer === 'normal') return 'bottom';
+  if (props.player.layer === 'bottom') return 'hidden';
+  return 'normal';
+});
+
+function cycleLayer(): void {
+  if (!props.player.hasFile) return;
+  emit('setLayer', layerNext.value);
+}
 
 function formatTimecode(ms: number): string {
   const safeMs = Math.max(0, Math.floor(ms));
@@ -95,6 +112,16 @@ onBeforeUnmount(() => {
         <span>{{ resolutionText }}</span>
         <span class="viewer-meta-divider"></span>
         <span>{{ player.hasFile ? player.fps.toFixed(3) : '23.810' }} FPS</span>
+        <button
+          class="layer-button"
+          type="button"
+          :disabled="!player.hasFile"
+          :title="`画面层级：${layerLabel}（点击切换为${layerNext === 'normal' ? '正常' : layerNext === 'bottom' ? '置底' : '隐藏'}）`"
+          @click="cycleLayer"
+        >
+          <AppIcon name="layers" :size="12" />
+          {{ layerLabel }}
+        </button>
         <button class="meta-action" type="button" title="全屏预览">
           <AppIcon name="expand" :size="13" />
         </button>
@@ -120,7 +147,12 @@ onBeforeUnmount(() => {
             <span>{{ selectedShot ? `SHOT ${String(selectedShot.index).padStart(2, '0')}` : 'PLAYER' }}</span>
             <strong>{{ selectedShot?.title ?? '打开影片开始拉片' }}</strong>
           </div>
-          <div v-if="player.hasFile" class="native-player-placeholder">
+          <div v-if="player.hasFile && player.layer === 'hidden'" class="layer-placeholder">
+            <AppIcon name="layers" :size="24" />
+            <strong>画面已隐藏</strong>
+            <span>播放与音频继续运行</span>
+          </div>
+          <div v-else-if="player.hasFile" class="native-player-placeholder">
             <span>LIBMPV SURFACE</span>
           </div>
         </div>
@@ -389,13 +421,32 @@ onBeforeUnmount(() => {
   display: grid;
   width: 24px;
   height: 24px;
-  margin-left: auto;
+  margin-left: 0;
   padding: 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--text-faint);
   place-items: center;
+}
+
+.layer-button {
+  display: flex;
+  height: 20px;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 4px;
+  background: rgba(30, 58, 95, 0.28);
+  color: var(--blue-hi);
+  font-size: 9px;
+}
+
+.layer-button:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.42);
+  background: rgba(30, 58, 95, 0.48);
 }
 
 .meta-action:hover {
@@ -528,6 +579,30 @@ onBeforeUnmount(() => {
   font-size: 10px;
   letter-spacing: 2px;
   place-items: center;
+}
+
+.layer-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(59, 130, 246, 0.09), transparent 42%),
+    #05080d;
+  color: var(--text-faint);
+}
+
+.layer-placeholder strong {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.layer-placeholder span {
+  font-size: 9px;
 }
 
 .transport {
