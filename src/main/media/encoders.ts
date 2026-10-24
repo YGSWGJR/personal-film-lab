@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { resolveFfmpegBinaries } from './ffmpeg-binaries';
 
 export interface VideoEncoderInfo {
@@ -99,7 +101,26 @@ export function resolveAvailableEncoders(): Promise<VideoEncoderInfo[]> {
 }
 
 /** 按任务约定选择最优编码器；没有可用探测结果时返回 libx264 兜底。 */
+/** 读取基准脚本写入的偏好编码器（T1-F：cacheDir/preferred-encoder.json），不存在或不可用时返回 null。 */
+export function loadPreferredEncoder(): string | null {
+  try {
+    const settingsPath = join(process.env['APPDATA'] ?? '', 'personal-film-lab', 'settings.json');
+    if (!existsSync(settingsPath)) return null;
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as { cacheDir?: unknown };
+    if (typeof settings.cacheDir !== 'string' || !settings.cacheDir) return null;
+    const prefPath = join(settings.cacheDir, 'preferred-encoder.json');
+    if (!existsSync(prefPath)) return null;
+    const pref = JSON.parse(readFileSync(prefPath, 'utf8')) as { encoder?: unknown };
+    return typeof pref.encoder === 'string' && pref.encoder ? pref.encoder : null;
+  } catch {
+    return null;
+  }
+}
+
 export function selectBestEncoder(encoders: VideoEncoderInfo[]): VideoEncoderInfo {
+  const preferred = loadPreferredEncoder();
+  const byPreferred = preferred ? encoders.find((encoder) => encoder.name === preferred) : undefined;
+  if (byPreferred) return byPreferred;
   const byName = new Map(encoders.map((encoder) => [encoder.name, encoder]));
   for (const name of SELECTION_ORDER) {
     const encoder = byName.get(name);
