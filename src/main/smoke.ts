@@ -145,19 +145,13 @@ async function runScopeChecks(win: BrowserWindow, videoPath: string): Promise<Re
         out.first = first.ok ? {
           histogramBins: first.data.histogram.y.length,
           waveformColumns: first.data.waveform.length,
-          vectorPoints: first.data.vectorscope.length,
-          paradeColumns: first.data.parade.r.length,
-          ciePoints: first.data.cie.points.length,
-          gamutPoints: first.data.cie.gamut.length
+          paradeColumns: first.data.parade.r.length
         } : first.error;
         out.analyzeOk = first.ok === true
           && first.data.histogram.y.length === 64
           && first.data.histogram.r.length === 64
           && first.data.waveform.length === 128
-          && first.data.vectorscope.length > 0
-          && first.data.parade.r.length === 128
-          && first.data.cie.points.length > 0
-          && first.data.cie.gamut.length >= 4;
+          && first.data.parade.r.length === 128;
 
         const started = performance.now();
         const cached = await window.api.scope.analyzeFrame({

@@ -69,8 +69,8 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 
 ### 示波器与音频波形（ScopeService，S20）
 
-- `scope:analyzeFrame` 使用 `media:extractFrame` 生成最大 640px 宽的临时帧，经独立常驻 Python JSON-RPC 服务计算 Luma/R/G/B 64-bin 直方图、128 列亮度波形、色度矢量密度、RGB Parade 与 CIE 1931 散点。
-- 渲染层提供直方图 / 波形图 / 矢量图 / 分量图 / CIE 1931 五个 Tab；播放中按 300ms 调度并带 ±500ms 帧缓存，暂停与 seek 立即刷新，失败保留上一次成功画面。
+- `scope:analyzeFrame` 使用 `media:extractFrame` 生成最大 640px 宽的临时帧，经独立常驻 Python JSON-RPC 服务计算 Luma/R/G/B 64-bin 直方图、128 列亮度波形与 RGB Parade。
+- 渲染层提供直方图 / 波形图 / 分量图三个 Tab；播放中按 300ms 调度并带 ±500ms 帧缓存，暂停与 seek 立即刷新，失败保留上一次成功画面。
 - `scope:extractAudioWaveform` 以 8kHz 单声道 f32le 流式读取音频，默认按 100ms 桶计算 peak/RMS；时间轴第四轨共享缩放、平移与播放头，Ctrl+滚轮缩放，Shift+滚轮平移。
 - Python 脚本位于 `src/main/scope/python/`，打包时复制到 `resources/scope/python/`；S07 检测算法目录保持不变。
 
@@ -143,7 +143,7 @@ npm run smoke
 
 > S14 状态（2026-10-24）：**已完成**。`feature/integration` 已接通本地导入 / 代理转码 / 检测预览与确认写库 / 三栏真实数据 / 截图标注 / PDF 与 Word 导出；UI 类型检查、Electron 冒烟与真实项目联调通过。
 
-> S20 状态（2026-10-24）：**已完成**。`feature/scope` 已交付五类 canvas 示波器、常驻 Python 帧分析、±500ms 缓存、第四层音频包络与缩放联动；黑/白/红帧数值、CIE、IPC 冒烟与真实播放节流联调通过。
+> S20 状态（2026-10-24）：**已完成**。`feature/scope` 已交付直方图、波形图、分量图、常驻 Python 帧分析、±500ms 缓存、第四层音频包络与缩放联动；黑/白/红帧数值、IPC 冒烟与真实播放节流联调通过。
 
 ## 提交规范
 

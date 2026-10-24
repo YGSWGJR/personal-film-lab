@@ -8,10 +8,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-from cie import analyze_cie
 from histogram import analyze_histogram
 from parade import analyze_parade
-from vectorscope import analyze_vectorscope
 from waveform import analyze_waveform
 
 
@@ -40,9 +38,7 @@ def analyze(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "histogram": analyze_histogram(rgb),
         "waveform": analyze_waveform(luma),
-        "vectorscope": analyze_vectorscope(rgb),
         "parade": analyze_parade(rgb),
-        "cie": analyze_cie(rgb),
     }
 
 

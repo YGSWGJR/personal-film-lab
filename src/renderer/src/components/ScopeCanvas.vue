@@ -2,7 +2,6 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type {
   ScopeAnalysis,
-  ScopeCieAnalysis,
   ScopeParadePoint,
   ScopeWaveformPoint,
 } from '../../../shared/types';
@@ -56,9 +55,7 @@ function draw(): void {
 
   if (props.mode === 'histogram') drawHistogram(context, rect.width, rect.height, analysis);
   else if (props.mode === 'waveform') drawWaveform(context, rect.width, rect.height, analysis.waveform);
-  else if (props.mode === 'vectorscope') drawVectorscope(context, rect.width, rect.height, analysis);
-  else if (props.mode === 'parade') drawParade(context, rect.width, rect.height, analysis);
-  else drawCie(context, rect.width, rect.height, analysis.cie);
+  else drawParade(context, rect.width, rect.height, analysis);
 }
 
 function drawGrid(context: CanvasRenderingContext2D, width: number, height: number): void {
@@ -151,58 +148,6 @@ function drawWaveform(
   drawReference(context, width, height, 0.1, '10');
 }
 
-function drawVectorscope(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  analysis: ScopeAnalysis,
-): void {
-  if (props.references) {
-    const cx = width / 2;
-    const cy = height / 2;
-    const radius = Math.min(width, height) * 0.43;
-    context.save();
-    context.strokeStyle = guideColor;
-    for (const scale of [0.33, 0.66, 1]) {
-      context.beginPath();
-      context.arc(cx, cy, radius * scale, 0, Math.PI * 2);
-      context.stroke();
-    }
-    context.beginPath();
-    context.moveTo(cx, cy - radius);
-    context.lineTo(cx, cy + radius);
-    context.moveTo(cx - radius, cy);
-    context.lineTo(cx + radius, cy);
-    context.stroke();
-    const targets: Array<[number, number, string]> = [
-      [0.5, 0.5, 'C'],
-      [0.8505, 0.3505, 'R'],
-      [0.2065, 0.2065, 'G'],
-      [0.443, 0.943, 'B'],
-    ];
-    context.fillStyle = 'rgba(203, 213, 225, 0.7)';
-    context.font = '9px "Cascadia Mono", Consolas, monospace';
-    context.textAlign = 'center';
-    for (const [u, v, label] of targets) {
-      context.fillText(label, u * width, (1 - v) * height - 4);
-    }
-    context.restore();
-  }
-
-  context.save();
-  context.globalCompositeOperation = 'lighter';
-  for (const point of analysis.vectorscope) {
-    const x = point.u * width;
-    const y = (1 - point.v) * height;
-    const radius = 0.7 + point.w * 2.5;
-    context.fillStyle = densityColor(point.w);
-    context.beginPath();
-    context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fill();
-  }
-  context.restore();
-}
-
 function drawParade(
   context: CanvasRenderingContext2D,
   width: number,
@@ -252,64 +197,6 @@ function drawParade(
   context.restore();
 }
 
-const CIE_LOCUS = createCieLocus();
-
-function drawCie(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  cie: ScopeCieAnalysis,
-): void {
-  const padding = 8;
-  const mapX = (x: number): number => padding + (x / 0.8) * (width - padding * 2);
-  const mapY = (y: number): number => height - padding - (y / 0.9) * (height - padding * 2);
-
-  context.save();
-  context.beginPath();
-  CIE_LOCUS.forEach((point, index) => {
-    const x = mapX(point.x);
-    const y = mapY(point.y);
-    if (index === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
-  });
-  context.closePath();
-  context.fillStyle = 'rgba(30, 64, 175, 0.13)';
-  context.fill();
-  context.strokeStyle = 'rgba(125, 211, 252, 0.5)';
-  context.lineWidth = 1;
-  context.stroke();
-
-  if (props.references && cie.gamut.length >= 3) {
-    context.beginPath();
-    cie.gamut.slice(0, 3).forEach((point, index) => {
-      const x = mapX(point.x);
-      const y = mapY(point.y);
-      if (index === 0) context.moveTo(x, y);
-      else context.lineTo(x, y);
-    });
-    context.closePath();
-    context.strokeStyle = 'rgba(251, 191, 36, 0.78)';
-    context.stroke();
-    const white = cie.gamut[3] ?? { x: 0.3127, y: 0.329 };
-    context.fillStyle = '#f8fafc';
-    context.beginPath();
-    context.arc(mapX(white.x), mapY(white.y), 2.5, 0, Math.PI * 2);
-    context.fill();
-    context.font = '8px "Cascadia Mono", Consolas, monospace';
-    context.fillText('D65', mapX(white.x) + 4, mapY(white.y) - 3);
-  }
-
-  context.globalCompositeOperation = 'lighter';
-  for (const point of cie.points) {
-    const radius = 0.7 + point.w * 2.2;
-    context.fillStyle = densityColor(point.w);
-    context.beginPath();
-    context.arc(mapX(point.x), mapY(point.y), radius, 0, Math.PI * 2);
-    context.fill();
-  }
-  context.restore();
-}
-
 function drawReference(
   context: CanvasRenderingContext2D,
   width: number,
@@ -330,39 +217,6 @@ function drawReference(
   context.font = '8px "Cascadia Mono", Consolas, monospace';
   context.fillText(label, 4, (1 - value) * height - 3);
   context.restore();
-}
-
-function densityColor(weight: number): string {
-  const normalized = Math.max(0, Math.min(1, weight));
-  const start = normalized < 0.55 ? [29, 78, 216] : [34, 211, 238];
-  const end = normalized < 0.55 ? [34, 211, 238] : [253, 224, 71];
-  const amount = normalized < 0.55 ? normalized / 0.55 : (normalized - 0.55) / 0.45;
-  const channels = start.map((value, index) => Math.round(value + (end[index] - value) * amount));
-  return `rgba(${channels[0]}, ${channels[1]}, ${channels[2]}, ${0.2 + normalized * 0.72})`;
-}
-
-function createCieLocus(): Array<{ x: number; y: number }> {
-  const gaussian = (wavelength: number, mean: number, leftScale: number, rightScale: number): number => {
-    const scale = wavelength < mean ? leftScale : rightScale;
-    const offset = (wavelength - mean) / scale;
-    return Math.exp(-0.5 * offset * offset);
-  };
-  const points: Array<{ x: number; y: number }> = [];
-  for (let wavelength = 380; wavelength <= 780; wavelength += 1) {
-    const xBar =
-      1.056 * gaussian(wavelength, 599.8, 37.9, 31.0) +
-      0.362 * gaussian(wavelength, 442.0, 16.0, 26.7) -
-      0.065 * gaussian(wavelength, 501.1, 20.4, 26.2);
-    const yBar =
-      0.821 * gaussian(wavelength, 568.8, 46.9, 40.5) +
-      0.286 * gaussian(wavelength, 530.9, 16.3, 31.1);
-    const zBar =
-      1.217 * gaussian(wavelength, 437.0, 11.8, 36.0) +
-      0.681 * gaussian(wavelength, 459.0, 26.0, 13.8);
-    const total = xBar + yBar + zBar;
-    if (total > 0) points.push({ x: xBar / total, y: yBar / total });
-  }
-  return points;
 }
 
 watch(

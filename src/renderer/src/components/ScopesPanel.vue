@@ -21,9 +21,7 @@ const references = ref(true);
 const tabs: Array<{ mode: ScopeMode; label: string; short: string }> = [
   { mode: 'histogram', label: '直方图', short: 'HIST' },
   { mode: 'waveform', label: '波形图', short: 'WAVE' },
-  { mode: 'vectorscope', label: '矢量图', short: 'VECT' },
   { mode: 'parade', label: '分量图', short: 'RGB' },
-  { mode: 'cie', label: 'CIE 1931', short: 'CIE' },
 ];
 const activeLabel = computed(() => tabs.find((tab) => tab.mode === activeMode.value)?.label ?? '');
 

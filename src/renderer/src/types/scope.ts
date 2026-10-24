@@ -1,1 +1,1 @@
-export type ScopeMode = 'histogram' | 'waveform' | 'vectorscope' | 'parade' | 'cie';
+export type ScopeMode = 'histogram' | 'waveform' | 'parade';

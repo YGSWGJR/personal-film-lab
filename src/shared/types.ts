@@ -244,12 +244,6 @@ export interface ScopeWaveformPoint {
   mean: number;
 }
 
-export interface ScopeVectorPoint {
-  u: number;
-  v: number;
-  w: number;
-}
-
 export interface ScopeParadePoint {
   min: number;
   max: number;
@@ -262,29 +256,10 @@ export interface ScopeParade {
   b: ScopeParadePoint[];
 }
 
-export interface ScopeCiePoint {
-  x: number;
-  y: number;
-  w: number;
-}
-
-export interface ScopeCiePoint2D {
-  x: number;
-  y: number;
-}
-
-export interface ScopeCieAnalysis {
-  points: ScopeCiePoint[];
-  /** sRGB 三角 R/G/B + D65 白点 */
-  gamut: ScopeCiePoint2D[];
-}
-
 export interface ScopeAnalysis {
   histogram: ScopeHistogram;
   waveform: ScopeWaveformPoint[];
-  vectorscope: ScopeVectorPoint[];
   parade: ScopeParade;
-  cie: ScopeCieAnalysis;
 }
 
 export interface ScopeAnalyzeFrameArgs {
