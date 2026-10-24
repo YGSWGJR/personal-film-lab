@@ -70,8 +70,15 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 ### 音频波形轨（ScopeService，S21）
 
 - `scope:extractAudioWaveform` 以 8kHz 单声道 f32le 流式读取音频，默认按 100ms 桶计算 peak/RMS；时间轴第四轨共享缩放、平移与播放头，Ctrl+滚轮缩放，Shift+滚轮平移。
-- 音频包络在项目导入/打开后一次提取，主进程按文件路径、大小、修改时间与 bucketMs 做会话缓存；不使用实时逐帧分析。
+- 音频包络在项目导入/打开后一次提取，主进程按文件路径、大小、修改时间与 bucketMs 做内存与磁盘缓存（`cacheDir/audio-waveforms`）；不使用实时逐帧分析。
 - S20 实验性的逐帧示波器三图已移除，S07 镜头检测算法和原有三层时间轴保持不变。
+
+### 设置与可配置路径（S22）
+
+- `settings:get` / `settings:set` / `settings:chooseDirectory` 提供四类路径设置，配置持久化到 `userData/settings.json`。
+- 可配置项目数据根目录、媒体缓存目录、导出根目录和截图根目录；导出与截图目录按项目 ID 自动建立子目录。
+- 所有服务统一经 `src/main/paths.ts` 解析路径；数据根目录切换会即时重建 DataLayer 与依赖服务，不迁移既有项目。
+- `DSH_DATA_ROOT` 环境变量始终保持最高优先级，启用时设置界面会禁用路径编辑，确保冒烟和隔离测试不受用户配置影响。
 
 ### 数据层（SQLite / better-sqlite3）
 
@@ -126,14 +133,14 @@ npm run smoke
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
 | `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
-| `feature/scope` | 音频波形 | 第四层音频包络、缩放/平移联动（S21） |
+| `feature/scope` | 音频波形与设置 | 第四层音频包络、可配置数据/缓存/导出/截图路径（S22） |
 
 ## 智能体工作目录
 
 | 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
 |---|---|---|---|---|
 | dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
-| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope}`、`src/main/app.ts` | 界面、镜头检测、集成联调与音频包络 | **已完成（S21）** |
+| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络与设置 | **已完成（S22）** |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
@@ -145,6 +152,8 @@ npm run smoke
 > S20 状态（2026-10-24）：逐帧示波器三图因抽帧延迟无法满足实时要求，已由 S21 移除。
 
 > S21 状态（2026-10-24）：**已完成**。`feature/scope` 保留音频波形提取、会话缓存、时间轴第四轨、播放头与缩放/平移联动；逐帧分析 UI、IPC、Python 和测试残留已清除。
+
+> S22 状态（2026-10-24）：**已完成**。设置界面可持久化数据、缓存、导出、截图四类路径；数据根目录切换即时重建服务，导出/截图/缓存路径按新设置生效，`DSH_DATA_ROOT` 保持最高优先级。
 
 ## 提交规范
 
