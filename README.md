@@ -35,6 +35,13 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - 帧级能力：`player:frameStep` 前后各 1 帧（等待 `playback-restart` + `time-pos` 稳定 + 帧号实际变化），`player:seek` 使用 `absolute+exact` 精确落帧；25fps 与 23.81fps 素材实测单帧步进稳定。
 - 快捷键（渲染层捕获后经 IPC 执行）：`Space` 播放/暂停、`←/→` 逐帧、`Shift+←/→` ±1 秒。
 
+### 媒体处理（FFmpeg）
+
+- 运行时依赖 `resources/ffmpeg/ffmpeg.exe` 与 `resources/ffmpeg/ffprobe.exe`（**FFmpeg 9.0.2-full_build**，www.gyan.dev 官方 Windows 构建；静态链接单文件，**无外部 DLL 依赖**）。体积各约 220MB，按二进制资源处理、不入库，放置到 `resources/ffmpeg/` 即可；打包时由 electron-builder `extraResources` 复制到安装包 `resources/ffmpeg/`。
+- 用途：`ffprobe` 元信息探测（时长 / 分辨率 / 帧率 / 编码）；`ffmpeg` 抽帧（静帧截图、镜头检测采样）与转码代理（高码率转低码率代理，保证低配机流畅）。
+- **安装记录（2026-10-24）**：GitHub / gyan.dev 直连下载不稳定，改经 winget 安装 `Gyan.FFmpeg` 9.0.2（`winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements --disable-interactivity`），从安装目录 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*\ffmpeg-9.0.2-full_build\bin\` 拷贝 `ffmpeg.exe` / `ffprobe.exe` 至 `resources/ffmpeg/`。系统 PATH 已注册全局 `ffmpeg` / `ffprobe` / `ffplay` 别名，与仓库内二进制不冲突。
+- 集成约定：主进程媒体服务直接 spawn `resources/ffmpeg/ffmpeg.exe`（开发期取仓库路径，打包后取 `process.resourcesPath`）；失败时输出 stderr 便于排查。
+
 ### 播放器冒烟（PowerShell）
 
 ```powershell
