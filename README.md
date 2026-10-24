@@ -4,6 +4,88 @@
 
 **技术栈**：Electron · libmpv · FFmpeg · OpenCV（Python 检测服务）· SQLite · yt-dlp
 
+## 开发（阶段 0–2 · 骨架 + 播放链路）
+
+```bash
+npm install        # 安装依赖（Electron 45 + electron-vite + Vue 3 + electron-builder + koffi）
+npm run dev        # 开发模式启动窗口（HMR）
+npm start          # 构建后启动窗口（electron-vite preview）
+npm run smoke      # 冒烟校验：窗口 + preload 白名单桥 + app:info；设置 SMOKE_VIDEO 时追加播放器全链路
+npm run typecheck  # 主进程 / 渲染层类型检查
+npm run build      # 打包 Windows 安装包（release/）
+npm run build:dir  # 只产出未压缩目录，验证打包链路
+```
+
+工程骨架按 S01 §4 落地：
+
+| 路径 | 内容 |
+|---|---|
+| `src/main/index.ts` | 主进程入口：生命周期 + IPC 注册 + 关闭 DirectComposition |
+| `src/main/app.ts` | 主窗口创建与安全基线（contextIsolation / sandbox / 禁止新窗口） |
+| `src/main/ipc/index.ts` | IPC 注册器（统一 `IpcResult` 信封） |
+| `src/main/player/` | 播放链路：`mpv-lib.ts`（FFI）· `mpv-client.ts` · `native-overlay.ts` · `player-service.ts` |
+| `src/preload/index.ts` | `contextBridge` 白名单桥 + zod 载荷校验 |
+| `src/renderer/` | Vue 3 三栏工作台 + 播放器 UI / 快捷键 |
+| `src/shared/` | `types.ts` / `ipc-channels.ts` / `schemas.ts` / `ipc-result.ts` |
+
+### 播放链路（libmpv）
+
+- 运行时依赖 `resources/mpv/libmpv-2.dll`（官方 dev 包，**文件名是 `libmpv-2.dll`，不是 `mpv-2.dll`**；静态链接单文件，无需额外运行时库）。该 DLL 体积约 120MB，按二进制资源处理、不入库，放置到 `resources/mpv/` 即可；打包时由 electron-builder `extraResources` 复制到安装包 `resources/mpv/`。
+- 主进程用 `koffi` 直接调用 libmpv client API；画面经 `wid` 交给 mpv 的 vo/gpu（D3D11）渲染到 Win32 子窗口，渲染层通过 `player:setBounds` 上报播放器区域。因 Chromium DirectComposition 会遮挡原生子窗口，主进程启动时关闭该特性。
+- 帧级能力：`player:frameStep` 前后各 1 帧（等待 `playback-restart` + `time-pos` 稳定 + 帧号实际变化），`player:seek` 使用 `absolute+exact` 精确落帧；25fps 与 23.81fps 素材实测单帧步进稳定。
+- 快捷键（渲染层捕获后经 IPC 执行）：`Space` 播放/暂停、`←/→` 逐帧、`Shift+←/→` ±1 秒。
+
+### 媒体处理（FFmpeg）
+
+- 运行时依赖 `resources/ffmpeg/ffmpeg.exe` 与 `resources/ffmpeg/ffprobe.exe`（**FFmpeg 9.0.2-full_build**，www.gyan.dev 官方 Windows 构建；静态链接单文件，**无外部 DLL 依赖**）。体积各约 220MB，按二进制资源处理、不入库，放置到 `resources/ffmpeg/` 即可；打包时由 electron-builder `extraResources` 复制到安装包 `resources/ffmpeg/`。
+- 用途：`ffprobe` 元信息探测（时长 / 分辨率 / 帧率 / 编码）；`ffmpeg` 抽帧（静帧截图、镜头检测采样）与转码代理（高码率转低码率代理，保证低配机流畅）。
+- **安装记录（2026-10-24）**：GitHub / gyan.dev 直连下载不稳定，改经 winget 安装 `Gyan.FFmpeg` 9.0.2（`winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements --disable-interactivity`），从安装目录 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*\ffmpeg-9.0.2-full_build\bin\` 拷贝 `ffmpeg.exe` / `ffprobe.exe` 至 `resources/ffmpeg/`。系统 PATH 已注册全局 `ffmpeg` / `ffprobe` / `ffplay` 别名，与仓库内二进制不冲突。
+- 集成约定：主进程媒体服务直接 spawn `resources/ffmpeg/ffmpeg.exe`（开发期取仓库路径，打包后取 `process.resourcesPath`）；失败时输出 stderr 便于排查。
+
+### 媒体处理服务（MediaService）
+
+实现位于 `src/main/media/`，IPC 通道见 S01 §6.2 `media` 域，统一 Promise 接口：
+
+| 能力 | 通道 | 说明 |
+|---|---|---|
+| 元信息探测 | `media:probe` | 时长 / 分辨率 / 帧率 / 容器 / 视频与音频编码 / 码率 / 大小 / 是否含音视频轨 |
+| 精确抽帧 | `media:extractFrame` | 按毫秒时间点抽单帧 JPG/PNG；默认落 `userData/lapian/frames/` |
+| 批量抽帧 | `media:extractFrames` | 按固定间隔抽帧（最小 50ms、最多 20000 帧保护），供镜头检测采样；调用方指定 `outputDir` |
+| 转码代理 | `media:transcodeProxy` | H.264 + yuv420p + 最高 720p（不放大）+ AAC 128k + faststart；只写新文件，绝不修改源文件；默认落 `userData/lapian/proxies/` |
+
+统一特性：
+
+- **超时**：探测默认 30s、单帧 60s、批量抽帧 30min、转码 60min，均可用 `timeoutMs` 覆盖；超时返回 `*_TIMEOUT` 错误并结束进程树。
+- **失败诊断**：错误信封 `error.details` 带 `command` / `exitCode` / `stderr` 尾部 / `elapsedMs` / `timeoutMs` / `path`，便于定位编码或路径问题。
+- **进度与取消**：批量抽帧/转码通过 `media:event:progress` 推送 `{ jobId, stage, percent, message }`（约 1% 或 250ms 节流）；`media:cancelJob` 可中止任务，返回 `CANCELLED`。
+- **错误码**：`FFMPEG_NOT_FOUND` / `INPUT_NOT_FOUND` / `INPUT_EMPTY` / `PROBE_FAILED` / `PROBE_TIMEOUT` / `NO_VIDEO_STREAM` / `EXTRACT_FRAME_FAILED` / `EXTRACT_FRAMES_FAILED` / `TRANSCODE_FAILED` / `CANCELLED` 等。
+
+### 数据层（SQLite / better-sqlite3）
+
+- 单库 `userData/lapian/lapian.db`（WAL + 外键），迁移脚本在 `src/data/migrations/001_init.sql`，启动时按 `PRAGMA user_version` 自动升级；测试可用环境变量 `DSH_DATA_ROOT` 指向临时目录。
+- V1 表：`projects` / `shots` / `stills` / `tags` / `shot_tags` / `notes` / `terms`；shots 含景别 `shot_size`、摄法 `camera_method`、台词 `dialogue`、备注 `remark` 业务列；静帧标注以归一化坐标 JSON 存 `annotations_json`。
+- 仓储在 `src/data/repositories/`，**所有写操作都在 `db.transaction` 内**；子实体写入同时刷新项目 `updated_at`。
+- IPC / preload 提供完整 CRUD：`project:*`、`shot:*`、`still:*`、`tag:*`（含 assign/unassign）、`note:save`、`term:*`，统一 `IpcResult` 信封与 zod 入参校验。
+- 项目文件：`project:save` / `project:saveAs` 导出单个 `.lapian`（zip）= `manifest.json` + 项目 SQLite 快照 `project.db` + `assets/` 资源目录；`project:open` 导入并重映射 id（冲突时自动换新 id、名称加「（导入）」）。默认导出目录 `userData/lapian/packages/`。
+- 原生模块：better-sqlite3 v13 内置 N-API 预编译，Electron 45 直接可用；打包配置 `asarUnpack: node_modules/better-sqlite3/**`、`npmRebuild: false`，已用打包产物冒烟验证。
+
+### 冒烟（播放器 + 媒体 + 数据层，PowerShell）
+
+```powershell
+$env:SMOKE_VIDEO = 'D:\path\clip.mp4'            # 播放器链路断言
+$env:SMOKE_BAD_FILE = 'D:\path\bad.mp4'          # 播放器/媒体错误处理断言（可选）
+$env:SMOKE_MEDIA_VIDEO = 'D:\path\clip.mp4'      # 媒体探测/抽帧断言
+$env:SMOKE_TRANSCODE_VIDEO = 'D:\path\clip2.mp4' # 代理转码断言，默认同 SMOKE_MEDIA_VIDEO
+$env:SMOKE_CANCEL_VIDEO = 'D:\path\long.mp4'     # 取消任务断言（可选）
+$env:SMOKE_MEDIA_OUT = 'D:\tmp\media-smoke'      # 抽帧/代理输出目录
+$env:SMOKE_RESULT = 'D:\tmp\smoke.json'          # 结果 JSON
+$env:SMOKE_HOLD_MS = '15000'                     # 保持窗口，便于外部截屏目检（可选）
+$env:DSH_DATA_ROOT = 'D:\tmp\data-smoke'          # 数据层测试根目录（隔离主库）
+$env:SMOKE_DATA_PKG = 'D:\tmp\data-smoke\pkg\project.lapian'  # 项目包保存/打开往返
+npm run smoke
+```
+
+已知限制：视频区域是原生子窗口，DOM 无法覆盖在其上方；点击视频区不会触发 DOM 事件（键盘快捷键不受影响）。后续如需播放器控件浮层，需评估 Electron 的 `WebContentsView` 或改用 GPU 帧共享方案。
 ## 文档索引
 
 | 编号 | 文档 | 说明 |

@@ -1,0 +1,79 @@
+{
+  "name": "personal-film-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "个人拉片工作台 — 导入影片、切分镜头、标注静帧、导出分镜本",
+  "main": "./out/main/index.js",
+  "author": "Personal Film Lab",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite build && electron-vite preview",
+    "smoke": "electron-vite build && electron . --smoke-test --disable-gpu",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "build": "electron-vite build && electron-builder",
+    "build:dir": "electron-vite build && electron-builder --dir"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.0.0",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vue": "^3.5.44",
+    "vue-tsc": "^3.3.13",
+    "zod": "^4.6.7"
+  },
+  "build": {
+    "appId": "com.personalfilmlab.desktop",
+    "productName": "个人拉片工作台",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "asarUnpack": [
+      "node_modules/koffi/**",
+      "node_modules/better-sqlite3/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/mpv",
+        "to": "mpv",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "ffmpeg.exe",
+          "ffprobe.exe"
+        ]
+      }
+    ],
+    "npmRebuild": false
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "fflate": "^0.8.3",
+    "koffi": "^3.3.3"
+  }
+}

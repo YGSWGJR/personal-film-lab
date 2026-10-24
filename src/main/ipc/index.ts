@@ -1,0 +1,328 @@
+import { app, ipcMain, type BrowserWindow } from 'electron';
+import { IPC } from '../../shared/ipc-channels';
+import { withEnvelope } from '../../shared/ipc-result';
+import type {
+  AppInfo,
+  CancelJobResult,
+  ExtractFrameArgs,
+  ExtractFramesArgs,
+  ExtractFramesResult,
+  ExtractFrameResult,
+  MediaInfo,
+  MediaProbeArgs,
+  MediaProbeResult,
+  Note,
+  NoteSaveArgs,
+  PlayerState,
+  Project,
+  ProjectCreateArgs,
+  ProjectOpenArgs,
+  ProjectOpenResult,
+  ProjectSaveArgs,
+  ProjectSaveResult,
+  ProjectUpdateArgs,
+  RenderBounds,
+  Shot,
+  ShotCreateArgs,
+  ShotUpdateArgs,
+  Still,
+  StillCreateArgs,
+  StillUpdateArgs,
+  Tag,
+  TagCreateArgs,
+  TagUpdateArgs,
+  Term,
+  TermCreateArgs,
+  TermUpdateArgs,
+  TranscodeProxyArgs,
+  TranscodeProxyResult,
+} from '../../shared/types';
+import type { DataLayer } from '../../data/db';
+import { DataError } from '../../data/errors';
+import type { ProjectPackageService } from '../../data/project-package';
+import { MediaError } from '../media/media-error';
+import type { MediaService } from '../media/media-service';
+import { PlayerError } from '../player/mpv-lib';
+import type { PlayerService } from '../player/player-service';
+
+export interface IpcDeps {
+  getWindow(): BrowserWindow | null;
+  getPlayer(): PlayerService | null;
+  getMedia(): MediaService | null;
+  getData(): DataLayer | null;
+  getPackage(): ProjectPackageService | null;
+}
+
+/**
+ * IPC 注册器（docs/S01 §4 / §6.2）。
+ * 所有 handler 经 withEnvelope 统一返回 IpcResult 信封；错误码由领域 Error 透传。
+ */
+export function registerIpcHandlers(deps: IpcDeps): void {
+  const requirePlayer = (): PlayerService => {
+    const player = deps.getPlayer();
+    if (!player) throw new PlayerError('PLAYER_UNAVAILABLE', '播放器尚未初始化');
+    return player;
+  };
+  const requireMedia = (): MediaService => {
+    const media = deps.getMedia();
+    if (!media) throw new MediaError('MEDIA_UNAVAILABLE', '媒体服务尚未初始化');
+    return media;
+  };
+  const requireData = (): DataLayer => {
+    const data = deps.getData();
+    if (!data) throw new DataError('DATA_UNAVAILABLE', '数据层尚未初始化');
+    return data;
+  };
+  const requirePackage = (): ProjectPackageService => {
+    const service = deps.getPackage();
+    if (!service) throw new DataError('DATA_UNAVAILABLE', '项目包服务尚未初始化');
+    return service;
+  };
+
+  ipcMain.handle(
+    IPC.APP_INFO,
+    withEnvelope((): AppInfo => ({
+      version: app.getVersion(),
+      platform: process.platform,
+      appDataPath: app.getPath('userData'),
+    })),
+  );
+
+  // ---------- player ----------
+  ipcMain.handle(
+    IPC.PLAYER_OPEN,
+    withEnvelope((args: { mediaPath?: string; projectId?: string }): Promise<MediaInfo> =>
+      requirePlayer().open(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_OPEN_DIALOG,
+    withEnvelope((): Promise<MediaInfo | null> => requirePlayer().openDialog()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_CLOSE,
+    withEnvelope((): void => requirePlayer().close()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_PLAY,
+    withEnvelope((): Promise<PlayerState> => requirePlayer().play()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_PAUSE,
+    withEnvelope((): Promise<PlayerState> => requirePlayer().pause()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_TOGGLE,
+    withEnvelope((): Promise<PlayerState> => requirePlayer().toggle()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_SEEK,
+    withEnvelope((args: { timeMs: number; exact?: boolean }): Promise<PlayerState> =>
+      requirePlayer().seek(args.timeMs, args.exact ?? true),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_FRAME_STEP,
+    withEnvelope((args: { dir: 1 | -1 }) => requirePlayer().frameStep(args.dir)),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_GET_STATE,
+    withEnvelope((): PlayerState => requirePlayer().getState()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_GET_FRAME,
+    withEnvelope(() => requirePlayer().getFrame()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_SET_VOLUME,
+    withEnvelope((args: { volume: number }): Promise<PlayerState> => requirePlayer().setVolume(args.volume)),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_SET_BOUNDS,
+    withEnvelope((bounds: RenderBounds): void => requirePlayer().setBounds(bounds)),
+  );
+
+  // ---------- media ----------
+  ipcMain.handle(
+    IPC.MEDIA_PROBE,
+    withEnvelope((args: MediaProbeArgs): Promise<MediaProbeResult> => requireMedia().probe(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_EXTRACT_FRAME,
+    withEnvelope((args: ExtractFrameArgs): Promise<ExtractFrameResult> => requireMedia().extractFrame(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_EXTRACT_FRAMES,
+    withEnvelope((args: ExtractFramesArgs): Promise<ExtractFramesResult> => requireMedia().extractFrames(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_TRANSCODE_PROXY,
+    withEnvelope((args: TranscodeProxyArgs): Promise<TranscodeProxyResult> => requireMedia().transcodeProxy(args)),
+  );
+  ipcMain.handle(
+    IPC.MEDIA_CANCEL_JOB,
+    withEnvelope((args: { jobId: string }): CancelJobResult => requireMedia().cancelJob(args.jobId)),
+  );
+
+  // ---------- data: project ----------
+  ipcMain.handle(
+    IPC.PROJECT_CREATE,
+    withEnvelope((args: ProjectCreateArgs): Project => requireData().projects.create(args)),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_LIST,
+    withEnvelope((): Project[] => requireData().projects.list()),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_GET,
+    withEnvelope((args: { id: string }): Project => requireData().projects.get(args.id)),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_UPDATE,
+    withEnvelope((args: ProjectUpdateArgs): Project => requireData().projects.update(args)),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_DELETE,
+    withEnvelope((args: { id: string }): { deleted: true } => {
+      requireData().projects.delete(args.id);
+      return { deleted: true };
+    }),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_SAVE,
+    withEnvelope((args: ProjectSaveArgs): ProjectSaveResult => requirePackage().exportProject(args)),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_SAVE_AS,
+    withEnvelope((args: { id: string; targetPath: string }): ProjectSaveResult =>
+      requirePackage().exportProject({ id: args.id, targetPath: args.targetPath }),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_OPEN,
+    withEnvelope((args: ProjectOpenArgs): ProjectOpenResult => requirePackage().importProject(args.path)),
+  );
+
+  // ---------- data: shot ----------
+  ipcMain.handle(
+    IPC.SHOT_LIST,
+    withEnvelope((args: { projectId: string }): Shot[] => requireData().shots.list(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.SHOT_GET,
+    withEnvelope((args: { id: string }): Shot => requireData().shots.get(args.id)),
+  );
+  ipcMain.handle(
+    IPC.SHOT_CREATE,
+    withEnvelope((args: ShotCreateArgs): Shot => requireData().shots.create(args)),
+  );
+  ipcMain.handle(
+    IPC.SHOT_UPDATE,
+    withEnvelope((args: ShotUpdateArgs): Shot => requireData().shots.update(args)),
+  );
+  ipcMain.handle(
+    IPC.SHOT_DELETE,
+    withEnvelope((args: { id: string }): { deleted: true } => {
+      requireData().shots.delete(args.id);
+      return { deleted: true };
+    }),
+  );
+
+  // ---------- data: still ----------
+  ipcMain.handle(
+    IPC.STILL_LIST,
+    withEnvelope((args: { projectId?: string; shotId?: string }): Still[] => requireData().stills.list(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_GET,
+    withEnvelope((args: { id: string }): Still => requireData().stills.get(args.id)),
+  );
+  ipcMain.handle(
+    IPC.STILL_CREATE,
+    withEnvelope((args: StillCreateArgs): Still => requireData().stills.create(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_UPDATE,
+    withEnvelope((args: StillUpdateArgs): Still => requireData().stills.update(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_DELETE,
+    withEnvelope((args: { id: string }): { deleted: true } => {
+      requireData().stills.delete(args.id);
+      return { deleted: true };
+    }),
+  );
+
+  // ---------- data: tag ----------
+  ipcMain.handle(
+    IPC.TAG_LIST,
+    withEnvelope((args: { category?: string } = {}): Tag[] => requireData().tags.list(args.category)),
+  );
+  ipcMain.handle(
+    IPC.TAG_CREATE,
+    withEnvelope((args: TagCreateArgs): Tag => requireData().tags.create(args)),
+  );
+  ipcMain.handle(
+    IPC.TAG_UPDATE,
+    withEnvelope((args: TagUpdateArgs): Tag => requireData().tags.update(args)),
+  );
+  ipcMain.handle(
+    IPC.TAG_DELETE,
+    withEnvelope((args: { id: string }): { deleted: true } => {
+      requireData().tags.delete(args.id);
+      return { deleted: true };
+    }),
+  );
+  ipcMain.handle(
+    IPC.TAG_ASSIGN,
+    withEnvelope((args: { shotId: string; tagIds: string[] }): { shotId: string; tagIds: string[] } => {
+      const tagIds = requireData().tags.assign(args.shotId, args.tagIds);
+      return { shotId: args.shotId, tagIds };
+    }),
+  );
+  ipcMain.handle(
+    IPC.TAG_UNASSIGN,
+    withEnvelope((args: { shotId: string; tagIds: string[] }): { shotId: string; tagIds: string[] } => {
+      const tagIds = requireData().tags.unassign(args.shotId, args.tagIds);
+      return { shotId: args.shotId, tagIds };
+    }),
+  );
+
+  // ---------- data: note ----------
+  ipcMain.handle(
+    IPC.NOTE_LIST,
+    withEnvelope((args: { projectId?: string; shotId?: string }): Note[] => requireData().notes.list(args)),
+  );
+  ipcMain.handle(
+    IPC.NOTE_SAVE,
+    withEnvelope((args: NoteSaveArgs): Note => requireData().notes.save(args)),
+  );
+  ipcMain.handle(
+    IPC.NOTE_DELETE,
+    withEnvelope((args: { id: string }): { deleted: true } => {
+      requireData().notes.delete(args.id);
+      return { deleted: true };
+    }),
+  );
+
+  // ---------- data: term ----------
+  ipcMain.handle(
+    IPC.TERM_LIST,
+    withEnvelope((args: { category?: string } = {}): Term[] => requireData().terms.list(args.category)),
+  );
+  ipcMain.handle(
+    IPC.TERM_CREATE,
+    withEnvelope((args: TermCreateArgs): Term => requireData().terms.create(args)),
+  );
+  ipcMain.handle(
+    IPC.TERM_UPDATE,
+    withEnvelope((args: TermUpdateArgs): Term => requireData().terms.update(args)),
+  );
+  ipcMain.handle(
+    IPC.TERM_DELETE,
+    withEnvelope((args: { id: string }): { deleted: true } => {
+      requireData().terms.delete(args.id);
+      return { deleted: true };
+    }),
+  );
+}
