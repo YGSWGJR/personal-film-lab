@@ -19,6 +19,7 @@ import type {
   Note,
   NoteUpsertArgs,
   PlayerState,
+  OverlayLayer,
   Project,
   ProjectCreateArgs,
   ProjectOpenArgs,
@@ -237,6 +238,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.PLAYER_SET_BOUNDS,
     withEnvelope((bounds: RenderBounds): void => requirePlayer().setBounds(bounds)),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_SET_LAYER,
+    withEnvelope((args: { level: OverlayLayer }): PlayerState =>
+      requirePlayer().setLayer(args.level),
+    ),
   );
 
   // ---------- media ----------

@@ -69,6 +69,11 @@ export const playerSetBoundsArgsSchema = z.object({
   width: z.number().finite().min(0),
   height: z.number().finite().min(0),
 });
+
+/** player:setLayer */
+export const playerSetLayerArgsSchema = z.object({
+  level: z.enum(['normal', 'bottom', 'hidden']),
+});
 /** media:probe */
 export const mediaProbeArgsSchema = z.object({
   path: z.string().min(1),

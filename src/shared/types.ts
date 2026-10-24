@@ -85,6 +85,8 @@ export interface MediaProbeResult extends MediaInfo {
   hasAudio: boolean;
 }
 
+export type OverlayLayer = 'normal' | 'bottom' | 'hidden';
+
 /** 播放器状态（player:getState / player:event:state） */
 export interface PlayerState {
   hasFile: boolean;
@@ -96,6 +98,7 @@ export interface PlayerState {
   width: number;
   height: number;
   fps: number;
+  layer: OverlayLayer;
 }
 
 /** 当前帧信息（player:getFrame / player:frameStep 返回） */
@@ -256,6 +259,7 @@ export interface PlayerApi {
   getFrame(): Promise<IpcResult<FrameInfo>>;
   setVolume(args: { volume: number }): Promise<IpcResult<PlayerState>>;
   setBounds(bounds: RenderBounds): Promise<IpcResult<void>>;
+  setLayer(args: { level: OverlayLayer }): Promise<IpcResult<PlayerState>>;
   onState(listener: (state: PlayerState) => void): () => void;
   onTime(listener: (event: PlayerTimeEvent) => void): () => void;
   onLoaded(listener: (info: MediaInfo) => void): () => void;

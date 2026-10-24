@@ -29,6 +29,7 @@ export const IPC = {
   PLAYER_GET_FRAME: 'player:getFrame',
   PLAYER_SET_VOLUME: 'player:setVolume',
   PLAYER_SET_BOUNDS: 'player:setBounds',
+  PLAYER_SET_LAYER: 'player:setLayer',
 
   /** player 域（E 方向，主进程 → 渲染层） */
   PLAYER_EVENT_STATE: 'player:event:state',
