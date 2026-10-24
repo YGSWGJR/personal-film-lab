@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>个人拉片工作台 · UI 线框原型（S13）</title>
+<style>
+  :root{
+    --bg-deep:#0f172a; --bg-panel:#1e293b; --bg-raised:#263449; --bg-hover:#334155;
+    --border:#475569; --border-strong:#64748b;
+    --t1:#f8fafc; --t2:#cbd5e1; --t3:#94a3b8; --t4:#64748b;
+    --red:#e11d48; --red-soft:rgba(225,29,72,.14); --orange:#f59e0b; --gold:#fbbf24;
+    --green:#22c55e; --blue:#3b82f6; --blue-hi:#60a5fa; --danger:#ef4444;
+    --mono:"Cascadia Mono","Consolas","SF Mono",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{background:var(--bg-deep);color:var(--t2);font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",system-ui,sans-serif;font-size:12px;overflow:hidden}
+  .app{display:flex;flex-direction:column;height:100vh}
+
+  /* ── 顶部工具栏 40px ── */
+  .toolbar{height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--bg-panel);border-bottom:1px solid var(--border)}
+  .app-title{font-size:13px;font-weight:600;color:var(--t1);margin-right:8px}
+  .btn{height:28px;display:inline-flex;align-items:center;gap:6px;padding:0 12px;border-radius:6px;border:none;cursor:pointer;font-size:12px;background:var(--bg-raised);color:var(--t2)}
+  .btn:hover{background:var(--bg-hover)}
+  .btn.primary{background:var(--red);color:#fff;font-weight:600}
+  .btn.primary:hover{filter:brightness(1.1)}
+  .btn .kbd{font-size:10px;color:var(--t4);border:1px solid var(--border);border-radius:3px;padding:0 4px;font-family:var(--mono)}
+  .btn.primary .kbd{color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.4)}
+  .btn.icon{width:28px;padding:0;justify-content:center}
+  .spacer{flex:1}
+  .timecode{font-family:var(--mono);font-size:12px;color:var(--t3)}
+
+  /* ── 主体三栏 ── */
+  .main{flex:1;display:flex;min-height:0}
+
+  /* 左栏 260px */
+  .col-left{width:260px;flex:none;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+  .panel-head{height:34px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:13px;font-weight:600;color:var(--t1);border-bottom:1px solid var(--border)}
+  .panel-head .cnt{font-size:10px;color:var(--t3);font-family:var(--mono)}
+  .shot-list{flex:1;overflow-y:auto;padding:8px}
+  .shot{display:flex;align-items:center;gap:8px;height:44px;padding:0 8px;border-radius:6px;cursor:pointer;border:2px solid transparent}
+  .shot:hover{background:var(--bg-hover)}
+  .shot.sel{background:var(--red-soft);border-color:var(--red)}
+  .shot .th{width:64px;height:36px;flex:none;background:var(--bg-deep);border-radius:4px;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:9px;color:var(--t4);overflow:hidden}
+  .shot .no{font-family:var(--mono);font-size:11px;color:var(--t1);width:26px}
+  .shot .sz{font-size:10px;font-weight:600;color:var(--gold);background:rgba(251,191,36,.12);border-radius:4px;padding:1px 6px}
+  .shot .dur{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--t3)}
+
+  /* 中栏 */
+  .col-mid{flex:1;min-width:480px;display:flex;flex-direction:column;background:var(--bg-deep);min-height:0}
+  .player{flex:1;min-height:360px;background:#0b1222;display:flex;align-items:center;justify-content:center;color:var(--t4);font-size:13px;position:relative;border-bottom:1px solid var(--border)}
+  .player .note{position:absolute;top:8px;right:12px;font-size:11px;color:var(--t4)}
+  .player .cap{position:absolute;bottom:8px;left:12px;font-size:11px;background:var(--red);color:#fff;border-radius:4px;padding:2px 8px}
+  .ctrlbar{height:36px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--bg-panel);border-bottom:1px solid var(--border)}
+  .ctrlbar .btn.icon{width:28px}
+
+  /* 三层时间轴 76px */
+  .timeline{height:76px;flex:none;background:var(--bg-panel);border-bottom:1px solid var(--border);position:relative}
+  .tl-row{position:relative;left:48px;right:12px}
+  .tl-film{height:24px;background:rgba(59,130,246,.18);border-radius:3px;margin-top:4px;position:relative;cursor:pointer}
+  .tl-film .prog{position:absolute;left:0;top:0;bottom:0;width:35%;background:var(--blue-hi);border-radius:3px}
+  .tl-shots{height:28px;margin-top:2px;display:flex;gap:1px;cursor:pointer}
+  .tl-shot{flex:1;background:var(--orange);border-radius:2px;position:relative}
+  .tl-shot:hover{filter:brightness(1.15)}
+  .tl-shot.sel{outline:2px solid #fff;outline-offset:-2px}
+  .tl-shot.cur{background:var(--gold)}
+  .tl-marks{height:24px;margin-top:2px;position:relative;border-top:1px dashed rgba(71,85,105,.6)}
+  .tl-marks i{position:absolute;width:2px;height:10px;background:var(--green);border-radius:1px;top:2px}
+  .tl-ruler{position:absolute;left:48px;right:12px;bottom:2px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--t4)}
+  .tl-label{position:absolute;left:8px;top:0;bottom:0;display:flex;flex-direction:column;justify-content:space-around;font-size:10px;color:var(--t4);width:34px}
+  .status{height:24px;flex:none;display:flex;align-items:center;gap:16px;padding:0 12px;font-size:11px;color:var(--t4);background:var(--bg-panel)}
+
+  /* 右栏 300px */
+  .col-right{width:300px;flex:none;background:var(--bg-panel);border-left:1px solid var(--border);overflow-y:auto;min-height:0}
+  .detail{padding:12px;display:flex;flex-direction:column;gap:12px}
+  .d-head{display:flex;align-items:center;gap:8px}
+  .d-head .no{font-family:var(--mono);font-size:12px;color:var(--t1)}
+  .d-head .range{font-family:var(--mono);font-size:11px;color:var(--t3)}
+  .d-head .lock{margin-left:auto;font-size:10px;color:var(--orange)}
+  .still{width:100%;aspect-ratio:16/9;background:var(--bg-deep);border-radius:6px;border:1px solid var(--border);position:relative;display:flex;align-items:center;justify-content:center;color:var(--t4);font-size:11px}
+  .still .anno{position:absolute;left:42%;top:55%;width:20%;height:12%;border:2px solid var(--red);border-radius:2px}
+  .still .arrow{position:absolute;left:42%;top:55%;width:18%;height:2px;background:var(--orange);transform:rotate(-35deg);transform-origin:left}
+  .tag-grp{margin-top:4px}
+  .tag-grp .ttl{font-size:11px;font-weight:600;color:var(--t2);margin-bottom:6px}
+  .tag-grp .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{height:20px;display:inline-flex;align-items:center;padding:0 8px;border-radius:4px;font-size:10px;font-weight:600;background:var(--bg-raised);color:var(--t2);border:1px solid transparent;cursor:pointer}
+  .chip:hover{background:var(--bg-hover)}
+  .chip.on{background:var(--red);color:#fff}
+  .chip.add{border-style:dashed;color:var(--t3)}
+  .note-box{width:100%;height:72px;background:var(--bg-raised);border:1px solid var(--border);border-radius:6px;color:var(--t2);padding:8px;font-family:inherit;font-size:12px;resize:vertical}
+  .term-item{display:flex;justify-content:space-between;align-items:center;height:24px;border-bottom:1px solid rgba(71,85,105,.4)}
+  .term-item .n{font-size:11px;color:var(--gold)}
+  .term-item .d{font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+
+  /* 标注：尺寸标注条 */
+  .dim{position:absolute;background:rgba(251,191,36,.85);color:#0f172a;font-size:9px;font-family:var(--mono);padding:0 3px;border-radius:2px;z-index:9;white-space:nowrap}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- 顶部工具栏 40px -->
+  <div class="toolbar">
+    <span class="app-title">个人拉片工作台</span>
+    <button class="btn primary">导入影片</button>
+    <button class="btn primary">镜头切分</button>
+    <button class="btn">静帧截图 <span class="kbd">S</span></button>
+    <button class="btn">导出分镜本</button>
+    <span class="spacer"></span>
+    <span class="timecode">00:03:12.480 / 00:23:40.039</span>
+    <button class="btn icon" title="统计">📊</button>
+    <button class="btn icon" title="设置">⚙️</button>
+  </div>
+
+  <div class="main">
+
+    <!-- 左栏 260px -->
+    <div class="col-left">
+      <div class="panel-head">镜头列表 <span class="cnt">24</span></div>
+      <div class="shot-list">
+        <div class="shot sel"><div class="th">▦</div><span class="no">01</span><span class="sz">全景</span><span class="dur">00:14.0</span></div>
+        <div class="shot"><div class="th">▦</div><span class="no">02</span><span class="sz">中景</span><span class="dur">00:08.5</span></div>
+        <div class="shot"><div class="th">▦</div><span class="no">03</span><span class="sz">特写</span><span class="dur">00:05.2</span></div>
+        <div class="shot"><div class="th">▦</div><span class="no">04</span><span class="sz">近景</span><span class="dur">00:11.0</span></div>
+        <div class="shot"><div class="th">▦</div><span class="no">05</span><span class="sz">全景</span><span class="dur">00:06.8</span></div>
+      </div>
+    </div>
+
+    <!-- 中栏 -->
+    <div class="col-mid">
+      <div class="player">
+        <span class="dim" style="top:2px;right:60px">16:9 自适应（libmpv 嵌入位）</span>
+        播放器画面区（原生子窗口嵌入，DOM 不可覆盖）
+        <span class="note">1920×1080 · 23.81fps</span>
+        <span class="cap">镜头 03 · 特写</span>
+      </div>
+      <div class="ctrlbar">
+        <button class="btn icon" title="上一帧">⏮</button>
+        <button class="btn icon" title="播放/暂停">▶</button>
+        <button class="btn icon" title="下一帧">⏭</button>
+        <span class="timecode" style="margin:0 8px">00:03:12.480</span>
+        <span style="font-size:10px;color:var(--t4)">±1s</span>
+        <span class="spacer"></span>
+        <span style="font-size:10px;color:var(--t4)">音量</span>
+        <div style="width:90px;height:4px;background:var(--bg-raised);border-radius:2px"><div style="width:60%;height:100%;background:var(--blue);border-radius:2px"></div></div>
+      </div>
+      <div class="timeline">
+        <div class="tl-label"><span>影片</span><span>镜头</span><span>标注</span></div>
+        <div class="tl-row" style="margin-top:0">
+          <div class="tl-film"><div class="prog"></div></div>
+        </div>
+        <div class="tl-row" style="margin-top:6px">
+          <div class="tl-shots">
+            <div class="tl-shot"></div><div class="tl-shot"></div><div class="tl-shot sel"></div>
+            <div class="tl-shot"></div><div class="tl-shot cur"></div><div class="tl-shot"></div>
+          </div>
+        </div>
+        <div class="tl-row" style="margin-top:8px">
+          <div class="tl-marks"><i style="left:12%"></i><i style="left:38%"></i><i style="left:47%"></i><i style="left:63%"></i></div>
+        </div>
+        <div class="tl-ruler"><span>00:00</span><span>00:06</span><span>00:12</span><span>00:18</span><span>00:24</span></div>
+        <div class="dim" style="top:-2px;left:48px">影片层 24px</div>
+        <div class="dim" style="top:24px;left:48px">镜头层 28px · 可拖动边界</div>
+        <div class="dim" style="top:54px;left:48px">标注层 24px</div>
+      </div>
+      <div class="status"><span>项目：让子弹飞 拉片</span><span>已标注 18/24</span><span>检测灵敏度 0.62</span></div>
+    </div>
+
+    <!-- 右栏 300px -->
+    <div class="col-right">
+      <div class="detail">
+        <div class="d-head"><span class="no">镜头 03</span><span class="range">00:00:14.000 – 00:00:19.200</span><span class="lock">🔒 已锁定</span></div>
+        <div class="still">
+          静帧大图
+          <div class="anno"></div>
+          <div class="arrow"></div>
+          <span class="dim" style="top:2px;right:6px">16:9 · 标注覆盖层</span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" style="flex:1">截图</button>
+          <button class="btn" style="flex:1">框选</button>
+          <button class="btn" style="flex:1">箭头</button>
+          <button class="btn" style="flex:1">文字</button>
+        </div>
+        <div class="tag-grp">
+          <div class="ttl">景别</div>
+          <div class="chips"><span class="chip">远景</span><span class="chip on">特写</span><span class="chip">中景</span><span class="chip add">+</span></div>
+        </div>
+        <div class="tag-grp">
+          <div class="ttl">运镜</div>
+          <div class="chips"><span class="chip">固定</span><span class="chip on">推</span><span class="chip">拉</span><span class="chip">摇</span><span class="chip add">+</span></div>
+        </div>
+        <div class="tag-grp">
+          <div class="ttl">光线 · 声音 · 剪辑</div>
+          <div class="chips"><span class="chip on">逆光</span><span class="chip">对白</span><span class="chip">硬切</span><span class="chip add">+</span></div>
+        </div>
+        <textarea class="note-box" placeholder="笔记：推镜+特写制造情绪压迫感，暗示主角察觉异常…"></textarea>
+        <div class="tag-grp">
+          <div class="ttl">术语库</div>
+          <div class="term-item"><span class="n">推镜</span><span class="d">摄影机向主体推进，景别由远到近</span></div>
+          <div class="term-item"><span class="n">特写</span><span class="d">强调面部/局部细节，情绪放大</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
