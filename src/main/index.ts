@@ -42,7 +42,7 @@ function ensureMainWindow(): BrowserWindow {
   mainWindow = win;
   playerService = new PlayerService(win);
   mediaService = new MediaService(() => mainWindow);
-  scopeService = new ScopeService(mediaService);
+  scopeService = new ScopeService();
   captureService =
     dataLayer && mediaService
       ? new CaptureService(dataLayer, mediaService, (still) => {

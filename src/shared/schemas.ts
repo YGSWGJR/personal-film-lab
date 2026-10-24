@@ -56,7 +56,6 @@ export const mediaExtractFrameArgsSchema = z.object({
   outputPath: z.string().min(1).optional(),
   format: z.enum(['jpg', 'jpeg', 'png']).optional(),
   quality: z.number().int().min(1).max(31).optional(),
-  maxWidth: z.number().int().min(64).max(3840).optional(),
   timeoutMs: z.number().int().positive().max(600_000).optional(),
 });
 
@@ -87,11 +86,6 @@ export const mediaTranscodeProxyArgsSchema = z.object({
 /** media:cancelJob */
 export const mediaCancelJobArgsSchema = z.object({
   jobId: z.string().min(1),
-});
-
-export const scopeAnalyzeFrameArgsSchema = z.object({
-  path: z.string().min(1),
-  timeMs: z.number().finite().min(0),
 });
 
 export const scopeExtractAudioWaveformArgsSchema = z.object({

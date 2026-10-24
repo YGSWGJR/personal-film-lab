@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
-import ScopesPanel from './ScopesPanel.vue';
 import TimelineEditor from './TimelineEditor.vue';
 import type { BoundaryChange, TimelineMarker, WorkspaceShot } from '../types/workspace';
 import type {
   AudioWaveform,
   PlayerState,
   RenderBounds,
-  ScopeAnalysis,
 } from '../../../shared/types';
 
 const props = defineProps<{
@@ -20,10 +18,6 @@ const props = defineProps<{
   displayDurationMs: number;
   displayTimeMs: number;
   busy: boolean;
-  scopesOpen: boolean;
-  scopeAnalysis: ScopeAnalysis | null;
-  scopeLoading: boolean;
-  scopeError: string | null;
   audioWaveform: AudioWaveform | null;
   audioLoading: boolean;
 }>();
@@ -38,7 +32,6 @@ const emit = defineEmits<{
   boundaryCommit: [change: BoundaryChange];
   bounds: [bounds: RenderBounds];
   capture: [];
-  toggleScopes: [];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
@@ -134,14 +127,6 @@ onBeforeUnmount(() => {
       </div>
 
     </section>
-
-    <ScopesPanel
-      :open="scopesOpen"
-      :analysis="scopeAnalysis"
-      :loading="scopeLoading"
-      :error="scopeError"
-      @toggle="emit('toggleScopes')"
-    />
 
     <TimelineEditor
       :shots="shots"
@@ -359,7 +344,7 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  min-height: 240px;
+  min-height: 360px;
   border: 1px solid var(--border);
   border-radius: 8px 8px 0 0;
   background: var(--bg-deep);

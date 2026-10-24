@@ -81,10 +81,8 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
 
     const scopeVideo = process.env['SMOKE_SCOPE_VIDEO'];
     if (scopeVideo) {
-      scopeChecks = await runScopeChecks(win, scopeVideo);
+      scopeChecks = await runScopeAudioChecks(win, scopeVideo);
       Object.assign(checks, {
-        scopeAnalyze: scopeChecks.analyzeOk === true,
-        scopeCache: scopeChecks.cachedOk === true,
         scopeAudio: scopeChecks.audioOk === true,
       });
     }
@@ -133,34 +131,11 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   }
 }
 
-async function runScopeChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
+async function runScopeAudioChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
   return (await win.webContents.executeJavaScript(`
     (async () => {
       const out = {};
       try {
-        const first = await window.api.scope.analyzeFrame({
-          path: ${JSON.stringify(videoPath)},
-          timeMs: 1000
-        });
-        out.first = first.ok ? {
-          histogramBins: first.data.histogram.y.length,
-          waveformColumns: first.data.waveform.length,
-          paradeColumns: first.data.parade.r.length
-        } : first.error;
-        out.analyzeOk = first.ok === true
-          && first.data.histogram.y.length === 64
-          && first.data.histogram.r.length === 64
-          && first.data.waveform.length === 128
-          && first.data.parade.r.length === 128;
-
-        const started = performance.now();
-        const cached = await window.api.scope.analyzeFrame({
-          path: ${JSON.stringify(videoPath)},
-          timeMs: 1200
-        });
-        out.cacheElapsedMs = Math.round(performance.now() - started);
-        out.cachedOk = cached.ok === true && out.cacheElapsedMs < 250;
-
         const audio = await window.api.scope.extractAudioWaveform({
           path: ${JSON.stringify(videoPath)},
           bucketMs: 100

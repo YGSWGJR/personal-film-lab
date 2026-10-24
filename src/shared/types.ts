@@ -113,8 +113,6 @@ export interface ExtractFrameArgs {
   format?: FrameFormat;
   /** JPG 质量，1（最好）..31（最差），默认 2 */
   quality?: number;
-  /** 可选最大输出宽度，用于示波器等低分辨率分析；默认保持原始宽度 */
-  maxWidth?: number;
   /** 默认 60s */
   timeoutMs?: number;
 }
@@ -228,43 +226,6 @@ export interface MediaApi {
   transcodeProxy(args: TranscodeProxyArgs): Promise<IpcResult<TranscodeProxyResult>>;
   cancelJob(args: CancelJobArgs): Promise<IpcResult<CancelJobResult>>;
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
-}
-
-export interface ScopeHistogram {
-  y: number[];
-  r: number[];
-  g: number[];
-  b: number[];
-}
-
-export interface ScopeWaveformPoint {
-  x: number;
-  min: number;
-  max: number;
-  mean: number;
-}
-
-export interface ScopeParadePoint {
-  min: number;
-  max: number;
-  mean: number;
-}
-
-export interface ScopeParade {
-  r: ScopeParadePoint[];
-  g: ScopeParadePoint[];
-  b: ScopeParadePoint[];
-}
-
-export interface ScopeAnalysis {
-  histogram: ScopeHistogram;
-  waveform: ScopeWaveformPoint[];
-  parade: ScopeParade;
-}
-
-export interface ScopeAnalyzeFrameArgs {
-  path: string;
-  timeMs: number;
 }
 
 export interface AudioWaveformBucket {
@@ -781,6 +742,5 @@ export interface DetectApi {
 }
 
 export interface ScopeApi {
-  analyzeFrame(args: ScopeAnalyzeFrameArgs): Promise<IpcResult<ScopeAnalysis>>;
   extractAudioWaveform(args: ScopeExtractAudioWaveformArgs): Promise<IpcResult<AudioWaveform>>;
 }

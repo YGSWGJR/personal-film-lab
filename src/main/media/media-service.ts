@@ -81,7 +81,6 @@ export class MediaService {
     const inputPath = this.validateInput(args.path);
     const format = normalizeFormat(args.format);
     const quality = clampInt(args.quality ?? 2, 1, 31);
-    const maxWidth = args.maxWidth ? clampInt(args.maxWidth, 64, 3840) : null;
     const outputPath = args.outputPath
       ? this.validateOutputPath(args.outputPath)
       : join(app.getPath('userData'), 'lapian', 'frames', `${basename(inputPath, extname(inputPath))}-${Math.round(args.timeMs)}ms-${Date.now()}.${format}`);
@@ -104,7 +103,6 @@ export class MediaService {
       '1',
       '-an',
       '-sn',
-      ...(maxWidth ? ['-vf', `scale=w='min(iw,${maxWidth})':h=-2`] : []),
       ...(format === 'png' ? ['-compression_level', '6'] : ['-q:v', String(quality)]),
       '-y',
       outputPath,

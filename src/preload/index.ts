@@ -42,7 +42,6 @@ import {
   playerSeekArgsSchema,
   playerSetBoundsArgsSchema,
   playerSetVolumeArgsSchema,
-  scopeAnalyzeFrameArgsSchema,
   scopeExtractAudioWaveformArgsSchema,
 } from '../shared/schemas';
 import type {
@@ -70,8 +69,6 @@ import type {
   PlayerState,
   PlayerTimeEvent,
   RenderBounds,
-  ScopeAnalysis,
-  ScopeAnalyzeFrameArgs,
   ScopeExtractAudioWaveformArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
@@ -135,7 +132,6 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
   [IPC.MEDIA_TRANSCODE_PROXY]: mediaTranscodeProxyArgsSchema,
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
-  [IPC.SCOPE_ANALYZE_FRAME]: scopeAnalyzeFrameArgsSchema,
   [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
@@ -271,8 +267,6 @@ const detectApi = {
 };
 
 const scopeApi = {
-  analyzeFrame: (args: ScopeAnalyzeFrameArgs) =>
-    invoke<ScopeAnalysis>(IPC.SCOPE_ANALYZE_FRAME, [args]),
   extractAudioWaveform: (args: ScopeExtractAudioWaveformArgs) =>
     invoke<AudioWaveform>(IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM, [args]),
 };

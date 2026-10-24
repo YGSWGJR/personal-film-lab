@@ -27,8 +27,6 @@ import type {
   ProjectSaveResult,
   ProjectUpdateArgs,
   RenderBounds,
-  ScopeAnalysis,
-  ScopeAnalyzeFrameArgs,
   ScopeExtractAudioWaveformArgs,
   Shot,
   ShotCreateArgs,
@@ -216,12 +214,6 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
 
   // ---------- scope ----------
-  ipcMain.handle(
-    IPC.SCOPE_ANALYZE_FRAME,
-    withEnvelope((args: ScopeAnalyzeFrameArgs): Promise<ScopeAnalysis> =>
-      requireScope().analyzeFrame(args),
-    ),
-  );
   ipcMain.handle(
     IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM,
     withEnvelope((args: ScopeExtractAudioWaveformArgs): Promise<AudioWaveform> =>

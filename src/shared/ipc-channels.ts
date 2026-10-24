@@ -44,8 +44,7 @@ export const IPC = {
   DETECT_EVENT_PROGRESS: 'detect:event:progress',
   DETECT_EVENT_DONE: 'detect:event:done',
 
-  /** scope 域（S20）：当前帧色彩分析与音频包络 */
-  SCOPE_ANALYZE_FRAME: 'scope:analyzeFrame',
+  /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',
 
   /** data 域：项目 / 镜头 / 静帧 / 标签 / 笔记 / 术语（I 方向，S01 §6.2） */
