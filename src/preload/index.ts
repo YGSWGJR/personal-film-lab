@@ -45,6 +45,7 @@ import {
   scopeExtractAudioWaveformArgsSchema,
   settingsChooseDirectoryArgsSchema,
   settingsSetArgsSchema,
+  workspaceStateSchema,
 } from '../shared/schemas';
 import type {
   AppInfo,
@@ -75,6 +76,7 @@ import type {
   Settings,
   SettingsChooseDirectoryArgs,
   SettingsSetArgs,
+  WorkspaceState,
   TranscodeProxyArgs,
   TranscodeProxyResult,
   WindowApi,
@@ -123,6 +125,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SETTINGS_GET]: emptyArgsSchema,
   [IPC.SETTINGS_SET]: settingsSetArgsSchema,
   [IPC.SETTINGS_CHOOSE_DIRECTORY]: settingsChooseDirectoryArgsSchema,
+  [IPC.SESSION_GET]: emptyArgsSchema,
+  [IPC.SESSION_SAVE]: workspaceStateSchema,
+  [IPC.SESSION_CLEAR]: emptyArgsSchema,
   [IPC.PLAYER_OPEN]: playerOpenArgsSchema,
   [IPC.PLAYER_OPEN_DIALOG]: emptyArgsSchema,
   [IPC.PLAYER_CLOSE]: emptyArgsSchema,
@@ -239,6 +244,12 @@ const settingsApi = {
   set: (args: SettingsSetArgs) => invoke<Settings>(IPC.SETTINGS_SET, [args]),
   chooseDirectory: (args: SettingsChooseDirectoryArgs) =>
     invoke<string | null>(IPC.SETTINGS_CHOOSE_DIRECTORY, [args]),
+};
+
+const sessionApi = {
+  get: () => invoke<WorkspaceState | null>(IPC.SESSION_GET),
+  save: (state: WorkspaceState) => invoke<WorkspaceState>(IPC.SESSION_SAVE, [state]),
+  clear: () => invoke<{ cleared: true }>(IPC.SESSION_CLEAR),
 };
 
 const playerApi = {
@@ -358,6 +369,7 @@ const exportApi = {
 const api: WindowApi = {
   app: appApi,
   settings: settingsApi,
+  session: sessionApi,
   player: playerApi,
   media: mediaApi,
   scope: scopeApi,

@@ -53,6 +53,7 @@ import type {
   StoryboardExportArgs,
   StoryboardExportResult,
   AudioWaveform,
+  WorkspaceState,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import type { CaptureService } from '../capture/capture-service';
@@ -66,6 +67,7 @@ import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
 import { SettingsError, type SettingsService } from '../settings/settings-service';
+import { SessionError, type SessionService } from '../session/session-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
@@ -80,6 +82,7 @@ export interface IpcDeps {
   getDetect(): DetectService | null;
   getScope(): ScopeService | null;
   getSettings(): SettingsService | null;
+  getSession(): SessionService | null;
 }
 
 /**
@@ -137,6 +140,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     if (!service) throw new SettingsError('SETTINGS_UNAVAILABLE', '设置服务尚未初始化');
     return service;
   };
+  const requireSession = (): SessionService => {
+    const service = deps.getSession();
+    if (!service) throw new SessionError('SESSION_UNAVAILABLE', '会话服务尚未初始化');
+    return service;
+  };
 
   ipcMain.handle(
     IPC.APP_INFO,
@@ -161,6 +169,20 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: SettingsChooseDirectoryArgs): Promise<string | null> =>
       requireSettings().chooseDirectory(args),
     ),
+  );
+
+  // ---------- session ----------
+  ipcMain.handle(
+    IPC.SESSION_GET,
+    withEnvelope((): WorkspaceState | null => requireSession().get()),
+  );
+  ipcMain.handle(
+    IPC.SESSION_SAVE,
+    withEnvelope((state: WorkspaceState): WorkspaceState => requireSession().save(state)),
+  );
+  ipcMain.handle(
+    IPC.SESSION_CLEAR,
+    withEnvelope((): { cleared: true } => requireSession().clear()),
   );
 
   // ---------- player ----------

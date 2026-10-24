@@ -26,6 +26,16 @@ export const settingsChooseDirectoryArgsSchema = z.object({
   defaultPath: z.string().trim().min(1).max(2000).optional(),
 });
 
+export const workspaceStateSchema = z.object({
+  projectId: z.string().min(1).nullable(),
+  timeMs: z.number().finite().min(0),
+  selectedShotId: z.string().min(1).nullable(),
+  leftCollapsed: z.boolean(),
+  rightCollapsed: z.boolean(),
+  volume: z.number().finite().min(0).max(1),
+  shotScrollTop: z.number().finite().min(0).optional(),
+});
+
 /** player:open：mediaPath 与 projectId 至少给一个（项目能力阶段 2 之后再接） */
 export const playerOpenArgsSchema = z
   .object({

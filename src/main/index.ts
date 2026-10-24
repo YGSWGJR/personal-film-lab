@@ -2,6 +2,7 @@ import { app, BrowserWindow } from 'electron';
 import { DataLayer } from '../data/db';
 import { ProjectPackageService } from '../data/project-package';
 import { IPC } from '../shared/ipc-channels';
+import type { WorkspaceState } from '../shared/types';
 import { createMainWindow } from './app';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
@@ -12,6 +13,7 @@ import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
 import { resolveAssetRoots, resolveDataRoot, bindSettingsProvider } from './paths';
 import { ScopeService } from './scope/scope-service';
+import { SessionService } from './session/session-service';
 import { SettingsService } from './settings/settings-service';
 import { runSmokeTest } from './smoke';
 import { TermTransferService } from './terms/term-transfer-service';
@@ -36,6 +38,24 @@ let exportService: ExportService | null = null;
 let detectService: DetectService | null = null;
 let scopeService: ScopeService | null = null;
 let settingsService: SettingsService | null = null;
+let sessionService: SessionService | null = null;
+let exitCaptureStarted = false;
+let allowWindowClose = false;
+let closeCaptureStarted = false;
+
+async function captureWorkspaceSession(win: BrowserWindow): Promise<void> {
+  if (!sessionService || win.isDestroyed()) return;
+  try {
+    const state = await win.webContents.executeJavaScript(
+      'window.__CAPTURE_WORKSPACE_STATE__?.() ?? null',
+    );
+    if (state && typeof state === 'object') {
+      sessionService.save(state as WorkspaceState);
+    }
+  } catch (error) {
+    console.warn(`[session] 退出时读取工作区状态失败：${(error as Error).message}`);
+  }
+}
 
 function createWindowDataServices(
   win: BrowserWindow,
@@ -100,10 +120,23 @@ function ensureMainWindow(): BrowserWindow {
   playerService = new PlayerService(win);
   mediaService = new MediaService(() => mainWindow);
   scopeService = new ScopeService();
+  allowWindowClose = false;
+  closeCaptureStarted = false;
   const windowServices = dataLayer ? createWindowDataServices(win, dataLayer, mediaService) : null;
   captureService = windowServices?.capture ?? null;
   exportService = windowServices?.exportService ?? null;
   detectService = windowServices?.detect ?? null;
+
+  win.on('close', (event) => {
+    if (allowWindowClose || !sessionService || win.isDestroyed()) return;
+    event.preventDefault();
+    if (closeCaptureStarted) return;
+    closeCaptureStarted = true;
+    void captureWorkspaceSession(win).finally(() => {
+      allowWindowClose = true;
+      win.close();
+    });
+  });
 
   win.on('closed', () => {
     if (mainWindow === win) {
@@ -135,9 +168,11 @@ registerIpcHandlers({
   getDetect: () => detectService,
   getScope: () => scopeService,
   getSettings: () => settingsService,
+  getSession: () => sessionService,
 });
 
 app.whenReady().then(() => {
+  sessionService = new SessionService();
   settingsService = new SettingsService(
     () => mainWindow,
     (next, previous) => {
@@ -172,7 +207,7 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
+function cleanupServices(): void {
   dataLayer?.close();
   dataLayer = null;
   packageService = null;
@@ -184,4 +219,22 @@ app.on('before-quit', () => {
   scopeService?.dispose();
   scopeService = null;
   settingsService = null;
+  sessionService?.flush();
+  sessionService = null;
+}
+
+app.on('before-quit', (event) => {
+  const win = mainWindow;
+  if (!exitCaptureStarted && sessionService && win && !win.isDestroyed()) {
+    exitCaptureStarted = true;
+    event.preventDefault();
+    void captureWorkspaceSession(win)
+      .finally(() => {
+        allowWindowClose = true;
+        cleanupServices();
+        app.quit();
+      });
+    return;
+  }
+  cleanupServices();
 });

@@ -11,6 +11,11 @@ export const IPC = {
   SETTINGS_SET: 'settings:set',
   SETTINGS_CHOOSE_DIRECTORY: 'settings:chooseDirectory',
 
+  /** session 域：工作区会话恢复 */
+  SESSION_GET: 'session:get',
+  SESSION_SAVE: 'session:save',
+  SESSION_CLEAR: 'session:clear',
+
   /** player 域（I 方向） */
   PLAYER_OPEN: 'player:open',
   PLAYER_OPEN_DIALOG: 'player:openDialog',

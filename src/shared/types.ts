@@ -37,6 +37,22 @@ export interface SettingsApi {
   chooseDirectory(args: SettingsChooseDirectoryArgs): Promise<IpcResult<string | null>>;
 }
 
+export interface WorkspaceState {
+  projectId: string | null;
+  timeMs: number;
+  selectedShotId: string | null;
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+  volume: number;
+  shotScrollTop?: number;
+}
+
+export interface SessionApi {
+  get(): Promise<IpcResult<WorkspaceState | null>>;
+  save(state: WorkspaceState): Promise<IpcResult<WorkspaceState>>;
+  clear(): Promise<IpcResult<{ cleared: true }>>;
+}
+
 /** IPC 错误体（S01 §6.1） */
 export interface IpcError {
   code: string;
@@ -275,6 +291,7 @@ export interface ScopeExtractAudioWaveformArgs {
 export interface WindowApi {
   app: AppApi;
   settings: SettingsApi;
+  session: SessionApi;
   player: PlayerApi;
   media: MediaApi;
   scope: ScopeApi;
