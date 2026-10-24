@@ -307,6 +307,7 @@ export interface WindowApi {
   term: TermApi;
   export: ExportApi;
   detect: DetectApi;
+  stats: StatsApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
@@ -719,6 +720,26 @@ export interface ExportDoneEvent {
   rowCount: number;
 }
 
+export interface StatsTagDistributionItem {
+  category: '景别' | '机位' | '运镜';
+  name: string;
+  count: number;
+}
+
+export interface StatsRhythmPoint {
+  shotId: string;
+  index: number;
+  startMs: number;
+  durationMs: number;
+  durationSeconds: number;
+}
+
+export interface StatsProgress {
+  annotatedShots: number;
+  totalShots: number;
+  percent: number;
+}
+
 export interface ProjectApi {
   create(args: ProjectCreateArgs): Promise<IpcResult<Project>>;
   list(): Promise<IpcResult<Project[]>>;
@@ -792,4 +813,10 @@ export interface DetectApi {
 
 export interface ScopeApi {
   extractAudioWaveform(args: ScopeExtractAudioWaveformArgs): Promise<IpcResult<AudioWaveform>>;
+}
+
+export interface StatsApi {
+  tagDistribution(args: { projectId: string }): Promise<IpcResult<StatsTagDistributionItem[]>>;
+  rhythm(args: { projectId: string }): Promise<IpcResult<StatsRhythmPoint[]>>;
+  progress(args: { projectId: string }): Promise<IpcResult<StatsProgress>>;
 }

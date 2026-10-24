@@ -2,7 +2,7 @@
 
 面向个人学习电影语言与影像分析的桌面工具：导入影片 → 智能/手动切分镜头 → 标注镜头语言 → 静帧截图 → 一键导出标准分镜本（PDF / Word）。
 
-**技术栈**：Electron · libmpv · FFmpeg · OpenCV（Python 检测服务）· SQLite · yt-dlp
+**技术栈**：Electron · libmpv · FFmpeg · OpenCV（Python 检测服务）· SQLite
 
 ## 开发（阶段 0–2 · 骨架 + 播放链路）
 
@@ -104,6 +104,13 @@ npm run build:dir  # 只产出未压缩目录，验证打包链路
 - PDF 使用 Electron `webContents.printToPDF`（A4 竖版、封面、重复表头），Word 使用 `docx` 生成可编辑表格，显式指定 Microsoft YaHei。
 - 导出文件写入 `projects/<projectId>/exports/`，渲染层提供镜头范围、表头、图片策略与格式配置界面。
 
+### 学习统计（StatsService，S25）
+
+- `stats:tagDistribution` 从 SQLite 聚合景别 / 机位 / 运镜标签使用次数，ECharts 横向柱状图展示全部标签（含 0 次项）。
+- `stats:rhythm` 按镜头起点排序返回全片镜头时长，ECharts 折线图以镜号为横轴、秒数为纵轴并标注平均时长。
+- `stats:progress` 统计具有标签、非空笔记或正式静帧的镜头数，ECharts 环形图展示已标注 / 总镜头与百分比。
+- 顶栏统计按钮打开暗色统计面板；所有数据经主进程 IPC 从当前项目 SQLite 实时聚合，不在渲染层直接访问数据库。
+
 ### 冒烟（播放器 + 媒体 + 数据层，PowerShell）
 
 ```powershell
@@ -128,6 +135,9 @@ npm run smoke
 |---|---|---|
 | S01 | [docs/S01_开发架构文档.md](docs/S01_开发架构文档.md) | 开发架构（唯一权威）：模块边界 / IPC 通道 / 数据模型 / 开发顺序 |
 | — | [docs/产品方案V2.pdf](docs/产品方案V2.pdf) | 产品方案 V2（产品依据） |
+| S18 | [docs/S18-交付报告.md](docs/S18-交付报告.md) | 打包交付报告（回归结果 / 已知缺口） |
+| — | [docs/个人拉片工作台使用说明.docx](docs/个人拉片工作台使用说明.docx) | 用户使用说明（安装 / 导入 / 切分 / 标注 / 截图 / 导出 / 统计） |
+| — | [AI_COLLABORATION.md](AI_COLLABORATION.md) | 人工智能工具使用说明（AI 协作开发过程） |
 
 ## 分支策略
 
@@ -141,14 +151,14 @@ npm run smoke
 | `feature/ui` | 渲染层 | Vue3 三栏工作台、三层时间轴、详情卡 |
 | `feature/export` | 导出与统计 | 分镜本 PDF/Word、学习统计 |
 | `feature/integration` | 模块集成与联调 | S03–S13 IPC 接线、真实数据主流程、边界修复（S14） |
-| `feature/scope` | 音频波形、设置、会话与画面层级 | 第四层音频包络、可配置路径、工作区恢复、视频层控制（S24） |
+| `feature/scope` | 音频波形、设置、会话、画面层级与统计 | 音频包络、可配置路径、工作区恢复、视频层控制、学习统计（S25） |
 
 ## 智能体工作目录
 
 | 智能体 | 工作分支 | 工作目录 | 职责 | 状态 |
 |---|---|---|---|---|
 | dsh | `feature/player`、`feature/export` | `src/main/{player,media,capture,export,stats}`、`src/export` | 管线与导出：播放 / 截图 / 导出 | 已完成（S03–S06、S11） |
-| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings,session,player}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络、设置、会话与画面层级 | **已完成（S24）** |
+| codex | `feature/ui`、`feature/detect`、`feature/integration`、`feature/scope` | `src/renderer`、`src/preload`、`src/main/{detect,scope,settings,session,player,stats}`、`src/main/app.ts` | 界面、镜头检测、集成联调、音频包络、设置、会话、画面层级与统计 | **已完成（S25）** |
 | dsh + codex 共管 | 各自分支内 | `src/shared`、`src/data`、`docs/` | 契约与数据层：变更需在 PR/提交说明中同步 S01 | 契约已同步 |
 
 > 目录结构完整定义见 S01 §4；各分支按 S01 从零落地，无需等待其他分支。
@@ -166,6 +176,8 @@ npm run smoke
 > S23 状态（2026-10-24）：**已完成**。工作区会话退出时原子保存、启动时自动恢复项目/时码/镜头/面板/音量/滚动位置；失效或损坏会话静默忽略。
 
 > S24 状态（2026-10-24）：**已完成**。原生视频窗口支持正常/置底/隐藏三态，隐藏时显示占位且播放继续；最小化恢复后层级保持，关闭视频重置。
+
+> S25 状态（2026-10-24）：**已完成**。学习统计面板使用 ECharts 展示标签分布、镜头时长节奏与拉片进度，数据由 SQLite 实时聚合。
 
 ## 提交规范
 
@@ -191,4 +203,4 @@ npm run smoke
 
 ## 合规提示
 
-在线解析仅支持自有或已获授权内容，使用前请遵守各平台服务条款。
+本工具面向本地影片素材的分析与学习，请确保所使用的素材已获授权，遵守相关版权规定。
