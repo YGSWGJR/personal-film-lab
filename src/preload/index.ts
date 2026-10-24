@@ -43,6 +43,8 @@ import {
   playerSetBoundsArgsSchema,
   playerSetVolumeArgsSchema,
   scopeExtractAudioWaveformArgsSchema,
+  settingsChooseDirectoryArgsSchema,
+  settingsSetArgsSchema,
 } from '../shared/schemas';
 import type {
   AppInfo,
@@ -70,6 +72,9 @@ import type {
   PlayerTimeEvent,
   RenderBounds,
   ScopeExtractAudioWaveformArgs,
+  Settings,
+  SettingsChooseDirectoryArgs,
+  SettingsSetArgs,
   TranscodeProxyArgs,
   TranscodeProxyResult,
   WindowApi,
@@ -115,6 +120,9 @@ import type {
 /** 白名单：通道 → 入参校验 schema；未登记的通道不会转发 */
 const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.APP_INFO]: emptyArgsSchema,
+  [IPC.SETTINGS_GET]: emptyArgsSchema,
+  [IPC.SETTINGS_SET]: settingsSetArgsSchema,
+  [IPC.SETTINGS_CHOOSE_DIRECTORY]: settingsChooseDirectoryArgsSchema,
   [IPC.PLAYER_OPEN]: playerOpenArgsSchema,
   [IPC.PLAYER_OPEN_DIALOG]: emptyArgsSchema,
   [IPC.PLAYER_CLOSE]: emptyArgsSchema,
@@ -224,6 +232,13 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const appApi = {
   getInfo: () => invoke<AppInfo>(IPC.APP_INFO),
+};
+
+const settingsApi = {
+  get: () => invoke<Settings>(IPC.SETTINGS_GET),
+  set: (args: SettingsSetArgs) => invoke<Settings>(IPC.SETTINGS_SET, [args]),
+  chooseDirectory: (args: SettingsChooseDirectoryArgs) =>
+    invoke<string | null>(IPC.SETTINGS_CHOOSE_DIRECTORY, [args]),
 };
 
 const playerApi = {
@@ -342,6 +357,7 @@ const exportApi = {
 
 const api: WindowApi = {
   app: appApi,
+  settings: settingsApi,
   player: playerApi,
   media: mediaApi,
   scope: scopeApi,

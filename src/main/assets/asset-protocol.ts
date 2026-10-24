@@ -1,6 +1,6 @@
 import { net, protocol } from 'electron';
 import { pathToFileURL } from 'node:url';
-import { resolve, sep } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 
 export const ASSET_SCHEME = 'lapian-asset';
 
@@ -19,15 +19,21 @@ export function registerAssetScheme(): void {
 }
 
 /** 仅暴露 projects/<id>/ 下的项目资源，阻止目录穿越读取用户文件。 */
-export function registerAssetProtocol(dataRoot: string): void {
+export function registerAssetProtocol(getAllowedRoots: () => string[]): void {
   protocol.handle(ASSET_SCHEME, async (request) => {
     try {
       const url = new URL(request.url);
       const projectId = decodeURIComponent(url.hostname);
       const relativePath = decodeURIComponent(url.pathname.replace(/^\/+/u, ''));
-      const projectRoot = resolve(dataRoot, 'projects', projectId);
-      const target = resolve(projectRoot, relativePath);
-      if (!target.startsWith(`${projectRoot}${sep}`)) {
+      const roots = getAllowedRoots().map((root) => resolve(root));
+      const projectRoot = resolve(roots[0] ?? '', projectId);
+      const target = isAbsolute(relativePath)
+        ? resolve(relativePath)
+        : resolve(projectRoot, relativePath);
+      const allowed = isAbsolute(relativePath)
+        ? roots.some((root) => target === root || target.startsWith(`${root}${sep}`))
+        : target.startsWith(`${projectRoot}${sep}`);
+      if (!allowed) {
         return new Response('Forbidden', { status: 403 });
       }
       return net.fetch(pathToFileURL(target).toString());

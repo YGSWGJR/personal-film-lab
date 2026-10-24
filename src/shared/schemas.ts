@@ -10,6 +10,22 @@ export const emptyArgsSchema = z.tuple([]);
 /** app:info 入参 schema */
 export const appInfoArgsSchema = emptyArgsSchema;
 
+const settingsDirectorySchema = z.string().trim().min(1).max(2000);
+
+export const settingsSchema = z.object({
+  dataRoot: settingsDirectorySchema,
+  cacheDir: settingsDirectorySchema,
+  exportDir: settingsDirectorySchema,
+  stillDir: settingsDirectorySchema,
+});
+
+export const settingsSetArgsSchema = settingsSchema;
+
+export const settingsChooseDirectoryArgsSchema = z.object({
+  title: z.string().trim().min(1).max(100).optional(),
+  defaultPath: z.string().trim().min(1).max(2000).optional(),
+});
+
 /** player:open：mediaPath 与 projectId 至少给一个（项目能力阶段 2 之后再接） */
 export const playerOpenArgsSchema = z
   .object({

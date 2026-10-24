@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, statSync, unlinkSync, existsSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
-import { app, type BrowserWindow } from 'electron';
+import type { BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import type {
   CancelJobResult,
@@ -20,6 +20,7 @@ import type {
 import { resolveFfmpegBinaries, type FfmpegBinaries } from './ffmpeg-binaries';
 import { MediaError, diagnosticsOf, tailText } from './media-error';
 import { formatCommand, runProcess } from './process-runner';
+import { resolveFrameCacheDir, resolveProxyCacheDir } from '../paths';
 
 interface FfprobeStream {
   index?: number;
@@ -83,7 +84,7 @@ export class MediaService {
     const quality = clampInt(args.quality ?? 2, 1, 31);
     const outputPath = args.outputPath
       ? this.validateOutputPath(args.outputPath)
-      : join(app.getPath('userData'), 'lapian', 'frames', `${basename(inputPath, extname(inputPath))}-${Math.round(args.timeMs)}ms-${Date.now()}.${format}`);
+      : join(resolveFrameCacheDir(), `${basename(inputPath, extname(inputPath))}-${Math.round(args.timeMs)}ms-${Date.now()}.${format}`);
 
     this.assertNotSameFile(inputPath, outputPath);
     mkdirSync(dirname(outputPath), { recursive: true });
@@ -342,12 +343,7 @@ export class MediaService {
     const sourceStat = this.statOrThrow(sourcePath, 'INPUT_NOT_FOUND', '源文件不可读');
     const outputPath = args.outputPath
       ? this.validateOutputPath(args.outputPath)
-      : join(
-          app.getPath('userData'),
-          'lapian',
-          'proxies',
-          `${basename(sourcePath, extname(sourcePath))}-proxy.mp4`,
-        );
+      : join(resolveProxyCacheDir(), `${basename(sourcePath, extname(sourcePath))}-proxy.mp4`);
 
     this.assertNotSameFile(sourcePath, outputPath);
     mkdirSync(dirname(outputPath), { recursive: true });

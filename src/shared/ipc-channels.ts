@@ -6,6 +6,11 @@ export const IPC = {
   /** app 域：返回版本 / 平台 / 用户数据目录（I 方向） */
   APP_INFO: 'app:info',
 
+  /** settings 域 */
+  SETTINGS_GET: 'settings:get',
+  SETTINGS_SET: 'settings:set',
+  SETTINGS_CHOOSE_DIRECTORY: 'settings:chooseDirectory',
+
   /** player 域（I 方向） */
   PLAYER_OPEN: 'player:open',
   PLAYER_OPEN_DIALOG: 'player:openDialog',

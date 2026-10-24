@@ -1,12 +1,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, statSync, type Stats } from 'node:fs';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, type Stats } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type {
   AudioWaveform,
   AudioWaveformBucket,
   ScopeExtractAudioWaveformArgs,
 } from '../../shared/types';
 import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
+import { resolveAudioWaveformCacheDir } from '../paths';
 import { ScopeError } from './scope-error';
 
 const AUDIO_SAMPLE_RATE = 8000;
@@ -25,6 +27,11 @@ export class ScopeService {
     const cacheKey = `${path.toLowerCase()}|${stat.size}|${Math.round(stat.mtimeMs)}|${bucketMs}`;
     const cached = this.audioCache.get(cacheKey);
     if (cached) return cached;
+    const diskCached = this.readDiskCache(cacheKey);
+    if (diskCached) {
+      this.audioCache.set(cacheKey, diskCached);
+      return diskCached;
+    }
 
     const active = this.audioJobs.get(cacheKey);
     if (active) return active;
@@ -32,6 +39,7 @@ export class ScopeService {
     const job = this.buildAudioWaveform(path, bucketMs)
       .then((result) => {
         this.audioCache.set(cacheKey, result);
+        this.writeDiskCache(cacheKey, result);
         return result;
       })
       .finally(() => {
@@ -170,6 +178,38 @@ export class ScopeService {
       throw new ScopeError('SCOPE_INPUT_INVALID', `媒体文件不可读：${path}`, { path });
     }
     return stat;
+  }
+
+  private diskCachePath(cacheKey: string): string {
+    const hash = createHash('sha1').update(cacheKey).digest('hex');
+    return join(resolveAudioWaveformCacheDir(), `${hash}.json`);
+  }
+
+  private readDiskCache(cacheKey: string): AudioWaveform | null {
+    try {
+      const parsed = JSON.parse(readFileSync(this.diskCachePath(cacheKey), 'utf8')) as AudioWaveform;
+      if (
+        Number.isInteger(parsed.bucketMs) &&
+        parsed.bucketMs > 0 &&
+        Array.isArray(parsed.buckets) &&
+        Number.isFinite(parsed.totalMs)
+      ) {
+        return parsed;
+      }
+    } catch {
+      // 缓存损坏时重建
+    }
+    return null;
+  }
+
+  private writeDiskCache(cacheKey: string, result: AudioWaveform): void {
+    try {
+      const dir = resolveAudioWaveformCacheDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(this.diskCachePath(cacheKey), JSON.stringify(result), 'utf8');
+    } catch {
+      // 磁盘缓存写入失败不影响本次结果
+    }
   }
 }
 

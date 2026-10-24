@@ -20,6 +20,7 @@ import type {
   ShotPreview,
 } from '../../shared/types';
 import type { MediaService } from '../media/media-service';
+import { resolveDetectFramesDir } from '../paths';
 import { DetectError } from './detect-error';
 
 const DEFAULT_WEIGHTS: DetectWeights = { s: 0.3, c: 0.3, h: 0.4 };
@@ -170,8 +171,8 @@ export class DetectService {
         });
       }
 
-      const projectDir = ensureProjectDirs(this.data.dataRoot, project.id);
-      const framesDir = join(projectDir, 'frames', 'detect');
+      ensureProjectDirs(this.data.dataRoot, project.id);
+      const framesDir = resolveDetectFramesDir(project.id);
       const fps = project.media.fps && project.media.fps > 0 ? project.media.fps : 25;
       const intervalMs = resolveIntervalMs(options, fps, project.media.durationMs);
       this.setProgress(job, 1, 'extractFrames');

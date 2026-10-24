@@ -28,6 +28,9 @@ import type {
   ProjectUpdateArgs,
   RenderBounds,
   ScopeExtractAudioWaveformArgs,
+  Settings,
+  SettingsChooseDirectoryArgs,
+  SettingsSetArgs,
   Shot,
   ShotCreateArgs,
   ShotUpdateArgs,
@@ -62,6 +65,7 @@ import type { MediaService } from '../media/media-service';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
+import { SettingsError, type SettingsService } from '../settings/settings-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
 
 export interface IpcDeps {
@@ -75,6 +79,7 @@ export interface IpcDeps {
   getExport(): ExportService | null;
   getDetect(): DetectService | null;
   getScope(): ScopeService | null;
+  getSettings(): SettingsService | null;
 }
 
 /**
@@ -127,6 +132,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     if (!service) throw new DataError('DATA_UNAVAILABLE', '示波器服务尚未初始化');
     return service;
   };
+  const requireSettings = (): SettingsService => {
+    const service = deps.getSettings();
+    if (!service) throw new SettingsError('SETTINGS_UNAVAILABLE', '设置服务尚未初始化');
+    return service;
+  };
 
   ipcMain.handle(
     IPC.APP_INFO,
@@ -135,6 +145,22 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       platform: process.platform,
       appDataPath: app.getPath('userData'),
     })),
+  );
+
+  // ---------- settings ----------
+  ipcMain.handle(
+    IPC.SETTINGS_GET,
+    withEnvelope((): Settings => requireSettings().get()),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_SET,
+    withEnvelope((args: SettingsSetArgs): Settings => requireSettings().set(args)),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_CHOOSE_DIRECTORY,
+    withEnvelope((args: SettingsChooseDirectoryArgs): Promise<string | null> =>
+      requireSettings().chooseDirectory(args),
+    ),
   );
 
   // ---------- player ----------

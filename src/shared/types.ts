@@ -10,6 +10,33 @@ export interface AppInfo {
   appDataPath: string;
 }
 
+export interface Settings {
+  dataRoot: string;
+  cacheDir: string;
+  exportDir: string;
+  stillDir: string;
+  /** DSH_DATA_ROOT 环境变量生效时，路径设置被环境覆盖 */
+  environmentOverride: boolean;
+}
+
+export interface SettingsSetArgs {
+  dataRoot: string;
+  cacheDir: string;
+  exportDir: string;
+  stillDir: string;
+}
+
+export interface SettingsChooseDirectoryArgs {
+  title?: string;
+  defaultPath?: string;
+}
+
+export interface SettingsApi {
+  get(): Promise<IpcResult<Settings>>;
+  set(args: SettingsSetArgs): Promise<IpcResult<Settings>>;
+  chooseDirectory(args: SettingsChooseDirectoryArgs): Promise<IpcResult<string | null>>;
+}
+
 /** IPC 错误体（S01 §6.1） */
 export interface IpcError {
   code: string;
@@ -247,6 +274,7 @@ export interface ScopeExtractAudioWaveformArgs {
 
 export interface WindowApi {
   app: AppApi;
+  settings: SettingsApi;
   player: PlayerApi;
   media: MediaApi;
   scope: ScopeApi;

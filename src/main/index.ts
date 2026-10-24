@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import { app, BrowserWindow } from 'electron';
 import { DataLayer } from '../data/db';
 import { ProjectPackageService } from '../data/project-package';
@@ -11,7 +10,9 @@ import { ExportService } from './export/export-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
+import { resolveAssetRoots, resolveDataRoot, bindSettingsProvider } from './paths';
 import { ScopeService } from './scope/scope-service';
+import { SettingsService } from './settings/settings-service';
 import { runSmokeTest } from './smoke';
 import { TermTransferService } from './terms/term-transfer-service';
 
@@ -34,6 +35,62 @@ let termTransferService: TermTransferService | null = null;
 let exportService: ExportService | null = null;
 let detectService: DetectService | null = null;
 let scopeService: ScopeService | null = null;
+let settingsService: SettingsService | null = null;
+
+function createWindowDataServices(
+  win: BrowserWindow,
+  layer: DataLayer,
+  media: MediaService,
+): {
+  capture: CaptureService;
+  exportService: ExportService;
+  detect: DetectService;
+} {
+  const capture = new CaptureService(layer, media, (still) => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.STILL_EVENT_CREATED, still);
+  });
+  const exportService = new ExportService(
+    layer,
+    capture,
+    (event) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_PROGRESS, event);
+    },
+    (event) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_DONE, event);
+    },
+  );
+  const detect = new DetectService(
+    layer,
+    media,
+    (event) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_PROGRESS, event);
+    },
+    (event) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_DONE, event);
+    },
+  );
+  return { capture, exportService, detect };
+}
+
+function rebuildDataServices(): void {
+  const nextLayer = new DataLayer(resolveDataRoot());
+  const nextPackage = new ProjectPackageService(nextLayer);
+  const nextTerms = new TermTransferService(nextLayer, () => mainWindow);
+  const nextWindowServices =
+    mainWindow && mediaService ? createWindowDataServices(mainWindow, nextLayer, mediaService) : null;
+  const previousDetect = detectService;
+  const previousLayer = dataLayer;
+
+  dataLayer = nextLayer;
+  packageService = nextPackage;
+  termTransferService = nextTerms;
+  captureService = nextWindowServices?.capture ?? null;
+  exportService = nextWindowServices?.exportService ?? null;
+  detectService = nextWindowServices?.detect ?? null;
+
+  previousDetect?.dispose();
+  previousLayer?.close();
+}
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -43,38 +100,10 @@ function ensureMainWindow(): BrowserWindow {
   playerService = new PlayerService(win);
   mediaService = new MediaService(() => mainWindow);
   scopeService = new ScopeService();
-  captureService =
-    dataLayer && mediaService
-      ? new CaptureService(dataLayer, mediaService, (still) => {
-          if (!win.isDestroyed()) win.webContents.send(IPC.STILL_EVENT_CREATED, still);
-        })
-      : null;
-  exportService =
-    dataLayer && captureService
-      ? new ExportService(
-          dataLayer,
-          captureService,
-          (event) => {
-            if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_PROGRESS, event);
-          },
-          (event) => {
-            if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_DONE, event);
-          },
-        )
-      : null;
-  detectService =
-    dataLayer && mediaService
-      ? new DetectService(
-          dataLayer,
-          mediaService,
-          (event) => {
-            if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_PROGRESS, event);
-          },
-          (event) => {
-            if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_DONE, event);
-          },
-        )
-      : null;
+  const windowServices = dataLayer ? createWindowDataServices(win, dataLayer, mediaService) : null;
+  captureService = windowServices?.capture ?? null;
+  exportService = windowServices?.exportService ?? null;
+  detectService = windowServices?.detect ?? null;
 
   win.on('closed', () => {
     if (mainWindow === win) {
@@ -105,17 +134,25 @@ registerIpcHandlers({
   getExport: () => exportService,
   getDetect: () => detectService,
   getScope: () => scopeService,
+  getSettings: () => settingsService,
 });
 
 app.whenReady().then(() => {
+  settingsService = new SettingsService(
+    () => mainWindow,
+    (next, previous) => {
+      if (next.dataRoot !== previous.dataRoot) rebuildDataServices();
+    },
+  );
+  bindSettingsProvider(() => settingsService!.get());
+
   if (!dataLayer) {
-    const dataRoot = process.env['DSH_DATA_ROOT'] ?? join(app.getPath('userData'), 'lapian');
-    dataLayer = new DataLayer(dataRoot);
+    dataLayer = new DataLayer(resolveDataRoot());
     packageService = new ProjectPackageService(dataLayer);
     termTransferService = new TermTransferService(dataLayer, () => mainWindow);
   }
 
-  registerAssetProtocol(dataLayer.dataRoot);
+  registerAssetProtocol(() => resolveAssetRoots());
   const win = ensureMainWindow();
 
   if (IS_SMOKE_TEST) {
@@ -146,4 +183,5 @@ app.on('before-quit', () => {
   detectService = null;
   scopeService?.dispose();
   scopeService = null;
+  settingsService = null;
 });

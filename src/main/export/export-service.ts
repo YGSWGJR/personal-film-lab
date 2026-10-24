@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import {
   AlignmentType,
   BorderStyle,
@@ -21,7 +21,7 @@ import {
 } from 'docx';
 import { BrowserWindow } from 'electron';
 import type { DataLayer } from '../../data/db';
-import { projectDirOf, resolveProjectFilePath, sanitizeName } from '../../data/paths';
+import { resolveProjectFilePath, sanitizeName } from '../../data/paths';
 import type {
   Annotation,
   ExportDoneEvent,
@@ -34,6 +34,7 @@ import type {
   StoryboardImageStrategy,
 } from '../../shared/types';
 import type { CaptureService } from '../capture/capture-service';
+import { resolveProjectExportDir } from '../paths';
 import { ExportError } from './export-error';
 
 const DEFAULT_HEADERS: StoryboardHeader[] = [
@@ -156,7 +157,7 @@ export class ExportService {
 
   private outputPathOf(projectId: string, projectName: string, format: 'pdf' | 'docx'): string {
     const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-');
-    const exportsDir = join(projectDirOf(this.data.dataRoot, projectId), 'exports');
+    const exportsDir = resolveProjectExportDir(projectId);
     mkdirSync(exportsDir, { recursive: true });
     return join(exportsDir, `${sanitizeName(projectName)}-storyboard-${stamp}.${format}`);
   }
@@ -170,7 +171,7 @@ export class ExportService {
   ): Promise<void> {
     const projectId = rows[0]?.shot.projectId;
     if (!projectId) throw new ExportError('EXPORT_NO_SHOTS', '没有可导出的镜头');
-    const sectionDir = join(projectDirOf(this.data.dataRoot, projectId), 'exports');
+    const sectionDir = dirname(outputPath);
     const tempHtml = join(sectionDir, `storyboard-${randomUUID()}.html`);
     const html = this.renderHtml(projectName, headers, rows, strategy);
     writeFileSync(tempHtml, html, 'utf8');

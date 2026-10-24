@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Annotation, Still } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
 import { ensureProjectDirs } from '../../data/paths';
 import type { MediaService } from '../media/media-service';
+import { resolveProjectStillDir } from '../paths';
 import { CaptureError } from './capture-error';
 
 /**
@@ -61,10 +62,12 @@ export class CaptureService {
       shotId = shot?.id ?? null;
     }
 
-    const projectDir = ensureProjectDirs(this.data.dataRoot, project.id);
+    ensureProjectDirs(this.data.dataRoot, project.id);
+    const stillDir = resolveProjectStillDir(project.id);
+    mkdirSync(stillDir, { recursive: true });
     const suffix = `${String(Math.round(args.timeMs)).padStart(8, '0')}-${randomUUID().slice(0, 8)}`;
-    const pngPath = join(projectDir, 'stills', `still-${suffix}.png`);
-    const thumbPath = join(projectDir, 'stills', `still-${suffix}-thumb.jpg`);
+    const pngPath = join(stillDir, `still-${suffix}.png`);
+    const thumbPath = join(stillDir, `still-${suffix}-thumb.jpg`);
 
     try {
       const frame = await this.media.extractFrame({
