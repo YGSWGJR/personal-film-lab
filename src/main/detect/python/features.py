@@ -20,16 +20,33 @@ def extract_frame_feature(frame_path: str) -> dict[str, object]:
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    histogram = cv2.calcHist([hsv], [0], None, [16], [0, 180]).astype(np.float64).ravel()
-    histogram_sum = float(histogram.sum())
-    if histogram_sum > 0:
-        histogram /= histogram_sum
+
+    hue_histogram = cv2.calcHist([hsv], [0], None, [32], [0, 180]).astype(np.float64).ravel()
+    hue_sum = float(hue_histogram.sum())
+    if hue_sum > 0:
+        hue_histogram /= hue_sum
+
+    value_histogram = cv2.calcHist([hsv], [2], None, [32], [0, 256]).astype(np.float64).ravel()
+    value_sum = float(value_histogram.sum())
+    if value_sum > 0:
+        value_histogram /= value_sum
+
+    edge_mask = cv2.Canny(gray, 100, 200)
+    edge_ratio = float(cv2.countNonZero(edge_mask) / max(1, gray.shape[0] * gray.shape[1]))
+
+    grid_values: list[float] = []
+    for row_band in np.array_split(gray, 3, axis=0):
+        for cell in np.array_split(row_band, 3, axis=1):
+            grid_values.append(float(cell.mean() / 255.0) if cell.size else 0.0)
 
     return {
         "s": float(hsv[:, :, 1].mean() / 255.0),
         "c": float(min(1.0, gray.std() / 127.5)),
         "v": float(hsv[:, :, 2].mean() / 255.0),
-        "h": histogram.tolist(),
+        "h": hue_histogram.tolist(),
+        "hv": value_histogram.tolist(),
+        "edge": edge_ratio,
+        "grid": grid_values,
     }
 
 

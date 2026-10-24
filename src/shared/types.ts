@@ -365,9 +365,12 @@ export interface ProjectMedia {
 }
 
 export interface DetectWeights {
-  s: number;
-  c: number;
-  h: number;
+  s?: number;
+  c?: number;
+  h?: number;
+  hv?: number;
+  edge?: number;
+  grid?: number;
 }
 
 export interface DetectOptions {
@@ -445,6 +448,7 @@ export interface Shot {
   remark: string | null;
   origin: 'auto' | 'manual';
   locked: boolean;
+  thumbnail?: string | null;
   tagIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -467,6 +471,9 @@ export interface ShotPreview {
   startMs: number;
   endMs: number;
   durationMs: number;
+  thumbnail?: string | null;
+  /** 兼容 D1-E 初版字段；新调用优先使用 thumbnail */
+  thumbPath?: string;
 }
 
 export interface DetectResult {

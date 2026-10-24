@@ -64,8 +64,15 @@ class DetectionAlgorithmTests(unittest.TestCase):
             black = np.zeros((90, 160, 3), dtype=np.uint8)
             white = np.full((90, 160, 3), 255, dtype=np.uint8)
             paths = write_frames(Path(temp_dir), [black] * 5 + [white] + [black] * 4)
-            self.assertGreater(len(detect(paths, filter_transitions=False)), 0)
             self.assertEqual(detect(paths, filter_transitions=True), [])
+
+    def test_flash_white_survives_when_transition_filtering_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            black = np.zeros((90, 160, 3), dtype=np.uint8)
+            white = np.full((90, 160, 3), 255, dtype=np.uint8)
+            paths = write_frames(Path(temp_dir), [black] * 5 + [white] + [black] * 4)
+            # 关闭转场过滤时保留单帧闪白，供后续人工复核。
+            self.assertGreater(len(detect(paths, filter_transitions=False)), 0)
 
 
 if __name__ == "__main__":

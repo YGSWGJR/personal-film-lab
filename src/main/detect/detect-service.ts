@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { DataLayer } from '../../data/db';
 import { ensureProjectDirs } from '../../data/paths';
@@ -16,14 +16,17 @@ import type {
   DetectRunArgs,
   DetectRunResult,
   DetectWeights,
+  Project,
   Scene,
   ShotPreview,
 } from '../../shared/types';
 import type { MediaService } from '../media/media-service';
+import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
+import { runProcess } from '../media/process-runner';
 import { resolveDetectFramesDir } from '../paths';
 import { DetectError } from './detect-error';
 
-const DEFAULT_WEIGHTS: DetectWeights = { s: 0.3, c: 0.3, h: 0.4 };
+const DEFAULT_WEIGHTS = { s: 0.15, c: 0.15, h: 0.25, hv: 0.2, edge: 0.1, grid: 0.15 };
 const ANALYSIS_TIMEOUT_MS = 10 * 60_000;
 
 interface InternalDetectJob {
@@ -161,6 +164,7 @@ export class DetectService {
     options: ResolvedDetectOptions,
     dryRun: boolean,
   ): Promise<void> {
+    let framesDir: string | null = null;
     try {
       job.status = 'running';
       const project = this.data.projects.get(job.projectId);
@@ -172,9 +176,16 @@ export class DetectService {
       }
 
       ensureProjectDirs(this.data.dataRoot, project.id);
-      const framesDir = resolveDetectFramesDir(project.id);
+      framesDir = resolveDetectFramesDir(project.id);
+      const thumbsDir = join(dirname(framesDir), 'thumbs', project.id);
       const fps = project.media.fps && project.media.fps > 0 ? project.media.fps : 25;
-      const intervalMs = resolveIntervalMs(options, fps, project.media.durationMs);
+      const durationMs = project.media.durationMs;
+      const intervalMs = resolveIntervalMs(options, fps, durationMs);
+      const estimatedFrames = durationMs > 0 ? Math.ceil(durationMs / intervalMs) + 32 : 50_000;
+      const maxFrames = Math.min(50_000, estimatedFrames);
+      if (estimatedFrames > 50_000) {
+        console.warn(`[detect] estimated ${estimatedFrames} frames exceeds cap; using maxFrames=50000`);
+      }
       this.setProgress(job, 1, 'extractFrames');
       const extraction = await this.media.extractFrames(
         {
@@ -182,11 +193,11 @@ export class DetectService {
           outputDir: framesDir,
           intervalMs,
           startMs: 0,
-          endMs: project.media.durationMs > 0 ? project.media.durationMs : undefined,
+          endMs: durationMs > 0 ? durationMs : undefined,
           format: 'jpg',
           prefix: 'detect',
           quality: 4,
-          maxFrames: 20_000,
+          maxFrames,
           timeoutMs: 30 * 60_000,
         },
         {
@@ -207,6 +218,8 @@ export class DetectService {
       );
       this.assertActive(job);
       const result = this.toPreview(job, project.id, analysis, project.media.durationMs);
+      await this.createShotThumbnails(job, project, result.shots, sourcePath, thumbsDir, extraction.frames);
+      this.assertActive(job);
       job.status = 'done';
       job.progress = 100;
       job.result = result;
@@ -223,6 +236,119 @@ export class DetectService {
       }
       job.status = 'error';
       job.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.cleanupDetectFrames(framesDir);
+    }
+  }
+
+  private async createShotThumbnails(
+    job: InternalDetectJob,
+    project: Project,
+    shots: ShotPreview[],
+    sourcePath: string,
+    thumbsDir: string,
+    extractedFrames: Array<{ timeMs: number; path: string }>,
+  ): Promise<void> {
+    try {
+      rmSync(thumbsDir, { recursive: true, force: true });
+      mkdirSync(thumbsDir, { recursive: true });
+    } catch (error) {
+      console.warn(`[detect] thumbnail directory unavailable: ${(error as Error).message}`);
+      return;
+    }
+
+    for (const shot of shots) {
+      this.assertActive(job);
+      const index = String(shot.index).padStart(4, '0');
+      const timestamp = Date.now();
+      const filename = `shot-${index}-${shot.startMs}ms-${timestamp}.jpg`;
+      const thumbnailPath = join(thumbsDir, filename);
+      const sourceFramePath = join(thumbsDir, `.${filename}.source.jpg`);
+      let inputFramePath: string | null = null;
+      let removeInputFrame = false;
+      try {
+        const nearestFrame = extractedFrames.reduce<(typeof extractedFrames)[number] | null>(
+          (nearest, frame) =>
+            !nearest || Math.abs(frame.timeMs - shot.startMs) < Math.abs(nearest.timeMs - shot.startMs)
+              ? frame
+              : nearest,
+          null,
+        );
+        if (nearestFrame && Math.abs(nearestFrame.timeMs - shot.startMs) <= Math.max(1, shot.durationMs)) {
+          inputFramePath = nearestFrame.path;
+        } else {
+          await this.media.extractFrame({
+            path: sourcePath,
+            timeMs: shot.startMs,
+            outputPath: sourceFramePath,
+            format: 'jpg',
+            quality: 8,
+          });
+          inputFramePath = sourceFramePath;
+          removeInputFrame = true;
+        }
+        await this.createThumbnailImage(inputFramePath, thumbnailPath, 160, 8);
+        shot.thumbnail = thumbnailPath;
+        shot.thumbPath = thumbnailPath;
+      } catch (error) {
+        console.warn(`[detect] shot ${project.id}#${shot.index} thumbnail failed: ${(error as Error).message}`);
+        try {
+          rmSync(thumbnailPath, { force: true });
+        } catch {
+          // A partial thumbnail must not fail the detection job.
+        }
+      } finally {
+        if (removeInputFrame) {
+          try {
+            rmSync(sourceFramePath, { force: true });
+          } catch {
+            // A stale source frame must not fail the detection job.
+          }
+        }
+      }
+    }
+  }
+
+  private async createThumbnailImage(
+    inputFramePath: string,
+    thumbnailPath: string,
+    width: number,
+    quality: number,
+  ): Promise<void> {
+    const { ffmpeg } = await resolveFfmpegBinaries();
+    const result = await runProcess({
+      command: ffmpeg,
+      args: [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-nostdin',
+        '-i',
+        inputFramePath,
+        '-frames:v',
+        '1',
+        '-an',
+        '-sn',
+        '-vf',
+        `scale=${width}:-2`,
+        '-q:v',
+        String(quality),
+        '-y',
+        thumbnailPath,
+      ],
+      timeoutMs: 60_000,
+    });
+    if (result.timedOut || result.exitCode !== 0) {
+      throw new Error(result.timedOut ? 'thumbnail timeout' : result.stderr || 'thumbnail failed');
+    }
+  }
+
+  private cleanupDetectFrames(framesDir: string | null): void {
+    if (!framesDir) return;
+    try {
+      rmSync(framesDir, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`[detect] detect frame cleanup failed: ${(error as Error).message}`);
     }
   }
 
@@ -393,9 +519,13 @@ function normalizeOptions(options: DetectOptions): ResolvedDetectOptions {
     s: Number(options.weights?.s ?? DEFAULT_WEIGHTS.s),
     c: Number(options.weights?.c ?? DEFAULT_WEIGHTS.c),
     h: Number(options.weights?.h ?? DEFAULT_WEIGHTS.h),
+    hv: Number(options.weights?.hv ?? DEFAULT_WEIGHTS.hv),
+    edge: Number(options.weights?.edge ?? DEFAULT_WEIGHTS.edge),
+    grid: Number(options.weights?.grid ?? DEFAULT_WEIGHTS.grid),
   };
-  const total = weights.s + weights.c + weights.h;
-  if (![weights.s, weights.c, weights.h].every(Number.isFinite) || total <= 0) {
+  const values = [weights.s, weights.c, weights.h, weights.hv, weights.edge, weights.grid];
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (!values.every(Number.isFinite) || total <= 0) {
     throw new DetectError('INVALID_OPTIONS', '检测权重无效');
   }
   if (!Number.isFinite(options.sensitivity) || options.sensitivity < 0 || options.sensitivity > 1) {
@@ -412,16 +542,25 @@ function normalizeOptions(options: DetectOptions): ResolvedDetectOptions {
   }
   return {
     ...options,
-    weights: { s: weights.s / total, c: weights.c / total, h: weights.h / total },
+    weights: {
+      s: weights.s / total,
+      c: weights.c / total,
+      h: weights.h / total,
+      hv: weights.hv / total,
+      edge: weights.edge / total,
+      grid: weights.grid / total,
+    },
   };
 }
 
-function resolveIntervalMs(options: ResolvedDetectOptions, fps: number, durationMs: number): number {
+export function resolveIntervalMs(
+  options: Pick<DetectOptions, 'intervalMs' | 'frameInterval'>,
+  fps: number,
+  _durationMs: number,
+): number {
   if (options.intervalMs) return Math.max(50, Math.round(options.intervalMs));
-  const frameStep = Math.max(1, options.frameInterval ?? 1);
-  const requested = Math.round((1000 / Math.max(1, fps)) * frameStep * 6);
-  const limitSafe = durationMs > 0 ? Math.ceil(durationMs / 20_000) : 50;
-  return Math.max(250, requested, limitSafe);
+  const frameStep = Math.max(1, options.frameInterval ?? 12);
+  return Math.max(50, Math.round((1000 / Math.max(1, fps)) * frameStep));
 }
 
 function resolvePythonExecutable(): string {
