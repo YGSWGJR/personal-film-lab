@@ -26,7 +26,10 @@ import type {
   ShotCreateArgs,
   ShotUpdateArgs,
   Still,
+  StillCaptureArgs,
+  StillCaptureAtArgs,
   StillCreateArgs,
+  StillSetAnnotationArgs,
   StillUpdateArgs,
   Tag,
   TagCreateArgs,
@@ -38,6 +41,7 @@ import type {
   TranscodeProxyResult,
 } from '../../shared/types';
 import type { DataLayer } from '../../data/db';
+import type { CaptureService } from '../capture/capture-service';
 import { DataError } from '../../data/errors';
 import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
@@ -51,6 +55,7 @@ export interface IpcDeps {
   getMedia(): MediaService | null;
   getData(): DataLayer | null;
   getPackage(): ProjectPackageService | null;
+  getCapture(): CaptureService | null;
 }
 
 /**
@@ -77,6 +82,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     const service = deps.getPackage();
     if (!service) throw new DataError('DATA_UNAVAILABLE', '项目包服务尚未初始化');
     return service;
+  };
+  const requireCapture = (): CaptureService => {
+    const capture = deps.getCapture();
+    if (!capture) throw new DataError('DATA_UNAVAILABLE', '静帧截图服务尚未初始化');
+    return capture;
   };
 
   ipcMain.handle(
@@ -238,12 +248,26 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: { id: string }): Still => requireData().stills.get(args.id)),
   );
   ipcMain.handle(
+    IPC.STILL_CAPTURE,
+    withEnvelope((args: StillCaptureArgs): Promise<Still> => requireCapture().capture(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_CAPTURE_AT,
+    withEnvelope((args: StillCaptureAtArgs): Promise<Still> => requireCapture().captureAt(args)),
+  );
+  ipcMain.handle(
     IPC.STILL_CREATE,
     withEnvelope((args: StillCreateArgs): Still => requireData().stills.create(args)),
   );
   ipcMain.handle(
     IPC.STILL_UPDATE,
     withEnvelope((args: StillUpdateArgs): Still => requireData().stills.update(args)),
+  );
+  ipcMain.handle(
+    IPC.STILL_SET_ANNOTATION,
+    withEnvelope((args: StillSetAnnotationArgs): Still =>
+      requireCapture().setAnnotations(args.id, args.annotations),
+    ),
   );
   ipcMain.handle(
     IPC.STILL_DELETE,

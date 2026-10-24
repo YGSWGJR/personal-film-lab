@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { DetailTerm, WorkspaceShot } from '../types/workspace';
-import type { Tag } from '../../../shared/types';
+import type { Annotation, Still, Tag } from '../../../shared/types';
 
 const props = defineProps<{
   shot: WorkspaceShot | null;
   note: string;
   terms: DetailTerm[];
   tags: Tag[];
+  still: Still | null;
   thumbnail: string;
   saving: boolean;
   demoMode: boolean;
@@ -21,11 +22,19 @@ const emit = defineEmits<{
   saveNote: [];
   collapse: [];
   toggleTag: [tag: Tag];
+  setAnnotations: [annotations: Annotation[]];
 }>();
 
 const locked = ref(true);
 const termsOpen = ref(true);
 const activeTool = ref<'box' | 'arrow' | 'text' | 'none'>('box');
+const drawing = ref<{
+  tool: 'box' | 'arrow';
+  start: { x: number; y: number };
+  current: { x: number; y: number };
+} | null>(null);
+const textEditor = ref<{ x: number; y: number; value: string } | null>(null);
+const stillRoot = ref<HTMLElement | null>(null);
 
 const categoryOrder = ['景别', '机位', '运镜', '光线', '声音', '剪辑'];
 const assignedTagIds = computed(() => new Set(props.shot?.tagIds ?? []));
@@ -49,6 +58,15 @@ const tagGroups = computed(() => {
 });
 
 const visibleTerms = computed(() => props.terms.slice(0, 4));
+const demoAnnotations: Annotation[] = [
+  { type: 'box', x: 0.42, y: 0.55, w: 0.2, h: 0.12, color: '#e11d48', label: null },
+  { type: 'arrow', points: [[0.42, 0.55], [0.72, 0.3]], color: '#f59e0b', label: null },
+];
+const visibleAnnotations = computed<Annotation[]>(() => {
+  const base = props.still ? props.still.annotations : demoAnnotations;
+  if (!drawing.value) return base;
+  return [...base, draftAnnotation(drawing.value)];
+});
 
 function timeRange(shot: WorkspaceShot): string {
   const start = formatRange(shot.startMs);
@@ -67,6 +85,109 @@ function formatRange(ms: number): string {
 function onNoteInput(event: Event): void {
   emit('updateNote', (event.target as HTMLTextAreaElement).value);
 }
+
+function normalizedPoint(event: PointerEvent): { x: number; y: number } {
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+  };
+}
+
+function onStillPointerDown(event: PointerEvent): void {
+  if (!props.still || activeTool.value === 'none') return;
+  const point = normalizedPoint(event);
+  if (activeTool.value === 'text') {
+    textEditor.value = { ...point, value: '' };
+    return;
+  }
+  drawing.value = { tool: activeTool.value, start: point, current: point };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  window.addEventListener('pointerup', finishDrawingFromWindow, { once: true });
+}
+
+function onStillPointerMove(event: PointerEvent): void {
+  if (!drawing.value) return;
+  drawing.value = { ...drawing.value, current: normalizedPoint(event) };
+}
+
+function onStillPointerUp(event: PointerEvent): void {
+  if (!drawing.value) return;
+  finishDrawing();
+  try {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  } catch {
+    // pointer 已释放
+  }
+}
+
+function finishDrawingFromWindow(event: PointerEvent): void {
+  if (!drawing.value || !stillRoot.value) return;
+  const rect = stillRoot.value.getBoundingClientRect();
+  drawing.value = {
+    ...drawing.value,
+    current: {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+    },
+  };
+  finishDrawing();
+}
+
+function finishDrawing(): void {
+  if (!drawing.value) return;
+  const annotation = draftAnnotation(drawing.value);
+  drawing.value = null;
+  const tooSmall =
+    annotation.type === 'box'
+      ? Number(annotation.w) < 0.01 || Number(annotation.h) < 0.01
+      : Math.hypot(
+          (annotation.points?.[1]?.[0] ?? 0) - (annotation.points?.[0]?.[0] ?? 0),
+          (annotation.points?.[1]?.[1] ?? 0) - (annotation.points?.[0]?.[1] ?? 0),
+        ) < 0.01;
+  if (!tooSmall && props.still) {
+    emit('setAnnotations', [...props.still.annotations, annotation]);
+  }
+}
+
+function draftAnnotation(draft: NonNullable<typeof drawing.value>): Annotation {
+  if (draft.tool === 'box') {
+    return {
+      type: 'box',
+      x: Math.min(draft.start.x, draft.current.x),
+      y: Math.min(draft.start.y, draft.current.y),
+      w: Math.abs(draft.current.x - draft.start.x),
+      h: Math.abs(draft.current.y - draft.start.y),
+      color: '#e11d48',
+      label: null,
+    };
+  }
+  return {
+    type: 'arrow',
+    points: [
+      [draft.start.x, draft.start.y],
+      [draft.current.x, draft.current.y],
+    ],
+    color: '#f59e0b',
+    label: null,
+  };
+}
+
+function commitTextAnnotation(): void {
+  const editor = textEditor.value;
+  const value = editor?.value.trim();
+  if (editor && value && props.still) {
+    emit('setAnnotations', [
+      ...props.still.annotations,
+      { type: 'text', x: editor.x, y: editor.y, color: '#f8fafc', label: value },
+    ]);
+  }
+  textEditor.value = null;
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pointerup', finishDrawingFromWindow);
+});
 </script>
 
 <template>
@@ -84,21 +205,71 @@ function onNoteInput(event: Event): void {
         </button>
       </header>
 
-      <section class="still">
+      <section
+        ref="stillRoot"
+        class="still"
+        :class="{ annotating: still && activeTool !== 'none' }"
+        @pointerdown="onStillPointerDown"
+        @pointermove="onStillPointerMove"
+        @pointerup="onStillPointerUp"
+      >
         <img :src="thumbnail" :alt="`${shot.title} 静帧`" />
-        <svg class="annotation-demo" viewBox="0 0 160 90" aria-hidden="true">
-          <rect x="66" y="45" width="32" height="18" rx="1" />
-          <line x1="98" y1="54" x2="126" y2="30" />
-          <polyline points="119,30 126,30 126,37" />
+        <svg class="annotation-layer" viewBox="0 0 1000 562.5" preserveAspectRatio="none" aria-hidden="true">
+          <template v-for="(annotation, index) in visibleAnnotations" :key="index">
+            <rect
+              v-if="annotation.type === 'box'"
+              :x="(annotation.x ?? 0) * 1000"
+              :y="(annotation.y ?? 0) * 562.5"
+              :width="(annotation.w ?? 0) * 1000"
+              :height="(annotation.h ?? 0) * 562.5"
+              :stroke="annotation.color ?? '#e11d48'"
+            />
+            <g v-else-if="annotation.type === 'arrow'" :stroke="annotation.color ?? '#f59e0b'">
+              <line
+                :x1="(annotation.points?.[0]?.[0] ?? 0) * 1000"
+                :y1="(annotation.points?.[0]?.[1] ?? 0) * 562.5"
+                :x2="(annotation.points?.[1]?.[0] ?? 0) * 1000"
+                :y2="(annotation.points?.[1]?.[1] ?? 0) * 562.5"
+              />
+              <circle
+                :cx="(annotation.points?.[1]?.[0] ?? 0) * 1000"
+                :cy="(annotation.points?.[1]?.[1] ?? 0) * 562.5"
+                r="5"
+                :fill="annotation.color ?? '#f59e0b'"
+              />
+            </g>
+            <text
+              v-else-if="annotation.type === 'text'"
+              :x="(annotation.x ?? 0) * 1000"
+              :y="(annotation.y ?? 0) * 562.5"
+              :fill="annotation.color ?? '#f8fafc'"
+            >{{ annotation.label }}</text>
+          </template>
         </svg>
         <span class="still-caption">镜头 {{ String(shot.index).padStart(2, '0') }} · {{ shot.shotSize }}</span>
+        <div
+          v-if="textEditor"
+          class="text-editor"
+          :style="{ left: `${textEditor.x * 100}%`, top: `${textEditor.y * 100}%` }"
+          @pointerdown.stop
+        >
+          <input
+            v-model="textEditor.value"
+            type="text"
+            placeholder="输入标注文字"
+            autofocus
+            @keydown.enter.prevent="commitTextAnnotation"
+            @keydown.esc="textEditor = null"
+            @blur="commitTextAnnotation"
+          />
+        </div>
       </section>
 
       <div class="annotation-tools">
         <button type="button" @click="emit('capture')">截图</button>
-        <button :class="{ active: activeTool === 'box' }" type="button" @click="activeTool = 'box'">框选</button>
-        <button :class="{ active: activeTool === 'arrow' }" type="button" @click="activeTool = 'arrow'">箭头</button>
-        <button :class="{ active: activeTool === 'text' }" type="button" @click="activeTool = 'text'">文字</button>
+        <button :disabled="!still" :class="{ active: activeTool === 'box' }" type="button" @click="activeTool = 'box'">框选</button>
+        <button :disabled="!still" :class="{ active: activeTool === 'arrow' }" type="button" @click="activeTool = 'arrow'">箭头</button>
+        <button :disabled="!still" :class="{ active: activeTool === 'text' }" type="button" @click="activeTool = 'text'">文字</button>
       </div>
 
       <div class="tag-grid">
@@ -260,15 +431,47 @@ function onNoteInput(event: Event): void {
   object-fit: cover;
 }
 
-.annotation-demo {
+.still.annotating {
+  cursor: crosshair;
+}
+
+.annotation-layer {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   fill: none;
   pointer-events: none;
-  stroke: var(--red);
-  stroke-width: 1.5;
+  stroke-width: 2;
+}
+
+.annotation-layer text {
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 18px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: rgba(15, 23, 42, 0.85);
+  stroke-width: 3px;
+}
+
+.text-editor {
+  position: absolute;
+  width: 150px;
+  transform: translateY(-100%);
+  z-index: 3;
+}
+
+.text-editor input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: 0;
+  background: rgba(30, 41, 59, 0.96);
+  color: var(--text-primary);
+  font-size: 12px;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.4);
 }
 
 .still-caption {

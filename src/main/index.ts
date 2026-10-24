@@ -2,7 +2,10 @@ import { join } from 'node:path';
 import { app, BrowserWindow } from 'electron';
 import { DataLayer } from '../data/db';
 import { ProjectPackageService } from '../data/project-package';
+import { IPC } from '../shared/ipc-channels';
 import { createMainWindow } from './app';
+import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
+import { CaptureService } from './capture/capture-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
@@ -15,12 +18,14 @@ const IS_SMOKE_TEST = process.argv.includes('--smoke-test');
  * 必须关闭 Chromium 的 DirectComposition；否则会被网页合成层盖住。
  */
 app.commandLine.appendSwitch('disable-direct-composition');
+registerAssetScheme();
 
 let mainWindow: BrowserWindow | null = null;
 let playerService: PlayerService | null = null;
 let mediaService: MediaService | null = null;
 let dataLayer: DataLayer | null = null;
 let packageService: ProjectPackageService | null = null;
+let captureService: CaptureService | null = null;
 
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
@@ -29,11 +34,18 @@ function ensureMainWindow(): BrowserWindow {
   mainWindow = win;
   playerService = new PlayerService(win);
   mediaService = new MediaService(() => mainWindow);
+  captureService =
+    dataLayer && mediaService
+      ? new CaptureService(dataLayer, mediaService, (still) => {
+          if (!win.isDestroyed()) win.webContents.send(IPC.STILL_EVENT_CREATED, still);
+        })
+      : null;
 
   win.on('closed', () => {
     if (mainWindow === win) {
       mainWindow = null;
       playerService = null;
+      captureService = null;
       mediaService?.dispose();
       mediaService = null;
     }
@@ -48,6 +60,7 @@ registerIpcHandlers({
   getMedia: () => mediaService,
   getData: () => dataLayer,
   getPackage: () => packageService,
+  getCapture: () => captureService,
 });
 
 app.whenReady().then(() => {
@@ -57,6 +70,7 @@ app.whenReady().then(() => {
     packageService = new ProjectPackageService(dataLayer);
   }
 
+  registerAssetProtocol(dataLayer.dataRoot);
   const win = ensureMainWindow();
 
   if (IS_SMOKE_TEST) {
@@ -80,4 +94,5 @@ app.on('before-quit', () => {
   dataLayer?.close();
   dataLayer = null;
   packageService = null;
+  captureService = null;
 });

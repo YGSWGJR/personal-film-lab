@@ -141,6 +141,52 @@ export class MediaService {
     };
   }
 
+  /** 由已抽出的原图生成 JPEG 缩略图，供静帧列表和分镜本使用。 */
+  async createThumbnail(inputPath: string, outputPath: string, maxWidth = 480): Promise<string> {
+    const sourcePath = this.validateInput(inputPath);
+    const targetPath = this.validateOutputPath(outputPath);
+    this.assertNotSameFile(sourcePath, targetPath);
+    mkdirSync(dirname(targetPath), { recursive: true });
+
+    const { ffmpeg } = await this.ensureReady();
+    const width = clampInt(maxWidth, 64, 1920);
+    const ffArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-i',
+      sourcePath,
+      '-frames:v',
+      '1',
+      '-vf',
+      `scale=${width}:-2:force_original_aspect_ratio=decrease`,
+      '-q:v',
+      '4',
+      '-y',
+      targetPath,
+    ];
+    const result = await runProcess({
+      command: ffmpeg,
+      args: ffArgs,
+      timeoutMs: DEFAULT_FRAME_TIMEOUT_MS,
+    });
+    if (result.exitCode !== 0 || result.timedOut) {
+      this.removeQuietly(targetPath);
+      throw new MediaError(
+        result.timedOut ? 'THUMBNAIL_TIMEOUT' : 'THUMBNAIL_FAILED',
+        `生成缩略图失败：${this.stderrSummary(result.stderr)}`,
+        {
+          ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+          inputPath: sourcePath,
+          outputPath: targetPath,
+        },
+      );
+    }
+    this.statOrThrow(targetPath, 'THUMBNAIL_FAILED', '缩略图未生成');
+    return targetPath;
+  }
+
   async extractFrames(args: ExtractFramesArgs): Promise<ExtractFramesResult> {
     const inputPath = this.validateInput(args.path);
     const intervalMs = Math.round(args.intervalMs);

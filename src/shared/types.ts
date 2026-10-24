@@ -408,6 +408,23 @@ export interface StillCreateArgs {
   annotations?: Annotation[];
 }
 
+export interface StillCaptureArgs {
+  projectId: string;
+  timeMs: number;
+  shotId?: string | null;
+  caption?: string | null;
+}
+
+export interface StillCaptureAtArgs {
+  shotId: string;
+  caption?: string | null;
+}
+
+export interface StillSetAnnotationArgs {
+  id: string;
+  annotations: Annotation[];
+}
+
 export interface StillUpdateArgs {
   id: string;
   patch: {
@@ -518,8 +535,12 @@ export interface StillApi {
   list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Still[]>>;
   get(args: { id: string }): Promise<IpcResult<Still>>;
   create(args: StillCreateArgs): Promise<IpcResult<Still>>;
+  capture(args: StillCaptureArgs): Promise<IpcResult<Still>>;
+  captureAt(args: StillCaptureAtArgs): Promise<IpcResult<Still>>;
   update(args: StillUpdateArgs): Promise<IpcResult<Still>>;
+  setAnnotation(args: StillSetAnnotationArgs): Promise<IpcResult<Still>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  onCreated(listener: (still: Still) => void): () => void;
 }
 
 export interface TagApi {

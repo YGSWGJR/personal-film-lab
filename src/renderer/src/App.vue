@@ -48,6 +48,7 @@ const notes = reactive<Record<string, string>>(
 const noteIds = reactive<Record<string, string>>({});
 const terms = ref<DetailTerm[]>(createDemoTerms());
 const tags = ref<Tag[]>(createDemoTags());
+const projectStills = ref<Still[]>([]);
 const toast = ref<{ title: string; message: string; tone: 'default' | 'error' | 'success' } | null>(null);
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let noteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -78,7 +79,17 @@ window.__SKELETON_STATE__ = skeleton;
 
 const selectedShot = computed(() => shots.value.find((shot) => shot.id === selectedId.value) ?? null);
 const selectedNote = computed(() => (selectedId.value ? notes[selectedId.value] ?? '' : ''));
-const poster = computed(() => selectedShot.value?.thumbnail ?? DEMO_THUMBNAILS[2]);
+const selectedStill = computed(() => {
+  if (!selectedShot.value) return null;
+  return (
+    projectStills.value
+      .filter((still) => still.shotId === selectedShot.value?.id)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null
+  );
+});
+const poster = computed(() =>
+  selectedStill.value ? assetUrl(selectedStill.value) : selectedShot.value?.thumbnail ?? DEMO_THUMBNAILS[2],
+);
 const displayDurationMs = computed(() => {
   if (player.hasFile && player.durationMs > 0) return player.durationMs;
   if (!demoMode.value && activeProject.value?.media.durationMs) return activeProject.value.media.durationMs;
@@ -101,6 +112,16 @@ function formatReadout(ms: number): string {
   const seconds = totalSeconds % 60;
   const millis = Math.floor(Math.max(0, ms) % 1000);
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+}
+
+function assetUrl(still: Still): string {
+  const filePath = still.thumbPath || still.filePath;
+  const encodedPath = filePath
+    .split(/[\\/]/u)
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `lapian-asset://${still.projectId}/${encodedPath}`;
 }
 
 function showToast(message: string, tone: 'default' | 'error' | 'success' = 'default', title?: string): void {
@@ -229,6 +250,7 @@ async function loadProject(project: Project): Promise<void> {
 
   const mapped = mapShots(project, loadedShots, loadedStills);
   shots.value = mapped;
+  projectStills.value = loadedStills;
   seedDemoNoteMap(mapped, loadedNotes);
   markers.value = markersFromData(mapped, loadedStills, loadedNotes);
   selectedId.value = mapped[0]?.id ?? null;
@@ -605,49 +627,69 @@ function insertTerm(term: DetailTerm): void {
 async function captureStill(): Promise<void> {
   const shot = selectedShot.value;
   if (!shot) return;
-  if (demoMode.value || !activeProject.value || !activeProject.value.source.path) {
+  if (
+    demoMode.value ||
+    !activeProject.value ||
+    (!activeProject.value.source.path && !activeProject.value.media.proxyPath)
+  ) {
     showToast('打开本地影片后，才能把当前帧保存进项目。');
     return;
   }
   busy.value = true;
   try {
-    const timeMs = displayTimeMs.value;
-    const extracted = unwrap(
-      await window.api.media.extractFrame({
-        path: activeProject.value.source.path,
-        timeMs,
-        format: 'png',
-      }),
-    );
-    if (!extracted) return;
-    const still = unwrap(
-      await window.api.still.create({
+    let timeMs = displayTimeMs.value;
+    if (player.hasFile) {
+      const frame = unwrap(await window.api.player.getFrame());
+      if (frame) timeMs = frame.timeMs;
+    }
+    const result = unwrap(
+      await window.api.still.capture({
         projectId: activeProject.value.id,
         shotId: shot.id,
         timeMs,
-        filePath: extracted.path,
-        width: extracted.width,
-        height: extracted.height,
         caption: shot.title,
-        role: 'main',
       }),
     );
-    if (still) {
-      markers.value = [
-        ...markers.value,
-        {
-          id: `still-${still.id}`,
-          shotId: shot.id,
-          timeMs,
-          type: 'still',
-          label: `镜头 ${String(shot.index).padStart(2, '0')} 静帧`,
-        },
-      ];
-      showToast(`静帧已截取：${extracted.path}`, 'success');
+    if (result) {
+      upsertStill(result);
+      showToast('当前帧已保存为 PNG，并生成 JPEG 缩略图。', 'success');
     }
   } finally {
     busy.value = false;
   }
+}
+
+function upsertStill(still: Still): void {
+  const next = projectStills.value.filter((item) => item.id !== still.id);
+  next.push(still);
+  projectStills.value = next;
+  if (markers.value.some((marker) => marker.id === `still-${still.id}`)) return;
+  const shot = shots.value.find((item) => item.id === still.shotId);
+  if (!shot) return;
+  markers.value = [
+    ...markers.value,
+    {
+      id: `still-${still.id}`,
+      shotId: shot.id,
+      timeMs: still.timeMs,
+      type: 'still',
+      label: `镜头 ${String(shot.index).padStart(2, '0')} 静帧`,
+    },
+  ];
+}
+
+async function saveAnnotations(annotations: Still['annotations']): Promise<void> {
+  const still = selectedStill.value;
+  if (!still) return;
+  const result = await window.api.still.setAnnotation({
+    id: still.id,
+    annotations: annotations.slice(-500),
+  });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  upsertStill(result.data);
 }
 
 async function saveProject(): Promise<void> {
@@ -772,6 +814,7 @@ onMounted(async () => {
       player.fps = media.fps;
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
+    api.still.onCreated((still) => upsertStill(still)),
   );
 
   await nextTick();
@@ -884,12 +927,14 @@ onBeforeUnmount(() => {
         :note="selectedNote"
         :terms="terms"
         :tags="tags"
+        :still="selectedStill"
         :thumbnail="poster"
         :saving="savingNote"
         :demo-mode="demoMode"
         @update-note="updateNote"
         @insert-term="insertTerm"
         @toggle-tag="toggleTag"
+        @set-annotations="saveAnnotations"
         @save-note="saveCurrentNote()"
         @capture="captureStill"
       />

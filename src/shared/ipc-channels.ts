@@ -54,8 +54,12 @@ export const IPC = {
   STILL_LIST: 'still:list',
   STILL_GET: 'still:get',
   STILL_CREATE: 'still:create',
+  STILL_CAPTURE: 'still:capture',
+  STILL_CAPTURE_AT: 'still:captureAt',
   STILL_UPDATE: 'still:update',
+  STILL_SET_ANNOTATION: 'still:setAnnotation',
   STILL_DELETE: 'still:delete',
+  STILL_EVENT_CREATED: 'still:event:created',
 
   TAG_LIST: 'tag:list',
   TAG_CREATE: 'tag:create',

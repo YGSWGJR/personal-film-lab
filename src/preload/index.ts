@@ -20,7 +20,10 @@ import {
   shotCreateArgsSchema,
   shotUpdateArgsSchema,
   stillCreateArgsSchema,
+  stillCaptureArgsSchema,
+  stillCaptureAtArgsSchema,
   stillListArgsSchema,
+  stillSetAnnotationArgsSchema,
   stillUpdateArgsSchema,
   tagAssignArgsSchema,
   tagCreateArgsSchema,
@@ -64,7 +67,10 @@ import type {
   ShotCreateArgs,
   ShotUpdateArgs,
   Still,
+  StillCaptureArgs,
+  StillCaptureAtArgs,
   StillCreateArgs,
+  StillSetAnnotationArgs,
   StillUpdateArgs,
   Tag,
   TagCreateArgs,
@@ -124,7 +130,10 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.STILL_LIST]: stillListArgsSchema,
   [IPC.STILL_GET]: idArgsSchema,
   [IPC.STILL_CREATE]: stillCreateArgsSchema,
+  [IPC.STILL_CAPTURE]: stillCaptureArgsSchema,
+  [IPC.STILL_CAPTURE_AT]: stillCaptureAtArgsSchema,
   [IPC.STILL_UPDATE]: stillUpdateArgsSchema,
+  [IPC.STILL_SET_ANNOTATION]: stillSetAnnotationArgsSchema,
   [IPC.STILL_DELETE]: idArgsSchema,
 
   [IPC.TAG_LIST]: tagListArgsSchema,
@@ -151,6 +160,7 @@ const EVENT_WHITELIST = {
   onLoaded: IPC.PLAYER_EVENT_LOADED,
   onError: IPC.PLAYER_EVENT_ERROR,
   onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
+  onStillCreated: IPC.STILL_EVENT_CREATED,
 } as const;
 
 async function invoke<T>(channel: string, args: unknown[] = []): Promise<IpcResult<T>> {
@@ -234,8 +244,13 @@ const stillApi = {
   list: (args: { projectId?: string; shotId?: string }) => invoke<Still[]>(IPC.STILL_LIST, [args]),
   get: (args: { id: string }) => invoke<Still>(IPC.STILL_GET, [args]),
   create: (args: StillCreateArgs) => invoke<Still>(IPC.STILL_CREATE, [args]),
+  capture: (args: StillCaptureArgs) => invoke<Still>(IPC.STILL_CAPTURE, [args]),
+  captureAt: (args: StillCaptureAtArgs) => invoke<Still>(IPC.STILL_CAPTURE_AT, [args]),
   update: (args: StillUpdateArgs) => invoke<Still>(IPC.STILL_UPDATE, [args]),
+  setAnnotation: (args: StillSetAnnotationArgs) => invoke<Still>(IPC.STILL_SET_ANNOTATION, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.STILL_DELETE, [args]),
+  onCreated: (listener: (still: Still) => void) =>
+    subscribe<Still>(EVENT_WHITELIST.onStillCreated, listener),
 };
 
 const tagApi = {

@@ -217,6 +217,23 @@ export const stillCreateArgsSchema = z.object({
   annotations: z.array(z.record(z.string(), z.unknown())).max(500).optional(),
 });
 
+export const stillCaptureArgsSchema = z.object({
+  projectId: z.string().min(1),
+  timeMs: z.number().int().min(0),
+  shotId: z.string().min(1).nullable().optional(),
+  caption: nullableText(2000),
+});
+
+export const stillCaptureAtArgsSchema = z.object({
+  shotId: z.string().min(1),
+  caption: nullableText(2000),
+});
+
+export const stillSetAnnotationArgsSchema = z.object({
+  id: z.string().min(1),
+  annotations: z.array(z.record(z.string(), z.unknown())).max(500),
+});
+
 export const stillUpdateArgsSchema = z.object({
   id: z.string().min(1),
   patch: z.object({
