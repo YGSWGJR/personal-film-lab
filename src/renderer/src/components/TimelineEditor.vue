@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { BoundaryChange, TimelineMarker, WorkspaceShot } from '../types/workspace';
+import type { AudioWaveform } from '../../../shared/types';
 
 const props = defineProps<{
   shots: WorkspaceShot[];
@@ -9,6 +10,8 @@ const props = defineProps<{
   currentTimeMs: number;
   durationMs: number;
   fps: number;
+  audioWaveform: AudioWaveform | null;
+  audioLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -21,22 +24,35 @@ const emit = defineEmits<{
 const filmTrackEl = ref<HTMLElement | null>(null);
 const shotCanvasEl = ref<HTMLCanvasElement | null>(null);
 const markerCanvasEl = ref<HTMLCanvasElement | null>(null);
+const audioCanvasEl = ref<HTMLCanvasElement | null>(null);
+const trackContainerEl = ref<HTMLElement | null>(null);
 const draggingBoundary = ref<number | null>(null);
+const zoom = ref(1);
+const viewStartMs = ref(0);
 let activeBoundary: number | null = null;
 let latestBoundaryTime = 0;
 let boundaryMinTime = 0;
 let boundaryMaxTime = 0;
 let drawFrame = 0;
 let resizeObserver: ResizeObserver | null = null;
+let scrubElement: HTMLElement | null = null;
 
 const safeDuration = computed(() => Math.max(1, props.durationMs));
-const playheadPercent = computed(() => clampPercent((props.currentTimeMs / safeDuration.value) * 100));
+const visibleDurationMs = computed(() => safeDuration.value / zoom.value);
+const maxViewStartMs = computed(() => Math.max(0, safeDuration.value - visibleDurationMs.value));
+const playheadPercent = computed(() =>
+  clampPercent(((props.currentTimeMs - viewStartMs.value) / visibleDurationMs.value) * 100),
+);
 const ticks = computed(() =>
   Array.from({ length: 7 }, (_, index) => {
     const percent = index * (100 / 6);
-    return { percent, label: formatTime((safeDuration.value * percent) / 100) };
+    return {
+      percent,
+      label: formatTime(viewStartMs.value + (visibleDurationMs.value * percent) / 100),
+    };
   }),
 );
+const zoomLabel = computed(() => (zoom.value <= 1 ? '1×' : `${zoom.value.toFixed(zoom.value < 4 ? 1 : 0)}×`));
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
@@ -52,14 +68,76 @@ function formatTime(ms: number): string {
 function timeFromClientX(clientX: number, element: HTMLElement | null): number {
   const rect = element?.getBoundingClientRect();
   if (!rect || rect.width <= 0) return 0;
-  const raw = ((clientX - rect.left) / rect.width) * safeDuration.value;
+  const raw = viewStartMs.value + ((clientX - rect.left) / rect.width) * visibleDurationMs.value;
   const frameMs = 1000 / Math.max(1, props.fps || 24);
   const frameAlignedMs = Math.round(raw / frameMs) * frameMs;
   return Math.max(0, Math.min(Math.round(safeDuration.value), Math.round(frameAlignedMs)));
 }
 
+function clampViewStart(value: number): number {
+  return Math.max(0, Math.min(maxViewStartMs.value, Math.round(value)));
+}
+
+function resetZoom(): void {
+  zoom.value = 1;
+  viewStartMs.value = 0;
+}
+
+function setZoom(nextZoom: number, anchorClientX?: number): void {
+  const clamped = Math.max(1, Math.min(32, nextZoom));
+  if (Math.abs(clamped - zoom.value) < 0.001) return;
+  const rect = trackContainerEl.value?.getBoundingClientRect();
+  const ratio = rect && rect.width > 0 && anchorClientX !== undefined
+    ? Math.max(0, Math.min(1, (anchorClientX - rect.left) / rect.width))
+    : 0.5;
+  const anchorTime = viewStartMs.value + visibleDurationMs.value * ratio;
+  zoom.value = clamped;
+  viewStartMs.value = clampViewStart(anchorTime - (safeDuration.value / clamped) * ratio);
+  scheduleDraw();
+}
+
+function onTimelineWheel(event: WheelEvent): void {
+  if (event.ctrlKey || event.metaKey) {
+    event.preventDefault();
+    const factor = Math.exp(-event.deltaY * 0.002);
+    setZoom(zoom.value * factor, event.clientX);
+    return;
+  }
+  if (zoom.value <= 1) return;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.shiftKey ? event.deltaY : 0;
+  if (delta === 0) return;
+  event.preventDefault();
+  const rect = trackContainerEl.value?.getBoundingClientRect();
+  if (!rect || rect.width <= 0) return;
+  viewStartMs.value = clampViewStart(viewStartMs.value + (delta / rect.width) * visibleDurationMs.value);
+  scheduleDraw();
+}
+
 function seekFromPointer(event: PointerEvent): void {
-  emit('seek', timeFromClientX(event.clientX, filmTrackEl.value));
+  beginScrub(event, filmTrackEl.value);
+}
+
+function seekFromAudioPointer(event: PointerEvent): void {
+  beginScrub(event, audioCanvasEl.value);
+}
+
+function beginScrub(event: PointerEvent, element: HTMLElement | null): void {
+  if (!element) return;
+  event.preventDefault();
+  scrubElement = element;
+  emit('seek', timeFromClientX(event.clientX, element));
+  window.addEventListener('pointermove', scrubMove);
+  window.addEventListener('pointerup', finishScrub, { once: true });
+}
+
+function scrubMove(event: PointerEvent): void {
+  if (!scrubElement) return;
+  emit('seek', timeFromClientX(event.clientX, scrubElement));
+}
+
+function finishScrub(): void {
+  window.removeEventListener('pointermove', scrubMove);
+  scrubElement = null;
 }
 
 function findShotIndexAtX(clientX: number): number {
@@ -84,7 +162,10 @@ function findBoundaryAtX(clientX: number): number {
   const rect = canvas?.getBoundingClientRect();
   if (!rect) return -1;
   for (let index = 0; index < props.shots.length - 1; index += 1) {
-    const boundaryX = rect.left + (props.shots[index].endMs / safeDuration.value) * rect.width;
+    const boundaryX =
+      rect.left +
+      ((props.shots[index].endMs - viewStartMs.value) / visibleDurationMs.value) * rect.width;
+    if (boundaryX < rect.left - 5 || boundaryX > rect.right + 5) continue;
     if (Math.abs(clientX - boundaryX) <= 5) return index;
   }
   return -1;
@@ -115,7 +196,9 @@ function onMarkerPointerDown(event: PointerEvent): void {
   let nearest: TimelineMarker | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
   for (const marker of props.markers) {
-    const distance = Math.abs((marker.timeMs / safeDuration.value) * rect.width - targetX);
+    const distance = Math.abs(
+      ((marker.timeMs - viewStartMs.value) / visibleDurationMs.value) * rect.width - targetX,
+    );
     if (distance < nearestDistance) {
       nearest = marker;
       nearestDistance = distance;
@@ -186,25 +269,33 @@ function drawTimeline(): void {
   drawFrame = 0;
   const shotCanvas = shotCanvasEl.value;
   const markerCanvas = markerCanvasEl.value;
-  if (!shotCanvas || !markerCanvas) return;
+  const audioCanvas = audioCanvasEl.value;
+  if (!shotCanvas || !markerCanvas || !audioCanvas) return;
 
   const shotContext = resizeCanvas(shotCanvas);
   const markerContext = resizeCanvas(markerCanvas);
-  if (!shotContext || !markerContext) return;
+  const audioContext = resizeCanvas(audioCanvas);
+  if (!shotContext || !markerContext || !audioContext) return;
 
   const shotRect = shotCanvas.getBoundingClientRect();
   const markerRect = markerCanvas.getBoundingClientRect();
+  const audioRect = audioCanvas.getBoundingClientRect();
   const shotWidth = shotRect.width;
   const markerWidth = markerRect.width;
+  const audioWidth = audioRect.width;
   shotContext.clearRect(0, 0, shotWidth, 28);
   markerContext.clearRect(0, 0, markerWidth, 24);
+  audioContext.clearRect(0, 0, audioWidth, 30);
 
   const selectedId = props.selectedId;
   const currentTime = props.currentTimeMs;
   for (let index = 0; index < props.shots.length; index += 1) {
     const shot = props.shots[index];
-    const x = (shot.startMs / safeDuration.value) * shotWidth;
-    const rawWidth = ((shot.endMs - shot.startMs) / safeDuration.value) * shotWidth;
+    if (shot.endMs < viewStartMs.value || shot.startMs > viewStartMs.value + visibleDurationMs.value) {
+      continue;
+    }
+    const x = ((shot.startMs - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
+    const rawWidth = ((shot.endMs - shot.startMs) / visibleDurationMs.value) * shotWidth;
     const width = Math.max(1, rawWidth - 0.7);
     const isCurrent = currentTime >= shot.startMs && currentTime < shot.endMs;
     const isSelected = shot.id === selectedId;
@@ -232,7 +323,7 @@ function drawTimeline(): void {
   if (draggingBoundary.value !== null) {
     const shot = props.shots[draggingBoundary.value];
     if (shot) {
-      const x = (shot.endMs / safeDuration.value) * shotWidth;
+      const x = ((shot.endMs - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
       shotContext.strokeStyle = '#fbbf24';
       shotContext.lineWidth = 2;
       shotContext.beginPath();
@@ -242,7 +333,7 @@ function drawTimeline(): void {
     }
   }
 
-  const playheadX = (currentTime / safeDuration.value) * shotWidth;
+  const playheadX = ((currentTime - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
   shotContext.strokeStyle = '#ffffff';
   shotContext.lineWidth = 1;
   shotContext.beginPath();
@@ -261,7 +352,10 @@ function drawTimeline(): void {
 
   markerContext.fillStyle = '#22c55e';
   for (const marker of props.markers) {
-    const x = (marker.timeMs / safeDuration.value) * markerWidth;
+    if (marker.timeMs < viewStartMs.value || marker.timeMs > viewStartMs.value + visibleDurationMs.value) {
+      continue;
+    }
+    const x = ((marker.timeMs - viewStartMs.value) / visibleDurationMs.value) * markerWidth;
     markerContext.fillRect(x - 1, 2, 2, 10);
   }
 
@@ -271,6 +365,42 @@ function drawTimeline(): void {
   markerContext.moveTo(playheadX, 0);
   markerContext.lineTo(playheadX, 24);
   markerContext.stroke();
+
+  audioContext.strokeStyle = 'rgba(100, 116, 139, 0.52)';
+  audioContext.lineWidth = 1;
+  audioContext.setLineDash([3, 3]);
+  audioContext.beginPath();
+  audioContext.moveTo(0, 15);
+  audioContext.lineTo(audioWidth, 15);
+  audioContext.stroke();
+  audioContext.setLineDash([]);
+
+  if (props.audioWaveform) {
+    const bucketWidthMs = props.audioWaveform.bucketMs;
+    for (const bucket of props.audioWaveform.buckets) {
+      if (
+        bucket.startMs + bucketWidthMs < viewStartMs.value ||
+        bucket.startMs > viewStartMs.value + visibleDurationMs.value
+      ) {
+        continue;
+      }
+      const x = ((bucket.startMs - viewStartMs.value) / visibleDurationMs.value) * audioWidth;
+      const width = Math.max(1, (bucketWidthMs / visibleDurationMs.value) * audioWidth - 0.35);
+      const peakHeight = Math.max(0.5, bucket.peak * 13);
+      const rmsHeight = Math.max(0.5, bucket.rms * 13);
+      audioContext.fillStyle = 'rgba(56, 189, 248, 0.24)';
+      audioContext.fillRect(x, 15 - peakHeight, width, peakHeight * 2);
+      audioContext.fillStyle = 'rgba(125, 211, 252, 0.68)';
+      audioContext.fillRect(x, 15 - rmsHeight, width, rmsHeight * 2);
+    }
+  }
+
+  audioContext.strokeStyle = '#ef4444';
+  audioContext.lineWidth = 1;
+  audioContext.beginPath();
+  audioContext.moveTo(playheadX, 0);
+  audioContext.lineTo(playheadX, 30);
+  audioContext.stroke();
 }
 
 function scheduleDraw(): void {
@@ -282,12 +412,26 @@ watch(
   () => [
     props.shots,
     props.markers,
+    props.audioWaveform,
     props.selectedId,
     props.currentTimeMs,
     props.durationMs,
     draggingBoundary.value,
+    zoom.value,
+    viewStartMs.value,
   ],
   scheduleDraw,
+);
+
+watch(
+  () => props.currentTimeMs,
+  (timeMs) => {
+    if (zoom.value <= 1) return;
+    const end = viewStartMs.value + visibleDurationMs.value;
+    if (timeMs >= viewStartMs.value && timeMs <= end) return;
+    viewStartMs.value = clampViewStart(timeMs - visibleDurationMs.value * 0.12);
+    scheduleDraw();
+  },
 );
 
 onMounted(async () => {
@@ -295,6 +439,7 @@ onMounted(async () => {
   resizeObserver = new ResizeObserver(scheduleDraw);
   if (shotCanvasEl.value) resizeObserver.observe(shotCanvasEl.value);
   if (markerCanvasEl.value) resizeObserver.observe(markerCanvasEl.value);
+  if (audioCanvasEl.value) resizeObserver.observe(audioCanvasEl.value);
   scheduleDraw();
 });
 
@@ -304,14 +449,20 @@ onBeforeUnmount(() => {
   resizeObserver = null;
   window.removeEventListener('pointermove', handleBoundaryMove);
   window.removeEventListener('pointerup', finishBoundaryDrag);
+  window.removeEventListener('pointermove', scrubMove);
+  window.removeEventListener('pointerup', finishScrub);
 });
 </script>
 
 <template>
-  <section class="timeline">
+  <section class="timeline" @wheel="onTimelineWheel">
     <div class="ruler-row">
-      <span class="label"></span>
-      <div class="track-container">
+      <span class="label">
+        <button class="zoom-label" type="button" title="重置缩放；Ctrl+滚轮缩放，Shift+滚轮平移" @click="resetZoom">
+          {{ zoomLabel }}
+        </button>
+      </span>
+      <div ref="trackContainerEl" class="track-container">
         <span v-for="tick in ticks" :key="tick.percent" class="tick" :style="{ left: `${tick.percent}%` }">
           <i></i><em>{{ tick.label }}</em>
         </span>
@@ -359,13 +510,29 @@ onBeforeUnmount(() => {
         ></canvas>
       </div>
     </div>
+
+    <div class="track-row">
+      <span class="label audio-label">
+        音频
+        <i v-if="audioLoading" class="audio-loading-dot"></i>
+      </span>
+      <div class="track canvas-track audio-track">
+        <canvas
+          ref="audioCanvasEl"
+          class="timeline-canvas"
+          role="img"
+          :aria-label="audioWaveform ? `${audioWaveform.buckets.length} 个音频包络分桶` : '音频波形加载中或不可用'"
+          @pointerdown="seekFromAudioPointer"
+        ></canvas>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
 .timeline {
   display: flex;
-  height: 100px;
+  height: 130px;
   flex: 0 0 auto;
   flex-direction: column;
   justify-content: center;
@@ -397,6 +564,23 @@ onBeforeUnmount(() => {
 .label {
   color: var(--text-faint);
   font-size: 10px;
+}
+
+.zoom-label {
+  width: 34px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid rgba(100, 116, 139, 0.3);
+  border-radius: 3px;
+  background: rgba(38, 52, 73, 0.42);
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.zoom-label:hover {
+  border-color: var(--border-strong);
+  color: var(--text-secondary);
 }
 
 .tick {
@@ -466,6 +650,34 @@ onBeforeUnmount(() => {
 
 .marker-track {
   height: 24px;
+}
+
+.audio-track {
+  height: 30px;
+}
+
+.audio-label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.audio-loading-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: audio-pulse 900ms ease-in-out infinite;
+}
+
+.audio-track .timeline-canvas {
+  cursor: crosshair;
+}
+
+@keyframes audio-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .timeline-canvas {

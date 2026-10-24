@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import emptyProjectImage from '../../../assets/design/design_empty_project_1024x768.png';
 import emptyShotsImage from '../../../assets/design/design_empty_shots_1024x768.png';
 import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x768.png';
@@ -24,6 +24,7 @@ import type { SkeletonState } from './env';
 import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from './types/workspace';
 import type {
   AppInfo,
+  AudioWaveform,
   DetectProgressEvent,
   DetectResult,
   ExportProgressEvent,
@@ -35,6 +36,7 @@ import type {
   PlayerState,
   Project,
   RenderBounds,
+  ScopeAnalysis,
   Shot,
   Still,
   StoryboardExportArgs,
@@ -82,7 +84,19 @@ const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
 const detectionJobId = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
+const scopesOpen = ref(true);
+const scopeAnalysis = ref<ScopeAnalysis | null>(null);
+const scopeLoading = ref(false);
+const scopeError = ref<string | null>(null);
+const audioWaveform = ref<AudioWaveform | null>(null);
+const audioLoading = ref(false);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
+let scopeRequestTimer: ReturnType<typeof setTimeout> | null = null;
+let scopeGeneration = 0;
+let audioGeneration = 0;
+let scopeInFlight = false;
+let pendingScopeRequest: { path: string; timeMs: number; generation: number } | null = null;
+let lastScopeRequestStartedAt = 0;
 const unsubscribers: Array<() => void> = [];
 
 const player = reactive<PlayerState>({
@@ -138,6 +152,9 @@ const displayDurationMs = computed(() => {
   return Math.max(DEMO_PROJECT.durationMs, lastShotEnd);
 });
 const displayTimeMs = computed(() => (player.hasFile ? player.timeMs : previewTimeMs.value));
+const scopeMediaPath = computed(
+  () => activeProject.value?.source.path || activeProject.value?.media.proxyPath || null,
+);
 const shotListTitle = computed(() => (demoMode.value ? '示例镜头' : activeProject.value?.name ?? '镜头列表'));
 const topTimecode = computed(
   () => `${formatReadout(displayTimeMs.value)} / ${formatReadout(displayDurationMs.value)}`,
@@ -287,9 +304,124 @@ async function loadTags(): Promise<void> {
   tags.value = loaded ?? createDemoTags();
 }
 
+function resetScopeMedia(): void {
+  scopeGeneration += 1;
+  audioGeneration += 1;
+  if (scopeRequestTimer) clearTimeout(scopeRequestTimer);
+  scopeRequestTimer = null;
+  pendingScopeRequest = null;
+  scopeAnalysis.value = null;
+  scopeLoading.value = false;
+  scopeError.value = null;
+  audioWaveform.value = null;
+  audioLoading.value = false;
+}
+
+function prepareScopeMedia(project: Project): void {
+  resetScopeMedia();
+  const path = project.source.path || project.media.proxyPath;
+  if (!path) return;
+  void loadAudioWaveform(path, audioGeneration);
+}
+
+async function loadAudioWaveform(path: string, generation: number): Promise<void> {
+  audioLoading.value = true;
+  try {
+    const result = await window.api.scope.extractAudioWaveform({ path, bucketMs: 100 });
+    if (generation !== audioGeneration) return;
+    if (!result.ok) {
+      console.warn(`[scope] 音频波形提取失败：${result.error.code} ${result.error.message}`);
+      return;
+    }
+    audioWaveform.value = result.data;
+  } catch (error) {
+    if (generation === audioGeneration) {
+      console.warn('[scope] 音频波形提取异常', error);
+    }
+  } finally {
+    if (generation === audioGeneration) audioLoading.value = false;
+  }
+}
+
+function scheduleScopeAnalysis(timeMs: number, immediate = false): void {
+  const path = scopeMediaPath.value;
+  if (!scopesOpen.value || demoMode.value || !path) {
+    if (scopeRequestTimer) clearTimeout(scopeRequestTimer);
+    scopeRequestTimer = null;
+    pendingScopeRequest = null;
+    return;
+  }
+  if (scopeRequestTimer) {
+    clearTimeout(scopeRequestTimer);
+    scopeRequestTimer = null;
+  }
+  const delay =
+    immediate || player.paused
+      ? 0
+      : Math.max(0, 300 - (performance.now() - lastScopeRequestStartedAt));
+  scopeRequestTimer = setTimeout(() => {
+    scopeRequestTimer = null;
+    pendingScopeRequest = { path, timeMs: Math.max(0, Math.round(timeMs)), generation: scopeGeneration };
+    void pumpScopeAnalysis();
+  }, delay);
+}
+
+async function pumpScopeAnalysis(): Promise<void> {
+  if (scopeInFlight) return;
+  scopeInFlight = true;
+  try {
+    while (pendingScopeRequest) {
+      const request = pendingScopeRequest;
+      pendingScopeRequest = null;
+      lastScopeRequestStartedAt = performance.now();
+      scopeLoading.value = true;
+      try {
+        const result = await window.api.scope.analyzeFrame({
+          path: request.path,
+          timeMs: request.timeMs,
+        });
+        if (
+          request.generation !== scopeGeneration ||
+          !scopesOpen.value ||
+          scopeMediaPath.value !== request.path
+        ) {
+          continue;
+        }
+        if (result.ok) {
+          scopeAnalysis.value = result.data;
+          scopeError.value = null;
+        } else {
+          scopeError.value = `${result.error.code}: ${result.error.message}`;
+          console.warn(`[scope] 当前帧分析失败：${result.error.code} ${result.error.message}`);
+        }
+      } catch (error) {
+        scopeError.value = error instanceof Error ? error.message : String(error);
+        console.warn('[scope] 当前帧分析异常', error);
+      } finally {
+        if (request.generation === scopeGeneration) scopeLoading.value = false;
+      }
+    }
+  } finally {
+    scopeInFlight = false;
+  }
+}
+
+function toggleScopes(): void {
+  scopesOpen.value = !scopesOpen.value;
+  if (scopesOpen.value) scheduleScopeAnalysis(displayTimeMs.value, true);
+}
+
+watch(
+  [displayTimeMs, () => player.paused, scopesOpen, scopeMediaPath],
+  ([timeMs]) => scheduleScopeAnalysis(timeMs),
+  { flush: 'post' },
+);
+
 async function loadProject(project: Project): Promise<void> {
+  const projectChanged = activeProject.value?.id !== project.id;
   activeProject.value = project;
   demoMode.value = false;
+  if (projectChanged) prepareScopeMedia(project);
   const [shotResult, stillResult, noteResult] = await Promise.all([
     window.api.shot.list({ projectId: project.id }),
     window.api.still.list({ projectId: project.id }),
@@ -955,6 +1087,7 @@ async function toggleDemoWorkspace(): Promise<void> {
   if (!demoMode.value) {
     if (detecting.value) await cancelDetection();
     await closePlayer();
+    resetScopeMedia();
     activeProject.value = null;
     demoMode.value = true;
     detectionOpen.value = false;
@@ -1227,6 +1360,9 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
   stopDetectionPolling();
+  if (scopeRequestTimer) clearTimeout(scopeRequestTimer);
+  scopeGeneration += 1;
+  audioGeneration += 1;
 });
 </script>
 
@@ -1318,6 +1454,12 @@ onBeforeUnmount(() => {
         :display-duration-ms="displayDurationMs"
         :display-time-ms="displayTimeMs"
         :busy="busy"
+        :scopes-open="scopesOpen"
+        :scope-analysis="scopeAnalysis"
+        :scope-loading="scopeLoading"
+        :scope-error="scopeError"
+        :audio-waveform="audioWaveform"
+        :audio-loading="audioLoading"
         @open="openVideo"
         @toggle="togglePlayback"
         @step="stepFrame"
@@ -1327,6 +1469,7 @@ onBeforeUnmount(() => {
         @boundary-commit="commitBoundary"
         @bounds="setPlayerBounds"
         @capture="captureStill"
+        @toggle-scopes="toggleScopes"
       />
 
       <ShotDetailPanel

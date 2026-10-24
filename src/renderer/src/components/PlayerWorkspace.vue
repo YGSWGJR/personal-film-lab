@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
+import ScopesPanel from './ScopesPanel.vue';
 import TimelineEditor from './TimelineEditor.vue';
 import type { BoundaryChange, TimelineMarker, WorkspaceShot } from '../types/workspace';
-import type { PlayerState, RenderBounds } from '../../../shared/types';
+import type {
+  AudioWaveform,
+  PlayerState,
+  RenderBounds,
+  ScopeAnalysis,
+} from '../../../shared/types';
 
 const props = defineProps<{
   player: PlayerState;
@@ -14,6 +20,12 @@ const props = defineProps<{
   displayDurationMs: number;
   displayTimeMs: number;
   busy: boolean;
+  scopesOpen: boolean;
+  scopeAnalysis: ScopeAnalysis | null;
+  scopeLoading: boolean;
+  scopeError: string | null;
+  audioWaveform: AudioWaveform | null;
+  audioLoading: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +38,7 @@ const emit = defineEmits<{
   boundaryCommit: [change: BoundaryChange];
   bounds: [bounds: RenderBounds];
   capture: [];
+  toggleScopes: [];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
@@ -122,6 +135,14 @@ onBeforeUnmount(() => {
 
     </section>
 
+    <ScopesPanel
+      :open="scopesOpen"
+      :analysis="scopeAnalysis"
+      :loading="scopeLoading"
+      :error="scopeError"
+      @toggle="emit('toggleScopes')"
+    />
+
     <TimelineEditor
       :shots="shots"
       :markers="markers"
@@ -129,6 +150,8 @@ onBeforeUnmount(() => {
       :current-time-ms="displayTimeMs"
       :duration-ms="displayDurationMs"
       :fps="player.hasFile ? player.fps : 500 / 21"
+      :audio-waveform="audioWaveform"
+      :audio-loading="audioLoading"
       @seek="emit('seek', $event)"
       @select="emit('selectShot', $event)"
       @boundary-change="emit('boundaryChange', $event)"
@@ -333,10 +356,10 @@ onBeforeUnmount(() => {
 .viewer-card {
   display: flex;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  min-height: 360px;
+  min-height: 240px;
   border: 1px solid var(--border);
   border-radius: 8px 8px 0 0;
   background: var(--bg-deep);
