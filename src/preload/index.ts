@@ -4,6 +4,8 @@ import { IPC } from '../shared/ipc-channels';
 import { fail } from '../shared/ipc-result';
 import {
   emptyArgsSchema,
+  dataImportProjectArgsSchema,
+  dataScanCandidatesArgsSchema,
   detectApplyArgsSchema,
   detectCheckEnvArgsSchema,
   detectCancelArgsSchema,
@@ -53,6 +55,7 @@ import {
 import type {
   AppInfo,
   AudioWaveform,
+  CandidateSource,
   CancelJobResult,
   DetectApplyArgs,
   DetectEnvCheck,
@@ -67,6 +70,7 @@ import type {
   ExtractFramesResult,
   ExtractFrameResult,
   FrameInfo,
+  ImportResult,
   IpcResult,
   MediaInfo,
   MediaProbeResult,
@@ -150,6 +154,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.PLAYER_SET_VOLUME]: playerSetVolumeArgsSchema,
   [IPC.PLAYER_SET_BOUNDS]: playerSetBoundsArgsSchema,
   [IPC.PLAYER_SET_LAYER]: playerSetLayerArgsSchema,
+  [IPC.DATA_SCAN_CANDIDATES]: dataScanCandidatesArgsSchema,
+  [IPC.DATA_IMPORT_PROJECT]: dataImportProjectArgsSchema,
   [IPC.MEDIA_PROBE]: mediaProbeArgsSchema,
   [IPC.MEDIA_EXTRACT_FRAME]: mediaExtractFrameArgsSchema,
   [IPC.MEDIA_EXTRACT_FRAMES]: mediaExtractFramesArgsSchema,
@@ -310,6 +316,12 @@ const detectApi = {
     subscribe<DetectDoneEvent>(EVENT_WHITELIST.onDetectDone, listener),
 };
 
+const dataApi = {
+  scanCandidates: () => invoke<CandidateSource[]>(IPC.DATA_SCAN_CANDIDATES, [{}]),
+  importProject: (args: { root: string; projectId: string }) =>
+    invoke<ImportResult>(IPC.DATA_IMPORT_PROJECT, [args]),
+};
+
 const scopeApi = {
   extractAudioWaveform: (args: ScopeExtractAudioWaveformArgs) =>
     invoke<AudioWaveform>(IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM, [args]),
@@ -408,6 +420,7 @@ const api: WindowApi = {
   note: noteApi,
   term: termApi,
   export: exportApi,
+  data: dataApi,
   stats: statsApi,
 };
 

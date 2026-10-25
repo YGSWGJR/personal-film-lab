@@ -34,12 +34,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let settingsChecks: Record<string, unknown> = {};
   let sessionChecks: Record<string, unknown> = {};
   let dataChecks: Record<string, unknown> = {};
+  let importChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -60,7 +61,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'app,detect,export,media,note,player,project,scope,session,settings,shot,stats,still,tag,term';
+      state?.apiKeys === 'app,data,detect,export,media,note,player,project,scope,session,settings,shot,stats,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -120,6 +121,11 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, dataChecksAssertions(dataChecks));
     }
 
+    if (process.env['SMOKE_IMPORT_DATA'] === '1') {
+      importChecks = await runImportChecks(win);
+      Object.assign(checks, importChecksAssertions(importChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -133,7 +139,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -210,6 +216,57 @@ function dataChecksAssertions(result: Record<string, any>): Record<string, boole
     dataAssetPackage: result.assetOk === true,
     dataAssetRestored: result.assetRestoredOk === true,
   };
+}
+
+function importChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    importScan: result.scanOk === true,
+    importProject: result.importOk === true,
+    importListed: result.listOk === true,
+    importIdempotent: result.idempotentOk === true,
+  };
+}
+
+async function runImportChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        const scanned = await window.api.data.scanCandidates();
+        out.scanOk = scanned.ok === true
+          && scanned.data.some((source) => source.projects.length > 0);
+        if (!out.scanOk) {
+          out.scanResult = scanned;
+          return out;
+        }
+        const source = scanned.data.find((item) => item.projects.length > 0);
+        const candidate = source.projects[0];
+        out.candidate = candidate;
+        const imported = await window.api.data.importProject({
+          root: source.root,
+          projectId: candidate.id,
+        });
+        out.importOk = imported.ok === true
+          && imported.data.imported === true
+          && imported.data.reason === 'imported';
+        out.importResult = imported;
+        const projects = await window.api.project.list();
+        out.listOk = projects.ok === true
+          && projects.data.some((project) => project.id === candidate.id);
+        const repeated = await window.api.data.importProject({
+          root: source.root,
+          projectId: candidate.id,
+        });
+        out.idempotentOk = repeated.ok === true
+          && repeated.data.imported === false
+          && repeated.data.reason === 'already-exists';
+        out.repeated = repeated;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
 }
 
 async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<Record<string, any>> {

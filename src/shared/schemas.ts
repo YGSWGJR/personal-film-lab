@@ -26,6 +26,13 @@ export const settingsChooseDirectoryArgsSchema = z.object({
   defaultPath: z.string().trim().min(1).max(2000).optional(),
 });
 
+export const dataScanCandidatesArgsSchema = z.object({});
+
+export const dataImportProjectArgsSchema = z.object({
+  root: z.string().min(1).max(4000),
+  projectId: z.string().min(1).max(200),
+});
+
 export const workspaceStateSchema = z.object({
   projectId: z.string().min(1).nullable(),
   timeMs: z.number().finite().min(0),

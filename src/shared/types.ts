@@ -31,10 +31,33 @@ export interface SettingsChooseDirectoryArgs {
   defaultPath?: string;
 }
 
+export interface CandidateProject {
+  id: string;
+  name: string;
+  shotCount: number;
+  updatedAt: string;
+}
+
+export interface CandidateSource {
+  root: string;
+  projects: CandidateProject[];
+}
+
+export interface ImportResult {
+  project: Project;
+  imported: boolean;
+  reason: 'imported' | 'already-exists';
+}
+
 export interface SettingsApi {
   get(): Promise<IpcResult<Settings>>;
   set(args: SettingsSetArgs): Promise<IpcResult<Settings>>;
   chooseDirectory(args: SettingsChooseDirectoryArgs): Promise<IpcResult<string | null>>;
+}
+
+export interface DataApi {
+  scanCandidates(): Promise<IpcResult<CandidateSource[]>>;
+  importProject(args: { root: string; projectId: string }): Promise<IpcResult<ImportResult>>;
 }
 
 export interface WorkspaceState {
@@ -339,6 +362,7 @@ export interface WindowApi {
   note: NoteApi;
   term: TermApi;
   export: ExportApi;
+  data: DataApi;
   detect: DetectApi;
   stats: StatsApi;
 }

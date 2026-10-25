@@ -3,6 +3,7 @@ import { IPC } from '../../shared/ipc-channels';
 import { withEnvelope } from '../../shared/ipc-result';
 import type {
   AppInfo,
+  CandidateSource,
   CancelJobResult,
   DetectApplyArgs,
   DetectApplyResult,
@@ -14,6 +15,7 @@ import type {
   ExtractFramesArgs,
   ExtractFramesResult,
   ExtractFrameResult,
+  ImportResult,
   MediaInfo,
   MediaProbeArgs,
   MediaProbeResult,
@@ -66,6 +68,7 @@ import type { CaptureService } from '../capture/capture-service';
 import type { DetectService } from '../detect/detect-service';
 import type { ExportService } from '../export/export-service';
 import { DataError } from '../../data/errors';
+import { importProjectFrom, scanCandidateRoots } from '../data/import-service';
 import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
@@ -312,6 +315,18 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.DETECT_APPLY,
     withEnvelope((args: DetectApplyArgs): DetectApplyResult => requireDetect().apply(args)),
+  );
+
+  // ---------- data: external project import ----------
+  ipcMain.handle(
+    IPC.DATA_SCAN_CANDIDATES,
+    withEnvelope((): CandidateSource[] => scanCandidateRoots(requireData())),
+  );
+  ipcMain.handle(
+    IPC.DATA_IMPORT_PROJECT,
+    withEnvelope((args: { root: string; projectId: string }): ImportResult =>
+      importProjectFrom(requireData(), args.root, args.projectId),
+    ),
   );
 
   // ---------- data: project ----------

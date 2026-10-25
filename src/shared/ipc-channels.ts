@@ -48,6 +48,10 @@ export const IPC = {
   /** media 域（E 方向） */
   MEDIA_EVENT_PROGRESS: 'media:event:progress',
 
+  /** data 域：跨数据根扫描与项目导入 */
+  DATA_SCAN_CANDIDATES: 'data:scanCandidates',
+  DATA_IMPORT_PROJECT: 'data:importProject',
+
   /** detect 域（S01 §5.4 / §8.2） */
   DETECT_CHECK_ENV: 'detect:checkEnv',
   DETECT_RUN: 'detect:run',

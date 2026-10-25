@@ -28,6 +28,11 @@ export function environmentDataRoot(): string | null {
   return configured ? resolve(configured) : null;
 }
 
+export function resolveCandidateDataRoots(): string[] {
+  const roots = [resolveDataRoot(), join(app.getPath('userData'), 'lapian')];
+  return [...new Set(roots.map((root) => resolve(root)))];
+}
+
 export function resolveDataRoot(): string {
   return environmentDataRoot() ?? resolve(settings().dataRoot);
 }

@@ -27,6 +27,8 @@ import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from '
 import type {
   AppInfo,
   AudioWaveform,
+  CandidateProject,
+  CandidateSource,
   DetectEnvCheck,
   DetectProgressEvent,
   DetectResult,
@@ -89,6 +91,11 @@ const detectionProgress = ref<DetectProgressEvent | null>(null);
 const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
 const detectionJobId = ref<string | null>(null);
+const importWizardOpen = ref(false);
+const importWizardItems = ref<Array<CandidateProject & { root: string; key: string }>>([]);
+const importWizardSelected = ref<string[]>([]);
+const importWizardBusy = ref(false);
+const importWizardError = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
 const audioWaveform = ref<AudioWaveform | null>(null);
 const audioLoading = ref(false);
@@ -1041,6 +1048,88 @@ function showUrlImportPending(): void {
   showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
 }
 
+function openImportWizard(sources: CandidateSource[]): void {
+  importWizardItems.value = sources.flatMap((source) =>
+    source.projects.map((project) => ({
+      ...project,
+      root: source.root,
+      key: `${source.root}::${project.id}`,
+    })),
+  );
+  importWizardSelected.value = [];
+  importWizardBusy.value = false;
+  importWizardError.value = null;
+  importWizardOpen.value = true;
+}
+
+async function scanStartupCandidates(): Promise<void> {
+  const result = await window.api.data.scanCandidates();
+  if (!result.ok) {
+    console.warn(`[data-import] ${result.error.code} ${result.error.message}`);
+    return;
+  }
+  if (result.data.some((source) => source.projects.length > 0)) {
+    openImportWizard(result.data);
+  }
+}
+
+function toggleImportCandidate(key: string): void {
+  importWizardSelected.value = importWizardSelected.value.includes(key)
+    ? importWizardSelected.value.filter((item) => item !== key)
+    : [...importWizardSelected.value, key];
+}
+
+async function importCandidates(importAll: boolean): Promise<void> {
+  if (importWizardBusy.value) return;
+  const selected = importAll
+    ? importWizardItems.value
+    : importWizardItems.value.filter((item) => importWizardSelected.value.includes(item.key));
+  if (selected.length === 0) {
+    importWizardError.value = '请至少选择一个项目';
+    return;
+  }
+
+  importWizardBusy.value = true;
+  importWizardError.value = null;
+  const imported: Project[] = [];
+  const failures: string[] = [];
+  try {
+    for (const item of selected) {
+      const result = await window.api.data.importProject({ root: item.root, projectId: item.id });
+      if (result.ok) imported.push(result.data.project);
+      else failures.push(`${item.name}：${result.error.message}`);
+    }
+    if (imported.length === 0) {
+      importWizardError.value = failures.join('\n') || '没有可导入的项目';
+      return;
+    }
+    importWizardOpen.value = false;
+    const projects = unwrap(await window.api.project.list());
+    const preferred = imported[0] ?? projects?.[0] ?? null;
+    if (preferred) await loadProject(preferred);
+    else enterDemoWorkspace();
+    showToast(
+      failures.length > 0
+        ? `已导入 ${imported.length} 个项目，${failures.length} 个失败。`
+        : `已导入 ${imported.length} 个项目。`,
+      failures.length > 0 ? 'default' : 'success',
+      '项目导入完成',
+    );
+  } finally {
+    importWizardBusy.value = false;
+  }
+}
+
+async function dismissImportWizard(): Promise<void> {
+  if (importWizardBusy.value) return;
+  importWizardOpen.value = false;
+}
+
+function formatCandidateTime(value: string): string {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('zh-CN') : value;
+}
+
 function enterDemoWorkspace(): void {
   const fallback = createDemoShots();
   activeProject.value = null;
@@ -1427,8 +1516,10 @@ onMounted(async () => {
       void api.session.clear();
     } else if (projectResult.ok && projectResult.data.length > 0) {
       await loadProject(projectResult.data[0]);
+      await scanStartupCandidates();
     } else {
       await loadTerms();
+      await scanStartupCandidates();
     }
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), 'error');
@@ -1667,6 +1758,61 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
+    <transition name="import-modal">
+      <div v-if="importWizardOpen" class="import-modal-mask">
+        <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="import-wizard-title">
+          <header class="import-wizard-head">
+            <div>
+              <p>数据目录恢复</p>
+              <h2 id="import-wizard-title">发现可恢复的项目</h2>
+              <span>这些项目来自其他数据目录。导入只会复制数据，不会移动或修改原项目。</span>
+            </div>
+          </header>
+
+          <div class="import-candidate-list">
+            <label
+              v-for="item in importWizardItems"
+              :key="item.key"
+              class="import-candidate"
+              :class="{ selected: importWizardSelected.includes(item.key) }"
+            >
+              <input
+                type="checkbox"
+                :checked="importWizardSelected.includes(item.key)"
+                :disabled="importWizardBusy"
+                @change="toggleImportCandidate(item.key)"
+              />
+              <span class="import-candidate-copy">
+                <strong>{{ item.name }}</strong>
+                <small>{{ item.shotCount }} 个镜头 · {{ formatCandidateTime(item.updatedAt) }}</small>
+                <span :title="item.root">{{ item.root }}</span>
+              </span>
+            </label>
+          </div>
+
+          <p v-if="importWizardError" class="import-wizard-error">{{ importWizardError }}</p>
+
+          <footer class="import-wizard-actions">
+            <button type="button" :disabled="importWizardBusy" @click="dismissImportWizard">
+              暂不导入
+            </button>
+            <span></span>
+            <button type="button" :disabled="importWizardBusy" @click="importCandidates(true)">
+              全部导入
+            </button>
+            <button
+              class="primary"
+              type="button"
+              :disabled="importWizardBusy || importWizardSelected.length === 0"
+              @click="importCandidates(false)"
+            >
+              {{ importWizardBusy ? '正在导入…' : '导入所选' }}
+            </button>
+          </footer>
+        </section>
+      </div>
+    </transition>
+
     <TermEditorModal
       :open="termEditorOpen"
       :term="editingTerm"
@@ -1730,3 +1876,208 @@ onBeforeUnmount(() => {
     </transition>
   </div>
 </template>
+
+<style scoped>
+.import-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  padding: 24px;
+  background: rgba(5, 9, 18, 0.76);
+  backdrop-filter: blur(5px);
+  place-items: center;
+}
+
+.import-wizard {
+  display: flex;
+  width: min(640px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.import-wizard-head {
+  flex: 0 0 auto;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), transparent 60%);
+}
+
+.import-wizard-head p,
+.import-wizard-head h2,
+.import-wizard-head span {
+  margin: 0;
+}
+
+.import-wizard-head p {
+  color: var(--blue-hi);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.import-wizard-head h2 {
+  margin-top: 5px;
+  color: var(--text-primary);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.import-wizard-head span {
+  display: block;
+  margin-top: 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.import-candidate-list {
+  display: flex;
+  min-height: 96px;
+  flex: 1;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+  overflow-y: auto;
+}
+
+.import-candidate {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-raised);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.import-candidate:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.import-candidate.selected {
+  border-color: rgba(96, 165, 250, 0.7);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.import-candidate input {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: var(--blue);
+}
+
+.import-candidate-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.import-candidate-copy strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-candidate-copy small {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.import-candidate-copy span {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-wizard-error {
+  margin: 0 14px 12px;
+  padding: 9px 11px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.import-wizard-actions {
+  display: flex;
+  min-height: 58px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-deep);
+}
+
+.import-wizard-actions span {
+  flex: 1;
+}
+
+.import-wizard-actions button {
+  height: 30px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.import-wizard-actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.import-wizard-actions button.primary {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.import-wizard-actions button.primary:hover:not(:disabled) {
+  background: var(--blue-hi);
+}
+
+.import-modal-enter-active,
+.import-modal-leave-active {
+  transition: opacity 160ms ease;
+}
+
+.import-modal-enter-active .import-wizard,
+.import-modal-leave-active .import-wizard {
+  transition: transform 160ms ease;
+}
+
+.import-modal-enter-from,
+.import-modal-leave-to {
+  opacity: 0;
+}
+
+.import-modal-enter-from .import-wizard,
+.import-modal-leave-to .import-wizard {
+  transform: translateY(8px) scale(0.985);
+}
+</style>
