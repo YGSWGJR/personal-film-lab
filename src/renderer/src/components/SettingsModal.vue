@@ -4,6 +4,7 @@ import AppIcon from './AppIcon.vue';
 import type { Settings, SettingsSetArgs } from '../../../shared/types';
 
 type PathKey = keyof SettingsSetArgs;
+type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 
 const props = defineProps<{
   open: boolean;
@@ -24,6 +25,9 @@ const draft = reactive<SettingsSetArgs>({
   stillDir: '',
 });
 const browseError = ref<string | null>(null);
+const liveSettings = ref<Settings | null>(null);
+const checkingEnvironment = ref(false);
+const environmentCheck = ref<EnvironmentCheck | null>(null);
 const pathItems: Array<{
   key: PathKey;
   title: string;
@@ -56,10 +60,11 @@ const pathItems: Array<{
   },
 ];
 
+const activeSettings = computed(() => liveSettings.value ?? props.settings);
 const dataRootChanged = computed(
-  () => Boolean(props.settings && draft.dataRoot.trim() !== props.settings.dataRoot),
+  () => Boolean(activeSettings.value && draft.dataRoot.trim() !== activeSettings.value.dataRoot),
 );
-const lockedByEnvironment = computed(() => props.settings?.environmentOverride === true);
+const lockedByEnvironment = computed(() => activeSettings.value?.environmentOverride === true);
 
 watch(
   () => [props.open, props.settings] as const,
@@ -69,7 +74,9 @@ watch(
     draft.cacheDir = settings.cacheDir;
     draft.exportDir = settings.exportDir;
     draft.stillDir = settings.stillDir;
+    liveSettings.value = settings;
     browseError.value = null;
+    environmentCheck.value = null;
   },
   { immediate: true },
 );
@@ -91,6 +98,43 @@ async function choosePath(key: PathKey): Promise<void> {
   }
 }
 
+async function checkEnvironment(): Promise<void> {
+  if (checkingEnvironment.value) return;
+  checkingEnvironment.value = true;
+  environmentCheck.value = null;
+  try {
+    const result = await window.api.settings.get();
+    if (!result.ok) {
+      environmentCheck.value = { tone: 'error', text: result.error.message };
+      return;
+    }
+    liveSettings.value = result.data;
+    if (result.data.environmentOverride) {
+      environmentCheck.value = {
+        tone: 'locked',
+        text: '仍被 DSH_DATA_ROOT 锁定，请按上述指引解除后完全退出并重新启动应用。',
+      };
+      return;
+    }
+    draft.dataRoot = result.data.dataRoot;
+    draft.cacheDir = result.data.cacheDir;
+    draft.exportDir = result.data.exportDir;
+    draft.stillDir = result.data.stillDir;
+    browseError.value = null;
+    environmentCheck.value = {
+      tone: 'success',
+      text: '已解除锁定，可以修改路径了。',
+    };
+  } catch (error) {
+    environmentCheck.value = {
+      tone: 'error',
+      text: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    checkingEnvironment.value = false;
+  }
+}
+
 function submit(): void {
   if (props.saving || lockedByEnvironment.value) return;
   const value = {
@@ -106,7 +150,12 @@ function submit(): void {
 
 <template>
   <transition name="modal">
-    <div v-if="open" class="modal-mask" @pointerdown.self="!saving && emit('close')">
+    <div
+      v-if="open"
+      class="modal-mask"
+      @pointerdown.self="!saving && !checkingEnvironment
+        && emit('close')"
+    >
       <form class="settings-modal" @submit.prevent="submit">
         <header class="modal-head">
           <div>
@@ -114,12 +163,51 @@ function submit(): void {
             <h2>设置</h2>
             <span>路径保存后立即生效</span>
           </div>
-          <button type="button" :disabled="saving" aria-label="关闭" @click="emit('close')">×</button>
+          <button
+            type="button"
+            :disabled="saving || checkingEnvironment"
+            aria-label="关闭"
+            @click="emit('close')"
+          >
+            ×
+          </button>
         </header>
 
         <div v-if="lockedByEnvironment" class="environment-note">
-          <strong>环境变量覆盖中</strong>
-          <span>检测到 `DSH_DATA_ROOT`，本会话的路径设置由环境变量固定。</span>
+          <strong>路径被环境变量锁定</strong>
+          <p>
+            当前路径由 <code>DSH_DATA_ROOT</code> 固定，数据根 =
+            <code>{{ activeSettings?.dataRoot }}</code>，设置界面暂不可修改。
+          </p>
+          <ol>
+            <li>
+              <b>命令行或启动脚本</b>
+              <span>
+                CMD 使用 <code>set DSH_DATA_ROOT=</code>；PowerShell 使用
+                <code>Remove-Item Env:DSH_DATA_ROOT</code>；Git Bash / Shell 使用
+                <code>export DSH_DATA_ROOT=</code> 或 <code>unset DSH_DATA_ROOT</code>。
+                再完全退出并重新启动应用。
+              </span>
+            </li>
+            <li>
+              <b>系统级环境变量</b>
+              <span>
+                打开“控制面板 → 系统 → 高级系统设置 → 环境变量”，删除用户或系统变量中的
+                <code>DSH_DATA_ROOT</code>，然后重新启动应用。
+              </span>
+            </li>
+          </ol>
+          <span>若不清楚来源，请检查开发调试脚本或 .bat / .ps1 启动文件。</span>
+          <button type="button" :disabled="checkingEnvironment" @click="checkEnvironment">
+            {{ checkingEnvironment ? '检测中…' : '检测是否仍被锁定' }}
+          </button>
+        </div>
+        <div
+          v-if="environmentCheck"
+          class="environment-check"
+          :class="environmentCheck.tone"
+        >
+          {{ environmentCheck.text }}
         </div>
 
         <section class="path-list">
@@ -156,8 +244,12 @@ function submit(): void {
 
         <footer>
           <span>导出、截图和缓存目录会按项目 ID 自动建立子目录。</span>
-          <button type="button" :disabled="saving" @click="emit('close')">取消</button>
-          <button class="primary" type="submit" :disabled="saving || lockedByEnvironment">
+          <button type="button" :disabled="saving || checkingEnvironment" @click="emit('close')">取消</button>
+          <button
+            class="primary"
+            type="submit"
+            :disabled="saving || lockedByEnvironment || checkingEnvironment"
+          >
             {{ saving ? '保存中…' : '保存设置' }}
           </button>
         </footer>
@@ -259,6 +351,95 @@ function submit(): void {
 .environment-note strong {
   color: var(--gold);
   font-size: 11px;
+}
+
+.environment-note p,
+.environment-note ol {
+  margin: 3px 0 0;
+}
+
+.environment-note p,
+.environment-note li,
+.environment-note > span {
+  line-height: 1.6;
+}
+
+.environment-note ol {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 18px;
+}
+
+.environment-note li {
+  padding-left: 2px;
+}
+
+.environment-note li b,
+.environment-note li span {
+  display: block;
+}
+
+.environment-note li b {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.environment-note code {
+  padding: 1px 4px;
+  border: 1px solid rgba(245, 158, 11, 0.24);
+  border-radius: 3px;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fcd34d;
+  font-family: var(--mono);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.environment-note > button {
+  width: fit-content;
+  height: 27px;
+  margin-top: 2px;
+  padding: 0 10px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 5px;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--gold);
+  font-size: 10px;
+}
+
+.environment-note > button:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.environment-check {
+  margin: 8px 16px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.environment-check.success {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.09);
+  color: #86efac;
+}
+
+.environment-check.locked {
+  border-color: rgba(245, 158, 11, 0.32);
+  background: rgba(245, 158, 11, 0.09);
+  color: var(--gold);
+}
+
+.environment-check.error {
+  border-color: rgba(239, 68, 68, 0.38);
+  background: rgba(239, 68, 68, 0.09);
+  color: #fca5a5;
 }
 
 .migration-warning {

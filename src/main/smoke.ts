@@ -40,12 +40,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let sessionRecoveryChecks: Record<string, unknown> = {};
   let settingsMigrationChecks: Record<string, unknown> = {};
   let settingsVerifyChecks: Record<string, unknown> = {};
+  let environmentLockChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -183,6 +184,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, settingsVerifyChecksAssertions(settingsVerifyChecks));
     }
 
+    if (process.env['SMOKE_ENV_LOCK_CHECK'] === '1') {
+      environmentLockChecks = await runEnvironmentLockChecks(
+        win,
+        process.env['DSH_DATA_ROOT'] ?? '',
+      );
+      Object.assign(checks, environmentLockChecksAssertions(environmentLockChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -196,7 +205,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -327,6 +336,130 @@ function settingsVerifyChecksAssertions(result: Record<string, any>): Record<str
     settingsVerifyToast: result.toastOk === true,
     settingsVerifyPath: result.pathOk === true,
   };
+}
+
+function environmentLockChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    environmentLockShown: result.lockedShown === true,
+    environmentLockRoot: result.rootShown === true,
+    environmentLockGuidance: result.guidanceOk === true,
+    environmentLockSaveDisabled: result.saveDisabled === true,
+    environmentLockDetect: result.lockedDetectOk === true,
+    environmentUnlockDetect: result.unlockedDetectOk === true,
+    environmentUnlockEditable: result.unlockedEditableOk === true,
+  };
+}
+
+async function runEnvironmentLockChecks(
+  win: BrowserWindow,
+  environmentRoot: string,
+): Promise<Record<string, any>> {
+  const locked = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 10000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      try {
+        await sleep(2500);
+        document.querySelector('button[title="设置"]')?.click();
+        const modal = await waitFor(() => document.querySelector('.settings-modal'));
+        out.modalOk = Boolean(modal);
+        if (!modal) return out;
+        const note = modal.querySelector('.environment-note');
+        const noteText = String(note?.textContent || '');
+        out.lockedShown = Boolean(note)
+          && noteText.includes('DSH_DATA_ROOT')
+          && noteText.includes('设置界面暂不可修改');
+        out.rootShown = noteText.includes(${JSON.stringify(environmentRoot)});
+        out.guidanceOk = noteText.includes('set DSH_DATA_ROOT=')
+          && noteText.includes('export DSH_DATA_ROOT=')
+          && noteText.includes('Remove-Item Env:DSH_DATA_ROOT')
+          && noteText.includes('高级系统设置')
+          && noteText.includes('.bat')
+          && noteText.includes('.ps1');
+        const inputs = Array.from(modal.querySelectorAll('.path-input input'));
+        const submit = modal.querySelector('button[type="submit"]');
+        out.inputsDisabled = inputs.length === 4 && inputs.every((input) => input.disabled);
+        out.saveDisabled = Boolean(submit && submit.disabled);
+        Array.from(note?.querySelectorAll('button') || [])
+          .find((button) => String(button.textContent || '').includes('检测'))
+          ?.click();
+        const lockedMessage = await waitFor(() =>
+          modal.querySelector('.environment-check.locked')
+        );
+        out.lockedDetectOk = String(lockedMessage?.textContent || '').includes('仍被 DSH_DATA_ROOT 锁定');
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
+
+  const lockScreenshot = process.env['SMOKE_ENV_LOCK_SCREENSHOT'];
+  if (lockScreenshot) {
+    const image = await win.webContents.capturePage();
+    writeFileSync(lockScreenshot, image.toPNG());
+  }
+
+  const previousRoot = process.env['DSH_DATA_ROOT'];
+  delete process.env['DSH_DATA_ROOT'];
+  try {
+    const unlocked = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const waitFor = async (check, timeoutMs = 10000) => {
+          const deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            const value = check();
+            if (value) return value;
+            await sleep(100);
+          }
+          return null;
+        };
+        try {
+          const modal = document.querySelector('.settings-modal');
+          if (!modal) return out;
+          const note = modal.querySelector('.environment-note');
+          const detect = Array.from(modal.querySelectorAll('button'))
+            .find((button) => String(button.textContent || '').includes('检测'));
+          if (!detect && note) {
+            out.noteStillPresent = true;
+            return out;
+          }
+          note?.querySelector('button')?.click();
+          const success = await waitFor(() =>
+            modal.querySelector('.environment-check.success')
+          );
+          const inputs = Array.from(modal.querySelectorAll('.path-input input'));
+          const submit = modal.querySelector('button[type="submit"]');
+          out.successText = String(success?.textContent || '');
+          out.unlockedDetectOk = out.successText.includes('已解除锁定');
+          out.unlockedEditableOk = !modal.querySelector('.environment-note')
+            && inputs.length === 4
+            && inputs.every((input) => !input.disabled)
+            && Boolean(submit && !submit.disabled);
+          return out;
+        } catch (error) {
+          out.exception = String(error && error.stack ? error.stack : error);
+          return out;
+        }
+      })()
+    `)) as Record<string, any>;
+    return { ...locked, ...unlocked };
+  } finally {
+    if (previousRoot === undefined) delete process.env['DSH_DATA_ROOT'];
+    else process.env['DSH_DATA_ROOT'] = previousRoot;
+  }
 }
 
 async function runSettingsVerifyChecks(
