@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron';
+import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DataLayer } from '../data/db';
 import { ProjectPackageService } from '../data/project-package';
@@ -30,6 +31,38 @@ import { StatsService } from './stats/stats-service';
 import { TermTransferService } from './terms/term-transfer-service';
 
 const IS_SMOKE_TEST = process.argv.includes('--smoke-test');
+
+/**
+ * S31：把 Electron userData（设置文件 / session / Chromium 缓存）重定向到 G 盘，
+ * 避免在 C 盘产生文件。目标目录不可用时回退默认 userData，保证软件可用。
+ * 必须在任何 app.getPath('userData') 读取之前调用。
+ */
+const CUSTOM_USER_DATA = 'G:\\拉片\\软件数据';
+const DEFAULT_USER_DATA = app.getPath('userData');
+try {
+  mkdirSync(CUSTOM_USER_DATA, { recursive: true });
+  app.setPath('userData', CUSTOM_USER_DATA);
+} catch (error) {
+  console.warn(`[userData] 自定义 userData 不可用，回退默认：${(error as Error).message}`);
+}
+const ACTIVE_USER_DATA = app.getPath('userData');
+
+/** 首次启动时把旧 userData 的 settings.json 迁移到新位置（只迁必要配置，缓存垃圾不迁）。 */
+function migrateUserDataSettingsOnce(): void {
+  if (DEFAULT_USER_DATA === ACTIVE_USER_DATA) return;
+  const newSettings = resolve(ACTIVE_USER_DATA, 'settings.json');
+  const oldSettings = resolve(DEFAULT_USER_DATA, 'settings.json');
+  if (!existsSync(newSettings) && existsSync(oldSettings)) {
+    try {
+      mkdirSync(ACTIVE_USER_DATA, { recursive: true });
+      copyFileSync(oldSettings, newSettings);
+      console.log(`[userData] 已迁移 settings.json 至 ${ACTIVE_USER_DATA}`);
+    } catch (error) {
+      console.warn(`[userData] settings.json 迁移失败：${(error as Error).message}`);
+    }
+  }
+}
+migrateUserDataSettingsOnce();
 
 /**
  * 原生视频子窗口（libmpv 通过 wid 渲染）要显示在网页内容之上，
