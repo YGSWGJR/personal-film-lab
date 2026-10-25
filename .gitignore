@@ -40,3 +40,6 @@ resources/python/
 # Python 缓存
 __pycache__/
 *.pyc
+
+# H1-A 副本隔离目录（clean-duplicates.ps1 生成）
+.duplicates-quarantine/
