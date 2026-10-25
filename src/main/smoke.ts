@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { app, type BrowserWindow } from 'electron';
+import { resolveDetectFramesDir } from './paths';
 import type { PlayerService } from './player/player-service';
 
 interface SmokeDeps {
@@ -35,12 +36,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let sessionChecks: Record<string, unknown> = {};
   let dataChecks: Record<string, unknown> = {};
   let importChecks: Record<string, unknown> = {};
+  let detectChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -126,6 +128,17 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, importChecksAssertions(importChecks));
     }
 
+    if (process.env['SMOKE_DETECT_CHECKS'] === '1') {
+      detectChecks = await runDetectChecks(win, process.env['SMOKE_DETECT_SOURCE'] ?? '');
+      if (detectChecks.noFramesOk !== undefined) {
+        detectChecks.noFramesOk =
+          detectChecks.noFramesOk === true
+          && typeof detectChecks.missingSourceProjectId === 'string'
+          && !existsSync(resolveDetectFramesDir(detectChecks.missingSourceProjectId));
+      }
+      Object.assign(checks, detectChecksAssertions(detectChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -139,7 +152,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -225,6 +238,102 @@ function importChecksAssertions(result: Record<string, any>): Record<string, boo
     importListed: result.listOk === true,
     importIdempotent: result.idempotentOk === true,
   };
+}
+
+function detectChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    detectProjectNotFound: result.projectNotFoundOk === true,
+    detectProjectMessage: result.projectMessageOk === true,
+    detectSourceMissing: result.sourceMissingOk === true,
+    detectSourceMessage: result.sourceMessageOk === true,
+    detectSourceBeforeFrames: result.noFramesOk === true,
+    detectUrlSkipsLocalCheck: result.urlOk === true,
+    detectNormalPreflight: result.normalOk === true,
+  };
+}
+
+async function runDetectChecks(win: BrowserWindow, sourcePath: string): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const options = {
+        sensitivity: 0.62,
+        minShotSeconds: 0.5,
+        filterTransitions: true,
+        weights: { s: 0.3, c: 0.3, h: 0.4 },
+        intervalMs: 500,
+      };
+      try {
+        const missingProject = await window.api.detect.run({
+          projectId: 'no-such-detect-project',
+          dryRun: true,
+          options,
+        });
+        out.projectNotFoundOk = missingProject.ok === false
+          && missingProject.error.code === 'PROJECT_NOT_FOUND';
+        out.projectMessageOk = missingProject.ok === false
+          && missingProject.error.message.includes('数据目录已变更')
+          && Boolean(missingProject.error.details && missingProject.error.details.guide);
+
+        const broken = await window.api.project.create({
+          name: '检测失败素材',
+          source: { type: 'local', path: 'D:/__dsh_detect_missing__/missing.mp4' },
+        });
+        if (!broken.ok) {
+          out.createError = broken.error;
+          return out;
+        }
+        out.missingSourceProjectId = broken.data.id;
+        const missingSource = await window.api.detect.run({
+          projectId: broken.data.id,
+          dryRun: true,
+          options,
+        });
+        out.sourceMissingOk = missingSource.ok === false
+          && missingSource.error.code === 'DETECT_SOURCE_MISSING';
+        out.sourceMessageOk = missingSource.ok === false
+          && missingSource.error.message.includes('D:/__dsh_detect_missing__/missing.mp4')
+          && Boolean(missingSource.error.details && missingSource.error.details.guide)
+          && String(missingSource.error.details.guide).includes('重新导入');
+        out.noFramesOk = missingSource.ok === false;
+
+        const urlProject = await window.api.project.create({
+          name: '网络检测项目',
+          source: {
+            type: 'url',
+            path: 'D:/__dsh_detect_missing__/network-source.mp4',
+            url: 'https://example.invalid/video.mp4',
+          },
+        });
+        if (urlProject.ok) {
+          const urlRun = await window.api.detect.run({
+            projectId: urlProject.data.id,
+            dryRun: true,
+            options,
+          });
+          out.urlOk = urlRun.ok === true && typeof urlRun.data.jobId === 'string';
+          if (urlRun.ok) await window.api.detect.cancel({ jobId: urlRun.data.jobId });
+        }
+
+        const normalProject = await window.api.project.create({
+          name: '正常检测项目',
+          source: { type: 'local', path: ${JSON.stringify(sourcePath)} },
+        });
+        if (normalProject.ok) {
+          const normalRun = await window.api.detect.run({
+            projectId: normalProject.data.id,
+            dryRun: true,
+            options,
+          });
+          out.normalOk = normalRun.ok === true && typeof normalRun.data.jobId === 'string';
+          if (normalRun.ok) await window.api.detect.cancel({ jobId: normalRun.data.jobId });
+        }
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
 }
 
 async function runImportChecks(win: BrowserWindow): Promise<Record<string, any>> {

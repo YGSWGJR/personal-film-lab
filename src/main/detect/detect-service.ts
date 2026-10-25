@@ -78,8 +78,7 @@ export class DetectService {
   ) {}
 
   run(args: DetectRunArgs): DetectRunResult {
-    this.data.projects.get(args.projectId);
-    const options = normalizeOptions(args.options);
+    const project = getDetectProject(this.data, args.projectId);
     for (const job of this.jobs.values()) {
       if (job.projectId === args.projectId && job.status === 'running') {
         throw new DetectError('DETECT_ALREADY_RUNNING', '该项目已有检测任务正在运行', {
@@ -87,6 +86,8 @@ export class DetectService {
         });
       }
     }
+    resolveDetectSource(project);
+    const options = normalizeOptions(args.options);
 
     const jobId = `detect-${randomUUID()}`;
     const job: InternalDetectJob = {
@@ -203,13 +204,8 @@ export class DetectService {
           guide: environment.error.guide,
         });
       }
-      const project = this.data.projects.get(job.projectId);
-      const sourcePath = project.source.path || project.media.proxyPath;
-      if (!sourcePath) {
-        throw new DetectError('DETECT_SOURCE_MISSING', '项目没有可读取的视频路径', {
-          projectId: job.projectId,
-        });
-      }
+      const project = getDetectProject(this.data, job.projectId);
+      const sourcePath = resolveDetectSource(project);
 
       ensureProjectDirs(this.data.dataRoot, project.id);
       framesDir = resolveDetectFramesDir(project.id);
@@ -721,6 +717,39 @@ function environmentGuide(code: string, installed: boolean): string {
     return '检测环境响应超时，请检查 Python 安装状态后重试';
   }
   return installed ? '检测引擎异常，请重新安装本软件' : '请检查 Python 与 OpenCV/NumPy 安装后重试';
+}
+
+function getDetectProject(data: DataLayer, projectId: string): Project {
+  try {
+    return data.projects.get(projectId);
+  } catch (error) {
+    if (error instanceof Error && (error as { code?: string }).code === 'PROJECT_NOT_FOUND') {
+      throw new DetectError(
+        'PROJECT_NOT_FOUND',
+        '找不到该项目：可能已删除，或数据目录已变更。请通过启动导入向导恢复项目，或重新导入素材',
+        { guide: '请通过启动导入向导恢复项目，或重新导入素材' },
+      );
+    }
+    throw error;
+  }
+}
+
+function resolveDetectSource(project: Project): string {
+  const sourcePath = project.source.path || project.media.proxyPath;
+  if (!sourcePath) {
+    throw new DetectError('DETECT_SOURCE_MISSING', '项目没有可读取的视频路径', {
+      projectId: project.id,
+      guide: '请在导入向导中重新导入该素材',
+    });
+  }
+  if (project.source.type !== 'url' && !existsSync(sourcePath)) {
+    throw new DetectError('DETECT_SOURCE_MISSING', `视频源文件不存在或已被移动/删除：${sourcePath}`, {
+      projectId: project.id,
+      sourcePath,
+      guide: `请在导入向导中重新导入该素材（原路径：${sourcePath}）`,
+    });
+  }
+  return sourcePath;
 }
 
 function resolveServerScript(): string {
