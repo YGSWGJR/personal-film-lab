@@ -24,7 +24,7 @@ export function withEnvelope<T extends Handler>(handler: T) {
   return async (_event: unknown, ...args: Parameters<T>): Promise<IpcResult<unknown>> => {
     try {
       const result = await handler(...args);
-      if (result && typeof result === 'object' && 'ok' in (result as object)) {
+      if (isIpcResult(result)) {
         return result as IpcResult<unknown>;
       }
       return ok(result);
@@ -36,4 +36,18 @@ export function withEnvelope<T extends Handler>(handler: T) {
       return fail(code, message, err?.details);
     }
   };
+}
+
+/**
+ * 领域对象也可能自带 ok 字段（例如 DetectEnvCheck）。
+ * 只接受结构完全符合 IpcResult 的对象，避免把它们误当成已封装结果。
+ */
+function isIpcResult(value: unknown): value is IpcResult<unknown> {
+  if (!value || typeof value !== 'object') return false;
+  const keys = Object.keys(value);
+  if (!keys.every((key) => key === 'ok' || key === 'data' || key === 'error')) return false;
+  const candidate = value as { ok?: unknown; data?: unknown; error?: unknown };
+  if (candidate.ok === true) return 'data' in candidate;
+  if (candidate.ok === false) return 'error' in candidate;
+  return false;
 }

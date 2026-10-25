@@ -1051,7 +1051,10 @@ function stopDetectionPolling(): void {
 }
 
 async function openDetection(): Promise<void> {
-  if (busy.value || transcoding.value) return;
+  if (busy.value || transcoding.value) {
+    showToast('当前任务尚未结束，请稍后再运行镜头检测。');
+    return;
+  }
   if (demoMode.value || !activeProject.value) {
     showToast('请先导入本地影片，再运行镜头检测。');
     return;
@@ -1065,6 +1068,10 @@ async function openDetection(): Promise<void> {
   }
   if (!environment.ok) {
     showToast(environment.error.message, 'error', environment.error.code);
+    return;
+  }
+  if (!environment.data) {
+    showToast('检测环境返回了无效结果，请重试。', 'error', 'DETECT_ENV_INVALID');
     return;
   }
   if (!environment.data.ok && environment.data.error) {
