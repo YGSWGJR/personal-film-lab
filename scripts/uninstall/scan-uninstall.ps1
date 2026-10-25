@@ -2,12 +2,18 @@
 param(
     [string]$OutputPath,
     [string]$AppDir,
-    [string]$SettingsPath = (Join-Path $env:APPDATA "personal-film-lab\settings.json")
+    [string]$SettingsPath
 )
 
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $PSScriptRoot "uninstall-report.json" }
+
+# S32：Electron userData 双位置探测（新位置优先；旧 roaming 位置兼容迁移残留）
+$USERDATA_DIRS = @(
+    "G:\拉片\软件数据",
+    (Join-Path $env:APPDATA "personal-film-lab")
+)
 
 $SETTINGS_PATH_FIELDS = @(
     "dataRoot",
@@ -104,8 +110,31 @@ $appDirResolved = if ($AppDir) { Resolve-FullPath $AppDir } else { Get-AppDirFro
 if (-not $appDirResolved) {
     $appDirResolved = Resolve-FullPath (Join-Path $env:LOCALAPPDATA "Programs\personal-film-lab")
 }
-$roamingDir = Resolve-FullPath (Join-Path $env:APPDATA "personal-film-lab")
-$settingsResolved = Resolve-FullPath $SettingsPath
+$userDataCandidates = @($USERDATA_DIRS | ForEach-Object { Resolve-FullPath $_ } | Where-Object { $_ })
+$userDataDirs = @($userDataCandidates | Where-Object { Test-Path -LiteralPath $_ })
+$roamingDir = if (Test-Path -LiteralPath "G:\拉片\软件数据") {
+    Resolve-FullPath "G:\拉片\软件数据"
+} elseif ($userDataDirs.Count -gt 0) {
+    $userDataDirs[0]
+} else {
+    $userDataCandidates[0]
+}
+
+if (-not [string]::IsNullOrWhiteSpace($SettingsPath)) {
+    $settingsResolved = Resolve-FullPath $SettingsPath
+} else {
+    $settingsResolved = $null
+    foreach ($candidateDir in $userDataCandidates) {
+        $candidateSettings = Join-Path $candidateDir "settings.json"
+        if (Test-Path -LiteralPath $candidateSettings) {
+            $settingsResolved = Resolve-FullPath $candidateSettings
+            break
+        }
+    }
+    if (-not $settingsResolved) {
+        $settingsResolved = Resolve-FullPath (Join-Path $userDataCandidates[0] "settings.json")
+    }
+}
 
 $dataFields = [ordered]@{}
 $dataRoots = New-Object System.Collections.Generic.List[string]
@@ -160,6 +189,7 @@ foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
 $report = [ordered]@{
     appDir = $appDirResolved
     roamingDir = $roamingDir
+    userDataDirs = @($userDataDirs)
     settingsPath = $settingsResolved
     dataRoots = @($dataRoots)
     envVar = $envVar
@@ -180,7 +210,8 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
 
 Write-Host ("扫描完成：{0}" -f $OutputPath)
 Write-Host ("  应用目录：{0}" -f $appDirResolved)
-Write-Host ("  用户数据：{0}" -f $roamingDir)
+Write-Host ("  用户数据（主）：{0}" -f $roamingDir)
+Write-Host ("  用户数据候选（存在）：{0}" -f $(if ($userDataDirs.Count -gt 0) { $userDataDirs -join "; " } else { "(无)" }))
 Write-Host ("  设置文件：{0}（可解析={1}）" -f $settingsResolved, $dataParseOk)
 Write-Host ("  数据根：{0} 个" -f $dataRoots.Count)
 foreach ($root in $dataRoots) { Write-Host ("    - {0}" -f $root) }

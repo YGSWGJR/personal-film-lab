@@ -10,7 +10,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `scan-uninstall.ps1` | 扫描六类残留，输出 `uninstall-report.json`（UTF-8） |
+| `scan-uninstall.ps1` | 扫描六类残留（userData 双位置探测：`G:\拉片\软件数据` 优先），输出 `uninstall-report.json`（UTF-8） |
 | `uninstall.ps1` | WinForms 四步向导 + 安全守卫 + 执行/日志/备份；同时支持无人值守参数 |
 | `README.md` | 本说明 |
 
@@ -69,6 +69,36 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\uninstall.ps1
 - **日志**：`uninstall-log.txt`（与脚本同目录），每行 `[时间] [类] [结果] 目标 | 详情`，UTF-8。
 - **DryRun**：只写日志与结果 JSON，不删除、不改进程/环境变量/注册表。
 
+## S32 适配：userData 重定向到 `G:\拉片\软件数据`
+
+`src/main/index.ts` 已把 Electron userData 重定向到 `G:\拉片\软件数据`，旧位置
+`%APPDATA%\personal-film-lab` 仅作迁移残留兼容。卸载工具据此适配：
+
+- **双位置扫描**：`userDataDirs` 按「`G:\拉片\软件数据` → `%APPDATA%\personal-film-lab`」顺序收集存在者；
+  `settingsPath` 取第一个存在 `settings.json` 的位置；`roamingDir` 为主 userData 目录（用于展示与 B 类主目标）。
+- **B 类清理**：遍历 `userDataDirs`（两个都存在则都处理）；保留模式只删缓存子目录与
+  `*.tmp`/`session*.json`，保留 `settings.json`；完整模式删除整个用户数据目录。
+- **备份**：`settings.json` 从探测到的实际位置取，`lapian.db` 仍从数据根取。
+- **数据根缺失容错**：settings.json 指向的目录不存在时，C 类仅记 `SKIP 不存在`，不影响其他类执行。
+
+验收命令（全部 DryRun）：
+
+```powershell
+# 1) 扫描：应得到 settingsPath=G:\拉片\软件数据\settings.json、dataParseOk=true、4 个数据根
+.\scan-uninstall.ps1 -OutputPath .\report.json
+
+# 2) 保留数据 DryRun：B 类缓存子目录 DRY-RUN，settings.json 不删除
+.\uninstall.ps1 -NoGui -Mode KeepData -DryRun -SkipScan -ReportPath .\report.json
+
+# 3) 完整 DryRun：B 类整个 userData 目录 + C 类数据根 DRY-RUN
+.\uninstall.ps1 -NoGui -Mode Full -DryRun -SkipScan -ReportPath .\report.json
+
+# 4) 备份：zip 应含 G:\拉片\软件数据\settings.json 与 lapian.db
+.\uninstall.ps1 -NoGui -Mode KeepData -DryRun -Backup -SkipScan -ReportPath .\report.json
+
+# 5) UI 冒烟
+.\uninstall.ps1 -UiSmoke -DryRun -SkipScan -ReportPath .\report.json
+```
 ## 自测与验收命令
 
 ```powershell

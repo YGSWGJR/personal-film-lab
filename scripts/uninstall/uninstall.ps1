@@ -107,6 +107,10 @@ function Get-AllowedRoots {
     }
     $roamingBase = Resolve-SafePath (Join-Path $env:APPDATA "personal-film-lab")
     if ($roamingBase) { $roots.Add($roamingBase) }
+    foreach ($root in @($Report.userDataDirs)) {
+        $resolved = Resolve-SafePath $root
+        if ($resolved) { $roots.Add($resolved) }
+    }
     foreach ($root in @($Report.dataRoots)) {
         $resolved = Resolve-SafePath $root
         if ($resolved) { $roots.Add($resolved) }
@@ -232,25 +236,31 @@ function Stop-AppProcesses {
 
 function Remove-UserSettings {
     param($Report, [string[]]$AllowedRoots, [bool]$Full)
-    if ($Full) {
-        Remove-SafeTarget "B" $Report.roamingDir $AllowedRoots
+    $dirs = @($Report.userDataDirs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($dirs.Count -eq 0 -and $Report.roamingDir) { $dirs = @($Report.roamingDir) }
+    $existing = @($dirs | Where-Object { Test-Path -LiteralPath $_ })
+    if ($existing.Count -eq 0) {
+        Write-UninstallLog "B" "SKIP" ($dirs -join "; ") "用户数据目录不存在"
         return
     }
-    $roaming = Resolve-SafePath $Report.roamingDir
-    if (-not $roaming -or -not (Test-Path -LiteralPath $roaming)) {
-        Write-UninstallLog "B" "SKIP" $Report.roamingDir "目录不存在"
-        return
-    }
-    foreach ($dirName in $KEEP_CACHE_DIRS) {
-        $target = Join-Path $roaming $dirName
-        Remove-SafeTarget "B" $target $AllowedRoots
-    }
-    foreach ($pattern in $KEEP_CACHE_FILE_PATTERNS) {
-        foreach ($file in @(Get-ChildItem -LiteralPath $roaming -Filter $pattern -File -Force -ErrorAction SilentlyContinue)) {
-            Remove-SafeTarget "B" $file.FullName $AllowedRoots -IsFile
+    foreach ($dir in $existing) {
+        if ($Full) {
+            Remove-SafeTarget "B" $dir $AllowedRoots
+            continue
         }
+        $roaming = Resolve-SafePath $dir
+        if (-not $roaming) { continue }
+        foreach ($dirName in $KEEP_CACHE_DIRS) {
+            $target = Join-Path $roaming $dirName
+            Remove-SafeTarget "B" $target $AllowedRoots
+        }
+        foreach ($pattern in $KEEP_CACHE_FILE_PATTERNS) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $roaming -Filter $pattern -File -Force -ErrorAction SilentlyContinue)) {
+                Remove-SafeTarget "B" $file.FullName $AllowedRoots -IsFile
+            }
+        }
+        Write-UninstallLog "B" "OK" $roaming "已清理缓存类残留（保留 settings.json）"
     }
-    Write-UninstallLog "B" "OK" $roaming "已清理缓存类残留（保留 settings.json）"
 }
 
 function Remove-EnvVar {
@@ -585,7 +595,10 @@ function Show-Step1 {
     Add-SectionTitle "第 1 步 / 4 · 检测残留" 0
 
     $report = $script:Report
-    $roamingSize = Get-PathSizeBytes $report.roamingDir
+    $userDataDirs = @($report.userDataDirs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($userDataDirs.Count -eq 0) { $userDataDirs = @($report.roamingDir) }
+    $roamingSize = [int64]0
+    foreach ($dir in $userDataDirs) { $roamingSize += Get-PathSizeBytes $dir }
     $dataLines = New-Object System.Collections.Generic.List[string]
     $totalData = [int64]0
     foreach ($root in @($report.dataRoots)) {
@@ -599,8 +612,9 @@ function Show-Step1 {
     $lines.Add("安装目录：")
     $lines.Add(("    {0}" -f $report.appDir))
     $lines.Add("")
-    $lines.Add("用户数据目录（Roaming）：")
-    $lines.Add(("    {0}（{1}）" -f $report.roamingDir, (Format-Size $roamingSize)))
+    $lines.Add(("用户数据目录（userData，合计 {0}）：" -f (Format-Size $roamingSize)))
+    foreach ($dir in $userDataDirs) { $lines.Add(("    {0}（{1}）" -f $dir, (Format-Size (Get-PathSizeBytes $dir)))) }
+    if ($userDataDirs.Count -gt 1) { $lines.Add("    注：检测到旧位置迁移残留，B 类将同时处理以上目录") }
     $lines.Add("")
     $lines.Add(("设置文件：{0}" -f $report.settingsPath))
     $lines.Add(("    可解析：{0}" -f $(if ($report.dataParseOk) { "是" } else { "否（数据根删除将被禁用）" })))
@@ -733,11 +747,14 @@ function Show-Step3 {
     $lines.Add("")
     $lines.Add(("A 应用本体：{0}" -f $script:Report.appDir))
     if ($classes -contains "B") {
+        $bDirs = @($script:Report.userDataDirs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($bDirs.Count -eq 0) { $bDirs = @($script:Report.roamingDir) }
         if ($script:SelectedMode -eq "Full" -or $script:SelectedMode -eq "Custom") {
-            $lines.Add(("B 用户设置：整目录删除 {0}" -f $script:Report.roamingDir))
+            $lines.Add("B 用户设置：整目录删除：")
         } else {
-            $lines.Add(("B 用户设置：仅清理缓存类残留，保留 settings.json（{0}）" -f $script:Report.roamingDir))
+            $lines.Add("B 用户设置：仅清理缓存类残留，保留 settings.json：")
         }
+        foreach ($dir in $bDirs) { $lines.Add(("    - {0}" -f $dir)) }
     }
     if ($classes -contains "C") {
         $lines.Add("C 数据根（不可恢复）：")
