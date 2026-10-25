@@ -113,6 +113,7 @@ const shotScrollTop = ref(0);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
 let lastPlayerBounds: RenderBounds | null = null;
+let overlayPlayerHidden = false;
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let restoringSession = true;
 const unsubscribers: Array<() => void> = [];
@@ -178,6 +179,32 @@ const topTimecode = computed(
 const workbenchColumns = computed(
   () => `${leftCollapsed.value ? 0 : 260}px minmax(480px, 1fr) ${rightCollapsed.value ? 0 : 300}px`,
 );
+const overlayOpen = computed(
+  () =>
+    detectionOpen.value ||
+    exportOpen.value ||
+    termEditorOpen.value ||
+    settingsOpen.value ||
+    statsOpen.value ||
+    importWizardOpen.value,
+);
+
+function hidePlayerForOverlay(): void {
+  if (overlayPlayerHidden) return;
+  overlayPlayerHidden = true;
+  void setPlayerLayer('hidden');
+}
+
+function restorePlayerLayer(): void {
+  if (!overlayPlayerHidden) return;
+  overlayPlayerHidden = false;
+  void setPlayerLayer('normal');
+}
+
+watch(overlayOpen, (open) => {
+  if (open) hidePlayerForOverlay();
+  else restorePlayerLayer();
+});
 
 function formatReadout(ms: number): string {
   const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
@@ -1336,14 +1363,11 @@ async function openSettings(): Promise<void> {
   settingsError.value = null;
   if (!settings.value) await loadSettings();
   settingsOpen.value = true;
-  await nextTick();
-  void window.api.player.setBounds({ x: 0, y: 0, width: 0, height: 0 });
 }
 
 async function closeSettings(): Promise<void> {
   settingsOpen.value = false;
   await nextTick();
-  if (lastPlayerBounds) void window.api.player.setBounds(lastPlayerBounds);
 }
 
 async function openStats(): Promise<void> {
@@ -1352,14 +1376,11 @@ async function openStats(): Promise<void> {
     return;
   }
   statsOpen.value = true;
-  await nextTick();
-  void window.api.player.setBounds({ x: 0, y: 0, width: 0, height: 0 });
 }
 
 async function closeStats(): Promise<void> {
   statsOpen.value = false;
   await nextTick();
-  if (lastPlayerBounds) void window.api.player.setBounds(lastPlayerBounds);
 }
 
 async function saveSettings(value: SettingsSetArgs): Promise<void> {
@@ -1552,8 +1573,14 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
 }
 
 function setPlayerBounds(bounds: RenderBounds): void {
+  const changed =
+    !lastPlayerBounds ||
+    lastPlayerBounds.x !== bounds.x ||
+    lastPlayerBounds.y !== bounds.y ||
+    lastPlayerBounds.width !== bounds.width ||
+    lastPlayerBounds.height !== bounds.height;
   lastPlayerBounds = bounds;
-  void window.api.player.setBounds(bounds);
+  if (changed) void window.api.player.setBounds(bounds);
 }
 
 async function setPlayerLayer(level: OverlayLayer): Promise<void> {

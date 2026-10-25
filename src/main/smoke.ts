@@ -45,12 +45,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let settingsDChecks: Record<string, unknown> = {};
   let stillTimeChecks: Record<string, unknown> = {};
   let stillUiChecks: Record<string, unknown> = {};
+  let overlayLayerChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -222,6 +223,11 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       });
     }
 
+    if (process.env['SMOKE_OVERLAY_LAYER'] === '1') {
+      overlayLayerChecks = await runOverlayLayerChecks(win);
+      Object.assign(checks, overlayLayerChecksAssertions(overlayLayerChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -235,7 +241,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -367,6 +373,73 @@ function stillTimeChecksAssertions(result: Record<string, any>): Record<string, 
     stillTimePdf: result.pdfOk === true,
     stillTimeDocx: result.docxOk === true,
   };
+}
+
+function overlayLayerChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    overlayInitialLayer: result.initialNormal === true,
+    overlayHide: result.hiddenOnOpen === true,
+    overlayStatsHide: result.statsHidden === true,
+    overlayNested: result.nestedStillHidden === true,
+    overlayExportHide: result.exportHidden === true,
+    overlayExportNested: result.exportNestedStillHidden === true,
+    overlayCloseRestore: result.restoredNormal === true,
+  };
+}
+
+async function runOverlayLayerChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 15000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const layer = async () => {
+        const state = await window.api.player.getState();
+        return state.ok ? state.data.layer : null;
+      };
+      try {
+        await sleep(2500);
+        out.initialNormal = await waitFor(async () => (await layer()) === 'normal');
+        document.querySelector('button[title="设置"]')?.click();
+        await waitFor(() => document.querySelector('.settings-modal'));
+        out.hiddenOnOpen = await waitFor(async () => (await layer()) === 'hidden');
+
+        document.querySelector('button[title="学习统计"]')?.click();
+        await waitFor(() => document.querySelector('.stats-modal'));
+        out.statsHidden = (await layer()) === 'hidden';
+        document.querySelector('.stats-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.stats-modal'));
+        await sleep(150);
+        out.nestedStillHidden = (await layer()) === 'hidden';
+
+        Array.from(document.querySelectorAll('.nav-item'))
+          .find((button) => String(button.textContent || '').includes('导出分镜本'))
+          ?.click();
+        await waitFor(() => document.querySelector('.export-modal'));
+        out.exportHidden = (await layer()) === 'hidden';
+        document.querySelector('.export-modal button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.export-modal'));
+        await sleep(150);
+        out.exportNestedStillHidden = (await layer()) === 'hidden';
+
+        document.querySelector('.settings-modal .modal-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        out.restoredNormal = await waitFor(async () => (await layer()) === 'normal');
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
 }
 
 async function runStillTimeChecks(
