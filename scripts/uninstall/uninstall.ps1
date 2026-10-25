@@ -389,7 +389,7 @@ function New-Backup {
         Write-UninstallLog "BACKUP" "SKIP" "(备份)" "没有可备份的 settings.json / lapian.db"
         return $null
     }
-    $backupDir = Join-Path (Split-Path -Parent $PSScriptRoot) "卸载备份"
+    $backupDir = if (-not [string]::IsNullOrWhiteSpace($env:S31_BACKUP_DIR)) { $env:S31_BACKUP_DIR } else { Join-Path (Split-Path -Parent $PSScriptRoot) "卸载备份" }
     if (-not (Test-Path -LiteralPath $backupDir)) { New-Item -ItemType Directory -Force -Path $backupDir | Out-Null }
     $zipPath = Join-Path $backupDir ("uninstall-backup-{0}.zip" -f (Get-Date).ToString("yyyyMMdd-HHmmss"))
     try {
