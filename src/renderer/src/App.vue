@@ -114,6 +114,7 @@ let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
 let lastPlayerBounds: RenderBounds | null = null;
 let overlayPlayerHidden = false;
+const pendingPlayerLayer = ref<OverlayLayer | null>(null);
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let restoringSession = true;
 const unsubscribers: Array<() => void> = [];
@@ -192,13 +193,16 @@ const overlayOpen = computed(
 function hidePlayerForOverlay(): void {
   if (overlayPlayerHidden) return;
   overlayPlayerHidden = true;
-  void setPlayerLayer('hidden');
+  pendingPlayerLayer.value = player.layer;
+  void applyPlayerLayer('hidden');
 }
 
 function restorePlayerLayer(): void {
   if (!overlayPlayerHidden) return;
   overlayPlayerHidden = false;
-  void setPlayerLayer('normal');
+  const target = pendingPlayerLayer.value ?? 'normal';
+  pendingPlayerLayer.value = null;
+  void applyPlayerLayer(target);
 }
 
 watch(overlayOpen, (open) => {
@@ -1584,6 +1588,11 @@ function setPlayerBounds(bounds: RenderBounds): void {
 }
 
 async function setPlayerLayer(level: OverlayLayer): Promise<void> {
+  if (overlayPlayerHidden) pendingPlayerLayer.value = level;
+  await applyPlayerLayer(level);
+}
+
+async function applyPlayerLayer(level: OverlayLayer): Promise<void> {
   const state = unwrap(await window.api.player.setLayer({ level }));
   if (state) Object.assign(player, state);
 }

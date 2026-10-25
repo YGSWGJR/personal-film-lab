@@ -384,6 +384,10 @@ function overlayLayerChecksAssertions(result: Record<string, any>): Record<strin
     overlayExportHide: result.exportHidden === true,
     overlayExportNested: result.exportNestedStillHidden === true,
     overlayCloseRestore: result.restoredNormal === true,
+    overlayManualBottom: result.manualBottom === true,
+    overlayManualHidden: result.manualHidden === true,
+    overlayChangedWhileOpen: result.changedWhileOpen === true,
+    overlayNestedManual: result.nestedManual === true,
   };
 }
 
@@ -433,6 +437,50 @@ async function runOverlayLayerChecks(win: BrowserWindow): Promise<Record<string,
         document.querySelector('.settings-modal .modal-head button[aria-label="关闭"]')?.click();
         await waitFor(() => !document.querySelector('.settings-modal'));
         out.restoredNormal = await waitFor(async () => (await layer()) === 'normal');
+
+        const layerButton = document.querySelector('.layer-button');
+        const clickLayer = () => layerButton?.click();
+        clickLayer();
+        await waitFor(async () => (await layer()) === 'bottom');
+        document.querySelector('button[title="设置"]')?.click();
+        await waitFor(() => document.querySelector('.settings-modal'));
+        document.querySelector('.settings-modal .modal-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        out.manualBottom = await waitFor(async () => (await layer()) === 'bottom');
+
+        clickLayer();
+        await waitFor(async () => (await layer()) === 'hidden');
+        document.querySelector('button[title="设置"]')?.click();
+        await waitFor(() => document.querySelector('.settings-modal'));
+        document.querySelector('.settings-modal .modal-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        out.manualHidden = await waitFor(async () => (await layer()) === 'hidden');
+
+        clickLayer();
+        await waitFor(async () => (await layer()) === 'normal');
+        document.querySelector('button[title="设置"]')?.click();
+        await waitFor(() => document.querySelector('.settings-modal'));
+        await waitFor(async () => (await layer()) === 'hidden');
+        clickLayer();
+        await waitFor(async () => (await layer()) === 'normal');
+        clickLayer();
+        await waitFor(async () => (await layer()) === 'bottom');
+        document.querySelector('.settings-modal .modal-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        out.changedWhileOpen = await waitFor(async () => (await layer()) === 'bottom');
+
+        document.querySelector('button[title="设置"]')?.click();
+        await waitFor(() => document.querySelector('.settings-modal'));
+        document.querySelector('button[title="学习统计"]')?.click();
+        await waitFor(() => document.querySelector('.stats-modal'));
+        document.querySelector('.stats-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.stats-modal'));
+        await sleep(150);
+        const nestedHidden = (await layer()) === 'hidden';
+        document.querySelector('.settings-modal .modal-head button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        out.nestedManual = nestedHidden
+          && Boolean(await waitFor(async () => (await layer()) === 'bottom'));
         return out;
       } catch (error) {
         out.exception = String(error && error.stack ? error.stack : error);
