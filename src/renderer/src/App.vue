@@ -5,6 +5,7 @@ import emptyShotsImage from '../../../assets/design/design_empty_shots_1024x768.
 import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x768.png';
 import cutIcon from '../../../assets/design/design_icon_cut_48.png';
 import AppIcon from './components/AppIcon.vue';
+import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
@@ -92,6 +93,18 @@ const detectionProgress = ref<DetectProgressEvent | null>(null);
 const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
 const detectionJobId = ref<string | null>(null);
+interface ContextMenuItem {
+  label: string;
+  danger?: boolean;
+  disabled?: boolean;
+  action: () => void;
+}
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  items: [] as ContextMenuItem[],
+});
 const importWizardOpen = ref(false);
 const importWizardMode = ref<'startup' | 'session' | 'settings'>('startup');
 const importWizardItems = ref<Array<CandidateProject & { root: string; key: string }>>([]);
@@ -439,6 +452,35 @@ async function loadProject(
   }
 }
 
+async function refreshProjectData(projectId: string, preferredShotId?: string | null): Promise<boolean> {
+  const [shotResult, stillResult, noteResult] = await Promise.all([
+    window.api.shot.list({ projectId }),
+    window.api.still.list({ projectId }),
+    window.api.note.list({ projectId }),
+  ]);
+  const loadedShots = unwrap(shotResult);
+  const loadedStills = unwrap(stillResult);
+  const loadedNotes = unwrap(noteResult);
+  if (!loadedShots || !loadedStills || !loadedNotes) return false;
+
+  for (const key of Object.keys(notes)) delete notes[key];
+  for (const key of Object.keys(noteIds)) delete noteIds[key];
+  const mapped = mapShots(loadedShots, loadedStills);
+  shots.value = mapped;
+  projectStills.value = loadedStills;
+  seedDemoNoteMap(mapped, loadedNotes);
+  markers.value = markersFromData(mapped, loadedStills, loadedNotes);
+  const preferred =
+    mapped.find((shot) => shot.id === preferredShotId) ??
+    mapped.find((shot) => shot.id === selectedId.value) ??
+    mapped[0] ??
+    null;
+  selectedId.value = preferred?.id ?? null;
+  previewTimeMs.value = preferred?.startMs ?? 0;
+  await loadTags();
+  return true;
+}
+
 function samePath(left: string | null, right: string): boolean {
   if (!left) return false;
   return left.replaceAll('\\', '/').toLowerCase() === right.replaceAll('\\', '/').toLowerCase();
@@ -604,6 +646,101 @@ function selectShot(shot: WorkspaceShot): void {
   selectedId.value = shot.id;
   previewTimeMs.value = shot.startMs;
   if (player.hasFile) void seekTo(shot.startMs);
+}
+
+function openShotContextMenu(
+  shot: WorkspaceShot,
+  position: { x: number; y: number },
+): void {
+  const stillCount = projectStills.value.filter((still) => still.shotId === shot.id).length;
+  const hasNote = Boolean(notes[shot.id]?.trim());
+  const suffix =
+    stillCount > 0 || hasNote
+      ? `（含${stillCount > 0 ? ` ${stillCount} 张静帧` : ''}${stillCount > 0 && hasNote ? '与' : ''}${hasNote ? '笔记' : ''}）`
+      : '';
+  contextMenu.x = position.x;
+  contextMenu.y = position.y;
+  contextMenu.items = [
+    {
+      label: demoMode.value ? '示例镜头不可删除' : `删除镜头${suffix}`,
+      danger: true,
+      disabled: demoMode.value,
+      action: () => {
+        void deleteShot(shot);
+      },
+    },
+  ];
+  contextMenu.visible = true;
+}
+
+function openStillContextMenu(still: Still, position: { x: number; y: number }): void {
+  contextMenu.x = position.x;
+  contextMenu.y = position.y;
+  contextMenu.items = [
+    {
+      label: '删除静帧',
+      danger: true,
+      action: () => {
+        void deleteStill(still);
+      },
+    },
+  ];
+  contextMenu.visible = true;
+}
+
+function closeContextMenu(): void {
+  contextMenu.visible = false;
+}
+
+async function deleteShot(shot: WorkspaceShot): Promise<void> {
+  if (demoMode.value || !activeProject.value) {
+    showToast('示例镜头不会被写入数据库，无需删除。');
+    return;
+  }
+  const projectId = activeProject.value.id;
+  const shotStills = projectStills.value.filter((still) => still.shotId === shot.id);
+  const hasNote = Boolean(notes[shot.id]?.trim());
+  const detail = [
+    shotStills.length > 0 ? `${shotStills.length} 张静帧` : '',
+    hasNote ? '笔记' : '',
+  ].filter(Boolean).join('与');
+  const confirmed = window.confirm(
+    `确定删除镜头「${shot.title}」吗？${detail ? `将同时删除其 ${detail}，` : ''}图片文件也会被移除。`,
+  );
+  if (!confirmed) return;
+
+  const index = shots.value.findIndex((item) => item.id === shot.id);
+  const neighborId = shots.value[index + 1]?.id ?? shots.value[index - 1]?.id ?? null;
+  busy.value = true;
+  try {
+    const result = await window.api.shot.delete({ id: shot.id });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    await refreshProjectData(projectId, neighborId);
+    showToast('镜头及其关联静帧、笔记已删除。', 'success');
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function deleteStill(still: Still): Promise<void> {
+  if (!window.confirm('确定删除这张静帧吗？图片文件也会被移除。')) return;
+  const projectId = still.projectId;
+  const shotId = still.shotId ?? selectedId.value;
+  busy.value = true;
+  try {
+    const result = await window.api.still.delete({ id: still.id });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    await refreshProjectData(projectId, shotId);
+    showToast('静帧记录和图片文件已删除。', 'success');
+  } finally {
+    busy.value = false;
+  }
 }
 
 function updateBoundary(change: BoundaryChange): void {
@@ -1605,8 +1742,25 @@ async function applyPlayerLayer(level: OverlayLayer): Promise<void> {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
-  const tagName = (event.target as HTMLElement | null)?.tagName;
-  if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') return;
+  const target = event.target as HTMLElement | null;
+  const tagName = target?.tagName;
+  if (
+    tagName === 'INPUT' ||
+    tagName === 'TEXTAREA' ||
+    tagName === 'SELECT' ||
+    target?.isContentEditable
+  ) {
+    return;
+  }
+
+  if (event.key === 'Delete') {
+    if (overlayOpen.value || contextMenu.visible || busy.value) return;
+    const shot = selectedShot.value;
+    if (!shot || demoMode.value) return;
+    event.preventDefault();
+    void deleteShot(shot);
+    return;
+  }
 
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
@@ -1868,6 +2022,7 @@ onBeforeUnmount(() => {
         @detect="openDetection"
         @collapse="leftCollapsed = true"
         @scroll-position="shotScrollTop = $event"
+        @context-menu="openShotContextMenu"
       />
 
       <PlayerWorkspace
@@ -1914,6 +2069,7 @@ onBeforeUnmount(() => {
         @set-annotations="saveAnnotations"
         @save-note="saveCurrentNote()"
         @capture="captureStill"
+        @context-menu="openStillContextMenu"
       />
     </div>
 
@@ -2076,6 +2232,14 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </transition>
+
+    <ContextMenu
+      :visible="contextMenu.visible"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      :items="contextMenu.items"
+      @close="closeContextMenu"
+    />
 
     <TermEditorModal
       :open="termEditorOpen"

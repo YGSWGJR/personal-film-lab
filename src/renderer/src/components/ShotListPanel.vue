@@ -17,6 +17,7 @@ const emit = defineEmits<{
   detect: [];
   collapse: [];
   scrollPosition: [value: number];
+  contextMenu: [shot: WorkspaceShot, position: { x: number; y: number }];
 }>();
 
 const ROW_HEIGHT = 44;
@@ -97,6 +98,7 @@ function durationText(ms: number): string {
           role="option"
           :aria-selected="shot.id === selectedId"
           @click="emit('select', shot)"
+          @contextmenu.prevent="emit('contextMenu', shot, { x: $event.clientX, y: $event.clientY })"
         >
           <span class="shot-thumb">
             <img :src="shot.thumbnail" :alt="`${shot.title} 缩略图`" />

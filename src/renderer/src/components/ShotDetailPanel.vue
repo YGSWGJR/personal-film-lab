@@ -30,6 +30,7 @@ const emit = defineEmits<{
   editTerm: [term: DetailTerm];
   importTerms: [];
   exportTerms: [];
+  contextMenu: [still: Still, position: { x: number; y: number }];
 }>();
 
 const locked = ref(true);
@@ -105,7 +106,7 @@ function normalizedPoint(event: PointerEvent): { x: number; y: number } {
 }
 
 function onStillPointerDown(event: PointerEvent): void {
-  if (!props.still || activeTool.value === 'none') return;
+  if (event.button !== 0 || !props.still || activeTool.value === 'none') return;
   const point = normalizedPoint(event);
   if (activeTool.value === 'text') {
     textEditor.value = { ...point, value: '' };
@@ -233,6 +234,7 @@ onBeforeUnmount(() => {
         @pointerdown="onStillPointerDown"
         @pointermove="onStillPointerMove"
         @pointerup="onStillPointerUp"
+        @contextmenu.prevent="still && emit('contextMenu', still, { x: $event.clientX, y: $event.clientY })"
       >
         <img :src="thumbnail" :alt="`${shot.title} 静帧`" />
         <svg class="annotation-layer" viewBox="0 0 1000 562.5" preserveAspectRatio="none" aria-hidden="true">

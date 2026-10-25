@@ -47,12 +47,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let stillUiChecks: Record<string, unknown> = {};
   let overlayLayerChecks: Record<string, unknown> = {};
   let detectionClickChecks: Record<string, unknown> = {};
+  let deleteUiChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -238,6 +239,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       });
     }
 
+    if (process.env['SMOKE_DELETE_UI'] === '1') {
+      deleteUiChecks = await runDeleteUiChecks(
+        win,
+        process.env['SMOKE_DELETE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, deleteUiChecksAssertions(deleteUiChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -251,7 +260,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -399,6 +408,201 @@ function overlayLayerChecksAssertions(result: Record<string, any>): Record<strin
     overlayChangedWhileOpen: result.changedWhileOpen === true,
     overlayNestedManual: result.nestedManual === true,
   };
+}
+
+function deleteUiChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    deleteShotMenu: result.shotMenuOk === true,
+    deleteShotRightClick: result.shotDeleted === true,
+    deleteStillMenu: result.stillMenuOk === true,
+    deleteStillRightClick: result.stillDeleted === true,
+    deleteKeyGuard: result.inputGuardOk === true,
+    deleteKeyShot: result.deleteKeyOk === true,
+    deleteNoOrphans: result.noOrphansOk === true,
+  };
+}
+
+async function runDeleteUiChecks(
+  win: BrowserWindow,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  if (!videoPath || !existsSync(videoPath)) {
+    return { exception: `missing test video: ${videoPath}` };
+  }
+  const fixtureProjectId = process.env['SMOKE_DELETE_PROJECT_ID'] ?? '';
+  let setup: Record<string, any>;
+  if (fixtureProjectId) {
+    setup = { ok: true, projectId: fixtureProjectId };
+  } else {
+    setup = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      try {
+        await sleep(2500);
+        const project = await window.api.project.create({
+          name: '删除交互测试',
+          source: { type: 'local', path: ${JSON.stringify(videoPath)} },
+          media: { filename: 'delete-test.mp4', durationMs: 4000, width: 640, height: 360, fps: 25 },
+        });
+        if (!project.ok) return { project };
+        const shot1 = await window.api.shot.create({
+          projectId: project.data.id,
+          startMs: 0,
+          endMs: 2000,
+          shotSize: '中景',
+        });
+        const shot2 = await window.api.shot.create({
+          projectId: project.data.id,
+          startMs: 2000,
+          endMs: 4000,
+          shotSize: '近景',
+        });
+        if (!shot1.ok || !shot2.ok) return { project, shot1, shot2 };
+        const tag = await window.api.tag.create({ category: '删除测试', name: '右键删除' });
+        if (tag.ok) await window.api.tag.assign({ shotId: shot1.data.id, tagIds: [tag.data.id] });
+        await window.api.note.upsert({
+          projectId: project.data.id,
+          shotId: shot1.data.id,
+          text: '随镜头一起删除',
+        });
+        const still1 = await window.api.still.capture({
+          projectId: project.data.id,
+          shotId: shot1.data.id,
+          timeMs: 1000,
+        });
+        const still2 = await window.api.still.capture({
+          projectId: project.data.id,
+          shotId: shot2.data.id,
+          timeMs: 3000,
+        });
+        if (!still1.ok || !still2.ok) return { project, still1, still2 };
+        await window.api.session.save({
+          projectId: project.data.id,
+          timeMs: 0,
+          selectedShotId: shot1.data.id,
+          leftCollapsed: false,
+          rightCollapsed: false,
+          volume: 1,
+          shotScrollTop: 0,
+        });
+        return { ok: true, projectId: project.data.id };
+      } catch (error) {
+        return { ok: false, exception: String(error && error.stack ? error.stack : error) };
+      }
+    })()
+    `)) as Record<string, any>;
+    if (!setup.ok) return setup;
+
+    await new Promise<void>((resolve) => {
+      win.webContents.once('did-finish-load', () => resolve());
+      win.webContents.reload();
+    });
+  }
+
+  const result = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const projectId = ${JSON.stringify(setup.projectId)};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 20000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const openMenu = async (selector) => {
+        const target = document.querySelector(selector);
+        if (!target) return null;
+        target.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          button: 2,
+          clientX: 180,
+          clientY: 180,
+        }));
+        return waitFor(() => document.querySelector('.context-menu'), 3000);
+      };
+      const originalConfirm = window.confirm;
+      try {
+        out.loaded = Boolean(await waitFor(() =>
+          document.querySelectorAll('.shot-row').length === 2
+        ));
+        if (!out.loaded) return out;
+
+        window.confirm = () => true;
+        const shotMenu = await openMenu('.shot-row');
+        out.shotMenuOk = Boolean(shotMenu)
+          && String(shotMenu.textContent || '').includes('删除镜头');
+        Array.from(shotMenu?.querySelectorAll('button') || [])
+          .find((button) => String(button.textContent || '').includes('删除镜头'))
+          ?.click();
+        out.shotDeleted = Boolean(await waitFor(async () => {
+          const shots = await window.api.shot.list({ projectId });
+          return shots.ok
+            && shots.data.length === 1
+            && !document.querySelector('.context-menu');
+        }));
+
+        const remainingShots = await window.api.shot.list({ projectId });
+        out.remainingShotCount = remainingShots.ok ? remainingShots.data.length : -1;
+        const remainingShotId = remainingShots.ok ? remainingShots.data[0]?.id : null;
+        const stillMenu = await openMenu('.still');
+        out.stillMenuOk = Boolean(stillMenu)
+          && String(stillMenu.textContent || '').includes('删除静帧');
+        Array.from(stillMenu?.querySelectorAll('button') || [])
+          .find((button) => String(button.textContent || '').includes('删除静帧'))
+          ?.click();
+        out.stillDeleted = Boolean(await waitFor(async () => {
+          if (document.querySelector('.context-menu')) return false;
+          const stills = await window.api.still.list({ shotId: remainingShotId });
+          return stills.ok && stills.data.length === 0;
+        }));
+
+        const textarea = document.querySelector('.note-section textarea');
+        textarea?.focus();
+        textarea?.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Delete',
+          bubbles: true,
+          cancelable: true,
+        }));
+        await sleep(300);
+        const guardedShots = await window.api.shot.list({ projectId });
+        out.inputGuardOk = guardedShots.ok
+          && guardedShots.data.length === 1
+          && document.querySelectorAll('.shot-row').length === 1;
+
+        textarea?.blur();
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Delete',
+          bubbles: true,
+          cancelable: true,
+        }));
+        out.deleteKeyOk = Boolean(await waitFor(async () => {
+          const shots = await window.api.shot.list({ projectId });
+          return shots.ok && shots.data.length === 0;
+        }));
+
+        const [shots, stills, notes] = await Promise.all([
+          window.api.shot.list({ projectId }),
+          window.api.still.list({ projectId }),
+          window.api.note.list({ projectId }),
+        ]);
+        out.noOrphansOk = shots.ok && shots.data.length === 0
+          && stills.ok && stills.data.length === 0
+          && notes.ok && notes.data.length === 0;
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      } finally {
+        window.confirm = originalConfirm;
+      }
+    })()
+  `)) as Record<string, any>;
+  return result;
 }
 
 async function runOverlayLayerChecks(win: BrowserWindow): Promise<Record<string, any>> {
