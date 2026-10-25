@@ -962,7 +962,13 @@ if ($UiSmoke) {
     $smoke.keepDataEffective = @(Get-EffectiveClasses)
     Show-Step3
     $smoke.step3Controls = $script:ContentPanel.Controls.Count
-    $smoke.uiOk = ($smoke.modeRadioCount -eq 3) -and ($smoke.customCheckCount -eq 6) -and ($smoke.selectedAfter -eq "Custom")
+    if ($DryRun) {
+        $script:DoBackup = $false
+        Start-UninstallFromUi
+        $smoke.step4Controls = $script:ContentPanel.Controls.Count
+        $smoke.step4Executed = $true
+    }
+    $smoke.uiOk = ($smoke.modeRadioCount -eq 3) -and ($smoke.customCheckCount -eq 6) -and ($smoke.selectedAfter -eq "Custom") -and ($smoke.step4Executed -eq $true)
     $form.Close()
     $smokeJson = $smoke | ConvertTo-Json -Depth 4
     [System.IO.File]::WriteAllText($ResultPath, $smokeJson, (New-Object System.Text.UTF8Encoding($false)))
