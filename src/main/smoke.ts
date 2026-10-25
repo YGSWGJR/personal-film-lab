@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { app, type BrowserWindow } from 'electron';
+import { unzipSync } from 'fflate';
 import { resolveDetectFramesDir } from './paths';
 import type { PlayerService } from './player/player-service';
 
@@ -42,12 +43,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let settingsVerifyChecks: Record<string, unknown> = {};
   let environmentLockChecks: Record<string, unknown> = {};
   let settingsDChecks: Record<string, unknown> = {};
+  let stillTimeChecks: Record<string, unknown> = {};
+  let stillUiChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -201,6 +204,24 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, settingsDChecksAssertions(settingsDChecks));
     }
 
+    if (process.env['SMOKE_STILL_TIME'] === '1') {
+      stillTimeChecks = await runStillTimeChecks(
+        win,
+        process.env['SMOKE_STILL_VIDEO'] ?? '',
+      );
+      Object.assign(checks, stillTimeChecksAssertions(stillTimeChecks));
+    }
+
+    if (process.env['SMOKE_STILL_UI'] === '1') {
+      stillUiChecks = await runStillTimeUiChecks(
+        win,
+        process.env['SMOKE_STILL_EXPECT_TIME'] ?? '00:00:01.234',
+      );
+      Object.assign(checks, {
+        stillUiTime: stillUiChecks.uiTimeOk === true,
+      });
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -214,7 +235,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -336,6 +357,162 @@ function settingsMigrationChecksAssertions(result: Record<string, any>): Record<
     settingsMigrationIdempotent: result.idempotentOk !== false,
     settingsMigrationData: result.dataOk !== false,
   };
+}
+
+function stillTimeChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    stillTimeDatabase: result.databaseOk === true,
+    stillTimeFilename: result.filenameOk === true,
+    stillTimeMetadata: result.metadataOk === true,
+    stillTimePdf: result.pdfOk === true,
+    stillTimeDocx: result.docxOk === true,
+  };
+}
+
+async function runStillTimeChecks(
+  win: BrowserWindow,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  if (!videoPath || !existsSync(videoPath)) {
+    return { exception: `missing test video: ${videoPath}` };
+  }
+  const result = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        const project = await window.api.project.create({
+          name: '静帧时间测试',
+          source: { type: 'local', path: ${JSON.stringify(videoPath)} },
+          media: {
+            filename: 'still-time-test.mp4',
+            durationMs: 4000,
+            width: 640,
+            height: 360,
+            fps: 25,
+          },
+        });
+        if (!project.ok) return { project };
+        const shot = await window.api.shot.create({
+          projectId: project.data.id,
+          startMs: 0,
+          endMs: 4000,
+          shotSize: '中景',
+        });
+        if (!shot.ok) return { project, shot };
+        const still = await window.api.still.capture({
+          projectId: project.data.id,
+          shotId: shot.data.id,
+          timeMs: 1234,
+          caption: '时间一致性',
+        });
+        if (!still.ok) return { project, shot, still };
+        const pdf = await window.api.export.storyboard({
+          projectId: project.data.id,
+          format: 'pdf',
+          imageStrategy: 'both',
+        });
+        const docx = await window.api.export.storyboard({
+          projectId: project.data.id,
+          format: 'docx',
+          imageStrategy: 'both',
+        });
+        await window.api.session.save({
+          projectId: project.data.id,
+          timeMs: 1234,
+          selectedShotId: shot.data.id,
+          leftCollapsed: false,
+          rightCollapsed: false,
+          volume: 1,
+          shotScrollTop: 0,
+        });
+        return {
+          project,
+          shot,
+          still,
+          pdf,
+          docx,
+          projectId: project.data.id,
+          shotId: shot.data.id,
+        };
+      } catch (error) {
+        return { exception: String(error && error.stack ? error.stack : error) };
+      }
+    })()
+  `)) as Record<string, any>;
+  if (!result.still?.ok) return result;
+
+  const still = result.still.data;
+  const stillPath =
+    /^[A-Za-z]:[\\/]/u.test(still.filePath) || still.filePath.startsWith('/')
+      ? still.filePath
+      : join(process.env['DSH_DATA_ROOT'] ?? '', 'projects', result.projectId, still.filePath);
+  const metadata = readPngTextMetadata(stillPath);
+  const filenameMatch = /still-(\d{8})-/u.exec(stillPath);
+  result.databaseOk = still.timeMs === 1234;
+  result.filenameOk = filenameMatch?.[1] === '00001234';
+  result.metadataOk =
+    metadata.Time === '00:00:01.234' && metadata.TimeMs === '1234';
+  result.pdfOk =
+    result.pdf?.ok === true &&
+    existsSync(result.pdf.data.filePath) &&
+    readFileSync(result.pdf.data.filePath).length > 0;
+  if (result.docx?.ok === true && existsSync(result.docx.data.filePath)) {
+    const zipped = unzipSync(new Uint8Array(readFileSync(result.docx.data.filePath)));
+    const documentXml = Buffer.from(zipped['word/document.xml'] ?? []).toString('utf8');
+    result.docxOk =
+      documentXml.includes('00:00:01.234') &&
+      documentXml.includes('00:00:02.000');
+  } else {
+    result.docxOk = false;
+  }
+  result.metadata = metadata;
+  return result;
+}
+
+async function runStillTimeUiChecks(
+  win: BrowserWindow,
+  expectedTime: string,
+): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const caption = document.querySelector('.still-caption');
+        if (caption) {
+          const text = String(caption.textContent || '').replace(/\\s+/g, ' ');
+          return {
+            text,
+            uiTimeOk: text.includes(${JSON.stringify(expectedTime)}),
+          };
+        }
+        await sleep(100);
+      }
+      return { text: '', uiTimeOk: false };
+    })()
+  `)) as Record<string, any>;
+}
+
+function readPngTextMetadata(filePath: string): Record<string, string> {
+  const data = readFileSync(filePath);
+  const values: Record<string, string> = {};
+  let offset = 8;
+  while (offset + 12 <= data.length) {
+    const length = data.readUInt32BE(offset);
+    const type = data.toString('ascii', offset + 4, offset + 8);
+    const next = offset + 12 + length;
+    if (next > data.length) break;
+    if (type === 'tEXt') {
+      const text = data.toString('latin1', offset + 8, offset + 8 + length);
+      const separator = text.indexOf('\0');
+      if (separator > 0) {
+        values[text.slice(0, separator)] = text.slice(separator + 1);
+      }
+    }
+    if (type === 'IEND') break;
+    offset = next;
+  }
+  return values;
 }
 
 function settingsVerifyChecksAssertions(result: Record<string, any>): Record<string, boolean> {

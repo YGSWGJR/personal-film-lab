@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { DetailTerm, WorkspaceShot } from '../types/workspace';
 import type { Annotation, Still, Tag } from '../../../shared/types';
+import { formatTimeMs } from '../../../shared/time';
 
 const props = defineProps<{
   shot: WorkspaceShot | null;
@@ -266,7 +267,10 @@ onBeforeUnmount(() => {
             >{{ annotation.label }}</text>
           </template>
         </svg>
-        <span class="still-caption">镜头 {{ String(shot.index).padStart(2, '0') }} · {{ shot.shotSize }}</span>
+        <span class="still-caption">
+          镜头 {{ String(shot.index).padStart(2, '0') }} · {{ shot.shotSize }}
+          <template v-if="still"> · {{ formatTimeMs(still.timeMs) }}</template>
+        </span>
         <div
           v-if="textEditor"
           class="text-editor"

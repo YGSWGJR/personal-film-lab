@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Annotation, Still } from '../../shared/types';
+import { formatTimeMs } from '../../shared/time';
 import type { DataLayer } from '../../data/db';
 import { ensureProjectDirs } from '../../data/paths';
 import type { MediaService } from '../media/media-service';
@@ -65,23 +66,29 @@ export class CaptureService {
     ensureProjectDirs(this.data.dataRoot, project.id);
     const stillDir = resolveProjectStillDir(project.id);
     mkdirSync(stillDir, { recursive: true });
-    const suffix = `${String(Math.round(args.timeMs)).padStart(8, '0')}-${randomUUID().slice(0, 8)}`;
+    const capturedTimeMs = Math.max(0, Math.round(args.timeMs));
+    const suffix = `${String(capturedTimeMs).padStart(8, '0')}-${randomUUID().slice(0, 8)}`;
     const pngPath = join(stillDir, `still-${suffix}.png`);
     const thumbPath = join(stillDir, `still-${suffix}-thumb.jpg`);
 
     try {
       const frame = await this.media.extractFrame({
         path: sourcePath,
-        timeMs: args.timeMs,
+        timeMs: capturedTimeMs,
         outputPath: pngPath,
         format: 'png',
       });
+      try {
+        writePngTimeMetadata(pngPath, capturedTimeMs);
+      } catch (error) {
+        console.warn(`[capture] PNG time metadata failed: ${(error as Error).message}`);
+      }
       await this.media.createThumbnail(pngPath, thumbPath, 480);
 
       const still = this.data.stills.create({
         projectId: project.id,
         shotId,
-        timeMs: args.timeMs,
+        timeMs: capturedTimeMs,
         filePath: pngPath,
         thumbPath,
         width: frame.width,
@@ -140,4 +147,65 @@ export class CaptureService {
       ? filePath
       : join(this.data.dataRoot, 'projects', projectId, filePath);
   }
+}
+
+export function writePngTimeMetadata(pngPath: string, timeMs: number): void {
+  const source = readFileSync(pngPath);
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (source.length < 8 || !source.subarray(0, 8).equals(signature)) {
+    throw new Error('not a PNG file');
+  }
+
+  let iendOffset = -1;
+  let offset = 8;
+  while (offset + 12 <= source.length) {
+    const length = source.readUInt32BE(offset);
+    const type = source.toString('ascii', offset + 4, offset + 8);
+    const next = offset + 12 + length;
+    if (next > source.length) throw new Error('invalid PNG chunk length');
+    if (type === 'IEND') {
+      iendOffset = offset;
+      break;
+    }
+    offset = next;
+  }
+  if (iendOffset < 0) throw new Error('PNG IEND chunk not found');
+
+  const metadata = [
+    pngTextChunk('Time', formatTimeMs(timeMs)),
+    pngTextChunk('TimeMs', String(Math.max(0, Math.round(timeMs)))),
+  ];
+  const output = Buffer.concat([
+    source.subarray(0, iendOffset),
+    ...metadata,
+    source.subarray(iendOffset),
+  ]);
+  writeFileSync(pngPath, output);
+}
+
+function pngTextChunk(keyword: string, value: string): Buffer {
+  const data = Buffer.from(`${keyword}\0${value}`, 'latin1');
+  const type = Buffer.from('tEXt', 'ascii');
+  const chunk = Buffer.allocUnsafe(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  type.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([type, data])), 8 + data.length);
+  return chunk;
+}
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }

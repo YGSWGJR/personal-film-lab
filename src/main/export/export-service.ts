@@ -33,6 +33,7 @@ import type {
   StoryboardHeader,
   StoryboardImageStrategy,
 } from '../../shared/types';
+import { formatTimeMs } from '../../shared/time';
 import type { CaptureService } from '../capture/capture-service';
 import { resolveProjectExportDir } from '../paths';
 import { ExportError } from './export-error';
@@ -232,7 +233,7 @@ export class ExportService {
           <tr>
             <td class="mono center">${String(shot.index).padStart(2, '0')}</td>
             <td class="mono center">${formatDuration(shot.durationMs)}</td>
-            <td class="image-cell thumb">${this.renderImage(row.thumbnailPath, '缩略图')}</td>
+            <td class="image-cell thumb">${this.renderImage(row.thumbnailPath, '缩略图', row.thumbnail?.timeMs)}</td>
             <td class="center">${escapeHtml(shot.shotSize ?? '—')}</td>
             <td>${escapeHtml(shot.cameraMethod ?? '—')}</td>
             <td class="image-cell content">${this.renderMainImage(row)}</td>
@@ -274,6 +275,7 @@ export class ExportService {
             .image-box img { width: 100%; height: 100%; object-fit: contain; }
             .image-placeholder { color: #94a3b8; font-size: 7pt; }
             .annotation-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+            .still-time { margin-top: 2px; color: #475569; font-family: "Cascadia Mono", Consolas, monospace; font-size: 5.2pt; white-space: nowrap; }
             .annotation-note { margin-top: 2px; color: #64748b; font-size: 6pt; }
             col:nth-child(1) { width: 5%; } col:nth-child(2) { width: 7%; } col:nth-child(3) { width: 9%; }
             col:nth-child(4) { width: 6%; } col:nth-child(5) { width: 8%; } col:nth-child(6) { width: 32%; }
@@ -304,9 +306,12 @@ export class ExportService {
       </html>`;
   }
 
-  private renderImage(filePath: string | null, alt: string): string {
-    if (!filePath || !existsSync(filePath)) return `<div class="image-box"><span class="image-placeholder">${alt}未生成</span></div>`;
-    return `<div class="image-box"><img src="${toDataUri(filePath)}" alt="${alt}" /></div>`;
+  private renderImage(filePath: string | null, alt: string, timeMs?: number): string {
+    const image =
+      !filePath || !existsSync(filePath)
+        ? `<div class="image-box"><span class="image-placeholder">${alt}未生成</span></div>`
+        : `<div class="image-box"><img src="${toDataUri(filePath)}" alt="${alt}" /></div>`;
+    return `${image}${this.renderStillTime(timeMs)}`;
   }
 
   private renderMainImage(row: StoryboardRow): string {
@@ -320,7 +325,14 @@ export class ExportService {
         ${annotations.map(annotationSvg).join('')}
       </svg>
     </div>
+    ${this.renderStillTime(row.mainStill?.timeMs)}
     ${annotations.length ? `<div class="annotation-note">包含 ${annotations.length} 个标注</div>` : ''}`;
+  }
+
+  private renderStillTime(timeMs?: number): string {
+    return Number.isFinite(timeMs)
+      ? `<div class="still-time">${formatTimeMs(timeMs as number)}</div>`
+      : '';
   }
 
   private async exportDocx(
@@ -350,10 +362,24 @@ export class ExportService {
           children: [
             docxCell(String(row.shot.index).padStart(2, '0'), 0, AlignmentType.CENTER, true, rowFill(rowIndex)),
             docxCell(formatDuration(row.shot.durationMs), 1, AlignmentType.CENTER, true, rowFill(rowIndex)),
-            docxImageCell(row.thumbnailPath, 2, row.thumbnail?.annotations.length ?? 0, false, rowFill(rowIndex)),
+            docxImageCell(
+              row.thumbnailPath,
+              2,
+              row.thumbnail?.annotations.length ?? 0,
+              row.thumbnail?.timeMs,
+              false,
+              rowFill(rowIndex),
+            ),
             docxCell(row.shot.shotSize ?? '—', 3, AlignmentType.CENTER, false, rowFill(rowIndex)),
             docxCell(row.shot.cameraMethod ?? '—', 4, undefined, false, rowFill(rowIndex)),
-            docxImageCell(row.imagePath, 5, row.mainStill?.annotations.length ?? 0, true, rowFill(rowIndex)),
+            docxImageCell(
+              row.imagePath,
+              5,
+              row.mainStill?.annotations.length ?? 0,
+              row.mainStill?.timeMs,
+              true,
+              rowFill(rowIndex),
+            ),
             docxCell(row.shot.dialogue ?? '—', 6, undefined, false, rowFill(rowIndex)),
             docxCell(row.shot.remark ?? '—', 7, undefined, false, rowFill(rowIndex)),
           ],
@@ -511,6 +537,7 @@ function docxImageCell(
   filePath: string | null,
   column: number,
   annotationCount: number,
+  timeMs?: number,
   large = false,
   fill?: string,
 ): TableCell {
@@ -534,6 +561,15 @@ function docxImageCell(
     );
   } else {
     children.push(docxParagraph('未生成', { align: AlignmentType.CENTER, color: '94A3B8' }));
+  }
+  if (Number.isFinite(timeMs)) {
+    children.push(
+      docxParagraph(formatTimeMs(timeMs as number), {
+        align: AlignmentType.CENTER,
+        color: '475569',
+        size: 14,
+      }),
+    );
   }
   if (annotationCount > 0) {
     children.push(docxParagraph(`标注 ${annotationCount}`, { align: AlignmentType.CENTER, color: '64748B', size: 14 }));
