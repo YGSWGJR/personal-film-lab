@@ -92,10 +92,12 @@ const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
 const detectionJobId = ref<string | null>(null);
 const importWizardOpen = ref(false);
+const importWizardMode = ref<'startup' | 'session'>('startup');
 const importWizardItems = ref<Array<CandidateProject & { root: string; key: string }>>([]);
 const importWizardSelected = ref<string[]>([]);
 const importWizardBusy = ref(false);
 const importWizardError = ref<string | null>(null);
+const missingSessionProjectId = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
 const audioWaveform = ref<AudioWaveform | null>(null);
 const audioLoading = ref(false);
@@ -1048,7 +1050,8 @@ function showUrlImportPending(): void {
   showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
 }
 
-function openImportWizard(sources: CandidateSource[]): void {
+function openImportWizard(mode: 'startup' | 'session', sources: CandidateSource[]): void {
+  importWizardMode.value = mode;
   importWizardItems.value = sources.flatMap((source) =>
     source.projects.map((project) => ({
       ...project,
@@ -1056,7 +1059,12 @@ function openImportWizard(sources: CandidateSource[]): void {
       key: `${source.root}::${project.id}`,
     })),
   );
-  importWizardSelected.value = [];
+  importWizardSelected.value =
+    mode === 'session'
+      ? importWizardItems.value
+          .filter((item) => item.id === missingSessionProjectId.value)
+          .map((item) => item.key)
+      : [];
   importWizardBusy.value = false;
   importWizardError.value = null;
   importWizardOpen.value = true;
@@ -1069,8 +1077,25 @@ async function scanStartupCandidates(): Promise<void> {
     return;
   }
   if (result.data.some((source) => source.projects.length > 0)) {
-    openImportWizard(result.data);
+    openImportWizard('startup', result.data);
   }
+}
+
+async function handleMissingSessionProject(projectId: string | null): Promise<void> {
+  missingSessionProjectId.value = projectId;
+  leftCollapsed.value = false;
+  rightCollapsed.value = false;
+  shotScrollTop.value = 0;
+  enterDemoWorkspace();
+
+  const result = await window.api.data.scanCandidates();
+  if (!result.ok) {
+    console.warn(`[data-import] ${result.error.code} ${result.error.message}`);
+    openImportWizard('session', []);
+    importWizardError.value = `无法扫描其他数据目录：${result.error.message}`;
+    return;
+  }
+  openImportWizard('session', result.data);
 }
 
 function toggleImportCandidate(key: string): void {
@@ -1105,9 +1130,16 @@ async function importCandidates(importAll: boolean): Promise<void> {
     }
     importWizardOpen.value = false;
     const projects = unwrap(await window.api.project.list());
-    const preferred = imported[0] ?? projects?.[0] ?? null;
+    const preferred =
+      (importWizardMode.value === 'session'
+        ? imported.find((project) => project.id === missingSessionProjectId.value)
+        : null) ??
+      imported[0] ??
+      projects?.[0] ??
+      null;
     if (preferred) await loadProject(preferred);
     else enterDemoWorkspace();
+    missingSessionProjectId.value = null;
     showToast(
       failures.length > 0
         ? `已导入 ${imported.length} 个项目，${failures.length} 个失败。`
@@ -1122,6 +1154,16 @@ async function importCandidates(importAll: boolean): Promise<void> {
 
 async function dismissImportWizard(): Promise<void> {
   if (importWizardBusy.value) return;
+  if (importWizardMode.value === 'session') {
+    const cleared = await window.api.session.clear();
+    if (!cleared.ok) {
+      importWizardError.value = `无法清除上次会话：${cleared.error.message}`;
+      return;
+    }
+    missingSessionProjectId.value = null;
+    enterDemoWorkspace();
+    showToast('已忽略上次会话并进入示例工作区。');
+  }
   importWizardOpen.value = false;
 }
 
@@ -1502,18 +1544,10 @@ onMounted(async () => {
         shotScrollTop.value = savedSession.shotScrollTop ?? 0;
         await loadProject(project, savedSession);
       } else {
-        leftCollapsed.value = false;
-        rightCollapsed.value = false;
-        shotScrollTop.value = 0;
-        enterDemoWorkspace();
-        void api.session.clear();
+        await handleMissingSessionProject(savedSession.projectId);
       }
     } else if (savedSession) {
-      leftCollapsed.value = false;
-      rightCollapsed.value = false;
-      shotScrollTop.value = 0;
-      enterDemoWorkspace();
-      void api.session.clear();
+      await handleMissingSessionProject(savedSession.projectId ?? null);
     } else if (projectResult.ok && projectResult.data.length > 0) {
       await loadProject(projectResult.data[0]);
       await scanStartupCandidates();
@@ -1763,9 +1797,24 @@ onBeforeUnmount(() => {
         <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="import-wizard-title">
           <header class="import-wizard-head">
             <div>
-              <p>数据目录恢复</p>
-              <h2 id="import-wizard-title">发现可恢复的项目</h2>
-              <span>这些项目来自其他数据目录。导入只会复制数据，不会移动或修改原项目。</span>
+              <p>{{ importWizardMode === 'session' ? '上次会话恢复' : '数据目录恢复' }}</p>
+              <h2 id="import-wizard-title">
+                {{
+                  importWizardMode === 'session'
+                    ? '上次打开的项目未找到'
+                    : '发现可恢复的项目'
+                }}
+              </h2>
+              <span v-if="importWizardMode === 'session'">
+                {{
+                  importWizardItems.length > 0
+                    ? `可能已删除或数据目录已变更。检测到 ${importWizardItems.length} 个可恢复项目，导入只会复制数据。`
+                    : '可能已删除或数据目录已变更，当前没有检测到可恢复项目。'
+                }}
+              </span>
+              <span v-else>
+                这些项目来自其他数据目录。导入只会复制数据，不会移动或修改原项目。
+              </span>
             </div>
           </header>
 
@@ -1788,26 +1837,44 @@ onBeforeUnmount(() => {
                 <span :title="item.root">{{ item.root }}</span>
               </span>
             </label>
+            <div v-if="importWizardItems.length === 0" class="import-empty-state">
+              <strong>没有找到可恢复的项目</strong>
+              <span>可以忽略这次恢复并进入示例工作区，之后从“导入影片”重新开始。</span>
+            </div>
           </div>
 
           <p v-if="importWizardError" class="import-wizard-error">{{ importWizardError }}</p>
 
           <footer class="import-wizard-actions">
             <button type="button" :disabled="importWizardBusy" @click="dismissImportWizard">
-              暂不导入
+              {{
+                importWizardMode === 'session'
+                  ? importWizardItems.length > 0
+                    ? '忽略并新建'
+                    : '知道了'
+                  : '暂不导入'
+              }}
             </button>
             <span></span>
-            <button type="button" :disabled="importWizardBusy" @click="importCandidates(true)">
-              全部导入
-            </button>
-            <button
-              class="primary"
-              type="button"
-              :disabled="importWizardBusy || importWizardSelected.length === 0"
-              @click="importCandidates(false)"
-            >
-              {{ importWizardBusy ? '正在导入…' : '导入所选' }}
-            </button>
+            <template v-if="importWizardItems.length > 0">
+              <button type="button" :disabled="importWizardBusy" @click="importCandidates(true)">
+                全部导入
+              </button>
+              <button
+                class="primary"
+                type="button"
+                :disabled="importWizardBusy || importWizardSelected.length === 0"
+                @click="importCandidates(false)"
+              >
+                {{
+                  importWizardBusy
+                    ? '正在导入…'
+                    : importWizardMode === 'session'
+                      ? '导入项目'
+                      : '导入所选'
+                }}
+              </button>
+            </template>
           </footer>
         </section>
       </div>
@@ -2006,6 +2073,29 @@ onBeforeUnmount(() => {
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.import-empty-state {
+  display: flex;
+  min-height: 110px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.import-empty-state strong {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.import-empty-state span {
+  max-width: 420px;
+  font-size: 10px;
+  line-height: 1.6;
 }
 
 .import-wizard-error {

@@ -37,12 +37,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let dataChecks: Record<string, unknown> = {};
   let importChecks: Record<string, unknown> = {};
   let detectChecks: Record<string, unknown> = {};
+  let sessionRecoveryChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -139,6 +140,16 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, detectChecksAssertions(detectChecks));
     }
 
+    const recoveryMode = process.env['SMOKE_SESSION_RECOVERY'];
+    if (recoveryMode) {
+      sessionRecoveryChecks = await runSessionRecoveryChecks(
+        win,
+        recoveryMode,
+        process.env['SMOKE_SESSION_PROJECT_ID'] ?? '',
+      );
+      Object.assign(checks, sessionRecoveryChecksAssertions(sessionRecoveryChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -152,7 +163,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -250,6 +261,137 @@ function detectChecksAssertions(result: Record<string, any>): Record<string, boo
     detectUrlSkipsLocalCheck: result.urlOk === true,
     detectNormalPreflight: result.normalOk === true,
   };
+}
+
+function sessionRecoveryChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    sessionRecoveryDialog: result.dialogOk === true,
+    sessionRecoveryCopy: result.copyOk === true,
+    sessionRecoveryPreserved: result.preservedOk === true,
+    sessionRecoveryControls: result.controlsOk === true,
+    sessionRecoveryAction: result.actionOk === true,
+    sessionRecoveryFinalState: result.finalStateOk === true,
+  };
+}
+
+async function runSessionRecoveryChecks(
+  win: BrowserWindow,
+  mode: string,
+  expectedProjectId: string,
+): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = { mode: ${JSON.stringify(mode)} };
+      const expectedProjectId = ${JSON.stringify(expectedProjectId)};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 15000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const buttonText = (button) => String(button && button.textContent || '').replace(/\\s+/g, '');
+      try {
+        if (${JSON.stringify(mode)} === 'normal') {
+          await sleep(800);
+          const wizard = document.querySelector('.import-wizard');
+          const session = await window.api.session.get();
+          const projects = await window.api.project.list();
+          const workspace = window.__CAPTURE_WORKSPACE_STATE__?.() ?? null;
+          out.dialogOk = !wizard;
+          out.copyOk = true;
+          out.preservedOk = session.ok === true
+            && session.data?.projectId === expectedProjectId;
+          out.controlsOk = true;
+          out.actionOk = true;
+          out.finalStateOk = projects.ok === true
+            && projects.data.some((project) => project.id === expectedProjectId)
+            && workspace?.projectId === expectedProjectId;
+          return out;
+        }
+        const wizard = await waitFor(() => document.querySelector('.import-wizard'));
+        out.dialogOk = Boolean(wizard);
+        if (!wizard) return out;
+        const title = String(wizard.querySelector('h2')?.textContent || '').replace(/\\s+/g, '');
+        out.title = title;
+        out.copyOk = title.includes('上次打开的项目未找到');
+
+        const before = await window.api.session.get();
+        out.sessionBefore = before;
+        out.preservedOk = before.ok === true
+          && before.data?.projectId === expectedProjectId;
+
+        const buttons = Array.from(wizard.querySelectorAll('.import-wizard-actions button'));
+        const labels = buttons.map(buttonText);
+        out.labels = labels;
+        const hasEmpty = Boolean(wizard.querySelector('.import-empty-state'));
+        const selected = wizard.querySelectorAll('.import-candidate input:checked').length;
+        out.selectedCandidates = selected;
+
+        if (${JSON.stringify(mode)} === 'no-candidates') {
+          out.controlsOk = hasEmpty === true
+            && labels.length === 1
+            && labels[0] === '知道了';
+          buttons[0]?.click();
+          await waitFor(() => !document.querySelector('.import-wizard'));
+          await sleep(400);
+          const after = await window.api.session.get();
+          const workspace = window.__CAPTURE_WORKSPACE_STATE__?.() ?? null;
+          out.finalStateOk = after.ok === true
+            && after.data === null
+            && workspace?.projectId === null;
+          out.actionOk = out.finalStateOk;
+          return out;
+        }
+
+        if (${JSON.stringify(mode)} === 'ignore') {
+          out.controlsOk = hasEmpty === false
+            && labels.includes('忽略并新建')
+            && labels.includes('导入项目');
+          buttons.find((button) => buttonText(button) === '忽略并新建')?.click();
+          await waitFor(() => !document.querySelector('.import-wizard'));
+          await sleep(400);
+          const after = await window.api.session.get();
+          const workspace = window.__CAPTURE_WORKSPACE_STATE__?.() ?? null;
+          out.finalStateOk = after.ok === true
+            && after.data === null
+            && workspace?.projectId === null;
+          out.actionOk = out.finalStateOk;
+          return out;
+        }
+
+        out.controlsOk = hasEmpty === false
+          && selected === 1
+          && labels.includes('忽略并新建')
+          && labels.includes('导入项目');
+        buttons.find((button) => buttonText(button) === '导入项目')?.click();
+        await waitFor(() => !document.querySelector('.import-wizard'), 20000);
+        let saved = null;
+        const sessionDeadline = Date.now() + 20000;
+        while (Date.now() < sessionDeadline) {
+          const session = await window.api.session.get();
+          if (session.ok && session.data?.projectId === expectedProjectId) {
+            saved = session;
+            break;
+          }
+          await sleep(100);
+        }
+        const projects = await window.api.project.list();
+        const workspace = window.__CAPTURE_WORKSPACE_STATE__?.() ?? null;
+        out.actionOk = Boolean(saved);
+        out.finalStateOk = projects.ok === true
+          && projects.data.some((project) => project.id === expectedProjectId)
+          && workspace?.projectId === expectedProjectId;
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
 }
 
 async function runDetectChecks(win: BrowserWindow, sourcePath: string): Promise<Record<string, any>> {
