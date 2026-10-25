@@ -41,12 +41,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let settingsMigrationChecks: Record<string, unknown> = {};
   let settingsVerifyChecks: Record<string, unknown> = {};
   let environmentLockChecks: Record<string, unknown> = {};
+  let settingsDChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -192,6 +193,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, environmentLockChecksAssertions(environmentLockChecks));
     }
 
+    if (process.env['SMOKE_SETTINGS_D'] === '1') {
+      settingsDChecks = await runSettingsDChecks(
+        win,
+        process.env['SMOKE_SETTINGS_D_ROOT'] ?? '',
+      );
+      Object.assign(checks, settingsDChecksAssertions(settingsDChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -205,7 +214,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -350,6 +359,138 @@ function environmentLockChecksAssertions(result: Record<string, any>): Record<st
   };
 }
 
+function settingsDChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    settingsDTenItems: result.tenItemsOk === true,
+    settingsDInheritance: result.inheritanceOk === true,
+    settingsDCustomSave: result.customSaveOk === true,
+    settingsDReset: result.resetOk === true,
+    settingsDResetSave: result.resetSaveOk === true,
+  };
+}
+
+async function runSettingsDChecks(
+  win: BrowserWindow,
+  customRoot: string,
+): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 15000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const setInput = (input, value) => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+          ?.set?.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const fieldByTitle = (modal, title) =>
+        Array.from(modal.querySelectorAll('.path-field')).find((field) =>
+          String(field.querySelector('strong')?.textContent || '').includes(title)
+        );
+      const customRoot = ${JSON.stringify(customRoot.replace(/\\/g, '/'))};
+      const custom = {
+        proxyCacheDir: customRoot + '/proxy',
+        frameCacheDir: customRoot + '/frames',
+        waveformCacheDir: customRoot + '/waveforms',
+        thumbCacheDir: customRoot + '/thumbs',
+        exportSubDir: customRoot + '/export-sub',
+        stillSubDir: customRoot + '/still-sub',
+      };
+      const titles = {
+        proxyCacheDir: '代理缓存目录',
+        frameCacheDir: '抽帧缓存目录',
+        waveformCacheDir: '波形缓存目录',
+        thumbCacheDir: '微缩图缓存目录',
+        exportSubDir: '导出子目录',
+        stillSubDir: '静帧子目录',
+      };
+      try {
+        await sleep(2500);
+        document.querySelector('button[title="设置"]')?.click();
+        let modal = await waitFor(() => document.querySelector('.settings-modal'));
+        if (!modal) return out;
+        const fields = Array.from(modal.querySelectorAll('.path-field'));
+        const optionalFields = fields.filter((field) =>
+          field.querySelector('.inherit-hint')
+        );
+        out.tenItemsOk = fields.length === 10 && optionalFields.length === 6;
+        out.inheritanceOk = optionalFields.length === 6
+          && optionalFields.every((field) =>
+            field.classList.contains('inherited')
+            && String(field.querySelector('input')?.placeholder || '').includes('继承：')
+          );
+
+        for (const [key, title] of Object.entries(titles)) {
+          const field = fieldByTitle(modal, title);
+          const input = field?.querySelector('input');
+          if (input) setInput(input, custom[key]);
+        }
+        await sleep(100);
+        modal.querySelector('button[type="submit"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        const saved = await waitFor(async () => {
+          const settings = await window.api.settings.get();
+          return settings.ok
+            && Object.entries(custom).every(([key, value]) =>
+              String(settings.data[key] || '').replace(/\\\\/g, '/').toLowerCase() === value.toLowerCase()
+            )
+            ? settings
+            : null;
+        });
+        out.customSaveOk = Boolean(saved);
+
+        document.querySelector('button[title="设置"]')?.click();
+        modal = await waitFor(() => document.querySelector('.settings-modal'));
+        if (!modal) return out;
+        Array.from(modal.querySelectorAll('footer button'))
+          .find((button) => String(button.textContent || '').includes('还原默认'))
+          ?.click();
+        const reset = await waitFor(() => {
+          const currentFields = Array.from(modal.querySelectorAll('.path-field'));
+          const optional = currentFields.filter((field) =>
+            String(field.querySelector('strong')?.textContent || '').match(
+              /代理缓存|抽帧缓存|波形缓存|微缩图缓存|导出子目录|静帧子目录/
+            )
+          );
+          return optional.length === 6
+            && optional.every((field) => !String(field.querySelector('input')?.value || '').trim())
+            ? currentFields
+            : null;
+        });
+        out.resetOk = Boolean(reset);
+        modal.querySelector('button[type="submit"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        const info = await window.api.app.getInfo();
+        const defaultDataRoot = info.ok
+          ? info.data.appDataPath.replace(/\\\\/g, '/') + '/lapian'
+          : '';
+        const resetSaved = await waitFor(async () => {
+          const settings = await window.api.settings.get();
+          return settings.ok
+            && settings.data.dataRoot.replace(/\\\\/g, '/').toLowerCase()
+              === defaultDataRoot.toLowerCase()
+            && Object.keys(custom).every((key) => settings.data[key] === undefined)
+            ? settings
+            : null;
+        });
+        out.resetSaveOk = Boolean(resetSaved);
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
+}
+
 async function runEnvironmentLockChecks(
   win: BrowserWindow,
   environmentRoot: string,
@@ -387,7 +528,7 @@ async function runEnvironmentLockChecks(
           && noteText.includes('.ps1');
         const inputs = Array.from(modal.querySelectorAll('.path-input input'));
         const submit = modal.querySelector('button[type="submit"]');
-        out.inputsDisabled = inputs.length === 4 && inputs.every((input) => input.disabled);
+        out.inputsDisabled = inputs.length === 10 && inputs.every((input) => input.disabled);
         out.saveDisabled = Boolean(submit && submit.disabled);
         Array.from(note?.querySelectorAll('button') || [])
           .find((button) => String(button.textContent || '').includes('检测'))
@@ -445,7 +586,7 @@ async function runEnvironmentLockChecks(
           out.successText = String(success?.textContent || '');
           out.unlockedDetectOk = out.successText.includes('已解除锁定');
           out.unlockedEditableOk = !modal.querySelector('.environment-note')
-            && inputs.length === 4
+            && inputs.length === 10
             && inputs.every((input) => !input.disabled)
             && Boolean(submit && !submit.disabled);
           return out;

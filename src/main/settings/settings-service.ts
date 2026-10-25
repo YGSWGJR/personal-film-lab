@@ -9,6 +9,19 @@ import type {
 } from '../../shared/types';
 import { defaultSettings, environmentDataRoot } from '../paths';
 
+const SETTINGS_PATH_FIELDS = [
+  'dataRoot',
+  'cacheDir',
+  'exportDir',
+  'stillDir',
+  'proxyCacheDir',
+  'frameCacheDir',
+  'waveformCacheDir',
+  'thumbCacheDir',
+  'exportSubDir',
+  'stillSubDir',
+] as const satisfies ReadonlyArray<keyof SettingsSetArgs>;
+
 export class SettingsError extends Error {
   readonly code: string;
   readonly details?: Record<string, unknown>;
@@ -63,7 +76,7 @@ export class SettingsService {
     const current = this.get();
     const normalized = normalizeSettings(args);
     for (const path of Object.values(normalized)) {
-      mkdirSync(path, { recursive: true });
+      if (path) mkdirSync(path, { recursive: true });
     }
 
     const previousStored = this.stored;
@@ -152,9 +165,7 @@ export function verifyStoredSettings(
     );
     if (!parsed.success) return false;
     const stored = normalizeSettings(parsed.data);
-    return (Object.keys(expected) as Array<keyof SettingsSetArgs>).every(
-      (key) => stored[key] === expected[key],
-    );
+    return SETTINGS_PATH_FIELDS.every((key) => stored[key] === expected[key]);
   } catch {
     return false;
   }
@@ -166,7 +177,18 @@ function normalizeSettings(args: SettingsSetArgs): SettingsSetArgs {
     cacheDir: normalizePath(args.cacheDir),
     exportDir: normalizePath(args.exportDir),
     stillDir: normalizePath(args.stillDir),
+    proxyCacheDir: normalizeOptionalPath(args.proxyCacheDir),
+    frameCacheDir: normalizeOptionalPath(args.frameCacheDir),
+    waveformCacheDir: normalizeOptionalPath(args.waveformCacheDir),
+    thumbCacheDir: normalizeOptionalPath(args.thumbCacheDir),
+    exportSubDir: normalizeOptionalPath(args.exportSubDir),
+    stillSubDir: normalizeOptionalPath(args.stillSubDir),
   };
+}
+
+function normalizeOptionalPath(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? normalizePath(trimmed) : undefined;
 }
 
 function normalizePath(value: string): string {

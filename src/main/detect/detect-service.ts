@@ -24,7 +24,7 @@ import type {
 import type { MediaService } from '../media/media-service';
 import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
 import { runProcess } from '../media/process-runner';
-import { resolveDetectFramesDir } from '../paths';
+import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
 import { DetectError } from './detect-error';
 
 const DEFAULT_WEIGHTS = { s: 0.15, c: 0.15, h: 0.25, hv: 0.2, edge: 0.1, grid: 0.15 };
@@ -209,7 +209,7 @@ export class DetectService {
 
       ensureProjectDirs(this.data.dataRoot, project.id);
       framesDir = resolveDetectFramesDir(project.id);
-      const thumbsDir = join(dirname(framesDir), 'thumbs', project.id);
+      const thumbsDir = join(resolveThumbCacheDir(), project.id);
       const fps = project.media.fps && project.media.fps > 0 ? project.media.fps : 25;
       const durationMs = project.media.durationMs;
       const intervalMs = resolveIntervalMs(options, fps, durationMs);

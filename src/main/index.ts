@@ -167,7 +167,7 @@ function confirmDataRootMigration(projectIds: string[]): SettingsMigrationResult
       pending.targetLayer,
       pending.previousRoot,
       projectId,
-      [pending.previousSettings.stillDir],
+      [pending.previousSettings.stillSubDir ?? pending.previousSettings.stillDir],
     );
     if (result.imported) imported.push(result.project);
     else skipped.push(projectId);

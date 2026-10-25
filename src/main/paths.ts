@@ -15,6 +15,12 @@ export function defaultSettings(): SettingsSetArgs {
     cacheDir: dataRoot,
     exportDir: join(dataRoot, 'projects'),
     stillDir: join(dataRoot, 'projects'),
+    proxyCacheDir: undefined,
+    frameCacheDir: undefined,
+    waveformCacheDir: undefined,
+    thumbCacheDir: undefined,
+    exportSubDir: undefined,
+    stillSubDir: undefined,
   };
 }
 
@@ -46,21 +52,51 @@ export function resolveExportRoot(): string {
   return envRoot ? join(envRoot, 'projects') : resolve(settings().exportDir);
 }
 
+export function resolveExportSubDir(): string {
+  const envRoot = environmentDataRoot();
+  if (envRoot) return join(envRoot, 'projects');
+  const current = settings();
+  return resolve(current.exportSubDir ?? current.exportDir);
+}
+
 export function resolveStillRoot(): string {
   const envRoot = environmentDataRoot();
   return envRoot ? join(envRoot, 'projects') : resolve(settings().stillDir);
 }
 
+export function resolveStillSubDir(): string {
+  const envRoot = environmentDataRoot();
+  if (envRoot) return join(envRoot, 'projects');
+  const current = settings();
+  return resolve(current.stillSubDir ?? current.stillDir);
+}
+
 export function resolveFrameCacheDir(): string {
-  return join(resolveCacheDir(), 'frames');
+  const current = settings();
+  return environmentDataRoot()
+    ? join(resolveCacheDir(), 'frames')
+    : resolve(current.frameCacheDir ?? join(resolveCacheDir(), 'frames'));
 }
 
 export function resolveProxyCacheDir(): string {
-  return join(resolveCacheDir(), 'proxies');
+  const current = settings();
+  return environmentDataRoot()
+    ? join(resolveCacheDir(), 'proxies')
+    : resolve(current.proxyCacheDir ?? join(resolveCacheDir(), 'proxies'));
 }
 
 export function resolveAudioWaveformCacheDir(): string {
-  return join(resolveCacheDir(), 'audio-waveforms');
+  const current = settings();
+  return environmentDataRoot()
+    ? join(resolveCacheDir(), 'audio-waveforms')
+    : resolve(current.waveformCacheDir ?? join(resolveCacheDir(), 'audio-waveforms'));
+}
+
+export function resolveThumbCacheDir(): string {
+  const current = settings();
+  return environmentDataRoot()
+    ? join(resolveFrameCacheDir(), 'thumbs')
+    : resolve(current.thumbCacheDir ?? join(resolveFrameCacheDir(), 'thumbs'));
 }
 
 export function resolveDetectFramesDir(projectId: string): string {
@@ -68,17 +104,23 @@ export function resolveDetectFramesDir(projectId: string): string {
 }
 
 export function resolveProjectExportDir(projectId: string): string {
-  return join(resolveExportRoot(), projectId, 'exports');
+  return join(resolveExportSubDir(), projectId, 'exports');
 }
 
 export function resolveProjectStillDir(projectId: string): string {
-  return join(resolveStillRoot(), projectId, 'stills');
+  return join(resolveStillSubDir(), projectId, 'stills');
 }
 
 export function resolveTermExportDir(): string {
-  return join(resolveExportRoot(), 'terms');
+  return join(resolveExportSubDir(), 'terms');
 }
 
 export function resolveAssetRoots(): string[] {
-  return [join(resolveDataRoot(), 'projects'), resolveStillRoot()];
+  return [
+    ...new Set([
+      resolve(join(resolveDataRoot(), 'projects')),
+      resolveStillRoot(),
+      resolveStillSubDir(),
+    ]),
+  ];
 }

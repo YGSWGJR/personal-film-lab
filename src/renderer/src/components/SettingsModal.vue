@@ -5,6 +5,7 @@ import type { Settings, SettingsSetArgs } from '../../../shared/types';
 
 type PathKey = keyof SettingsSetArgs;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
+type SettingsDraft = Record<PathKey, string>;
 
 const props = defineProps<{
   open: boolean;
@@ -18,21 +19,30 @@ const emit = defineEmits<{
   save: [value: SettingsSetArgs];
 }>();
 
-const draft = reactive<SettingsSetArgs>({
+const draft = reactive<SettingsDraft>({
   dataRoot: '',
   cacheDir: '',
   exportDir: '',
   stillDir: '',
+  proxyCacheDir: '',
+  frameCacheDir: '',
+  waveformCacheDir: '',
+  thumbCacheDir: '',
+  exportSubDir: '',
+  stillSubDir: '',
 });
 const browseError = ref<string | null>(null);
 const liveSettings = ref<Settings | null>(null);
 const checkingEnvironment = ref(false);
 const environmentCheck = ref<EnvironmentCheck | null>(null);
+const resettingDefaults = ref(false);
 const pathItems: Array<{
   key: PathKey;
   title: string;
   description: string;
-  icon: 'folder' | 'save' | 'camera' | 'panel-right';
+  icon: string;
+  optional?: boolean;
+  inheritedFrom?: string;
 }> = [
   {
     key: 'dataRoot',
@@ -58,22 +68,145 @@ const pathItems: Array<{
     description: '静帧 PNG 与 JPEG 缩略图输出根目录',
     icon: 'camera',
   },
+  {
+    key: 'proxyCacheDir',
+    title: '代理缓存目录',
+    description: '转码代理视频文件',
+    icon: 'layers',
+    optional: true,
+    inheritedFrom: '缓存根 / proxies',
+  },
+  {
+    key: 'frameCacheDir',
+    title: '抽帧缓存目录',
+    description: '媒体抽帧与临时图片',
+    icon: 'grid',
+    optional: true,
+    inheritedFrom: '缓存根 / frames',
+  },
+  {
+    key: 'waveformCacheDir',
+    title: '波形缓存目录',
+    description: '音频包络 JSON 缓存',
+    icon: 'chart',
+    optional: true,
+    inheritedFrom: '缓存根 / audio-waveforms',
+  },
+  {
+    key: 'thumbCacheDir',
+    title: '微缩图缓存目录',
+    description: '检测结果镜头缩略图',
+    icon: 'expand',
+    optional: true,
+    inheritedFrom: '抽帧缓存 / thumbs',
+  },
+  {
+    key: 'exportSubDir',
+    title: '导出子目录',
+    description: '项目导出与术语文件的父目录',
+    icon: 'save',
+    optional: true,
+    inheritedFrom: '导出根',
+  },
+  {
+    key: 'stillSubDir',
+    title: '静帧子目录',
+    description: '项目静帧 PNG 与缩略图的父目录',
+    icon: 'camera',
+    optional: true,
+    inheritedFrom: '静帧根',
+  },
 ];
+
+function fillDraft(settings: Settings): void {
+  draft.dataRoot = settings.dataRoot;
+  draft.cacheDir = settings.cacheDir;
+  draft.exportDir = settings.exportDir;
+  draft.stillDir = settings.stillDir;
+  draft.proxyCacheDir = settings.proxyCacheDir ?? '';
+  draft.frameCacheDir = settings.frameCacheDir ?? '';
+  draft.waveformCacheDir = settings.waveformCacheDir ?? '';
+  draft.thumbCacheDir = settings.thumbCacheDir ?? '';
+  draft.exportSubDir = settings.exportSubDir ?? '';
+  draft.stillSubDir = settings.stillSubDir ?? '';
+}
+
+function joinDisplayPath(base: string, ...parts: string[]): string {
+  const trimmed = base.trim();
+  if (!trimmed) return '';
+  const separator = trimmed.includes('\\') || /^[A-Za-z]:/u.test(trimmed) ? '\\' : '/';
+  return [trimmed.replace(/[\\/]+$/u, ''), ...parts].join(separator);
+}
+
+function inheritedPath(key: PathKey): string {
+  const cacheRoot = draft.cacheDir.trim();
+  const frameRoot = draft.frameCacheDir.trim() || joinDisplayPath(cacheRoot, 'frames');
+  switch (key) {
+    case 'proxyCacheDir':
+      return joinDisplayPath(cacheRoot, 'proxies');
+    case 'frameCacheDir':
+      return joinDisplayPath(cacheRoot, 'frames');
+    case 'waveformCacheDir':
+      return joinDisplayPath(cacheRoot, 'audio-waveforms');
+    case 'thumbCacheDir':
+      return joinDisplayPath(frameRoot, 'thumbs');
+    case 'exportSubDir':
+      return draft.exportDir.trim();
+    case 'stillSubDir':
+      return draft.stillDir.trim();
+    default:
+      return '';
+  }
+}
+
+function pathPlaceholder(item: (typeof pathItems)[number]): string {
+  if (!item.optional) return `选择${item.title}`;
+  const inherited = inheritedPath(item.key);
+  return inherited ? `继承：${inherited}` : `请先填写${item.inheritedFrom ?? '父目录'}`;
+}
+
+async function resetDefaults(): Promise<void> {
+  if (resettingDefaults.value || lockedByEnvironment.value) return;
+  resettingDefaults.value = true;
+  browseError.value = null;
+  try {
+    const result = await window.api.app.getInfo();
+    if (!result.ok) {
+      browseError.value = result.error.message;
+      return;
+    }
+    const dataRoot = joinDisplayPath(result.data.appDataPath, 'lapian');
+    draft.dataRoot = dataRoot;
+    draft.cacheDir = dataRoot;
+    draft.exportDir = joinDisplayPath(dataRoot, 'projects');
+    draft.stillDir = joinDisplayPath(dataRoot, 'projects');
+    draft.proxyCacheDir = '';
+    draft.frameCacheDir = '';
+    draft.waveformCacheDir = '';
+    draft.thumbCacheDir = '';
+    draft.exportSubDir = '';
+    draft.stillSubDir = '';
+    environmentCheck.value = null;
+  } finally {
+    resettingDefaults.value = false;
+  }
+}
 
 const activeSettings = computed(() => liveSettings.value ?? props.settings);
 const dataRootChanged = computed(
   () => Boolean(activeSettings.value && draft.dataRoot.trim() !== activeSettings.value.dataRoot),
 );
+const cacheDirChanged = computed(
+  () => Boolean(activeSettings.value && draft.cacheDir.trim() !== activeSettings.value.cacheDir),
+);
+const storageRootChanged = computed(() => dataRootChanged.value || cacheDirChanged.value);
 const lockedByEnvironment = computed(() => activeSettings.value?.environmentOverride === true);
 
 watch(
   () => [props.open, props.settings] as const,
   ([open, settings]) => {
     if (!open || !settings) return;
-    draft.dataRoot = settings.dataRoot;
-    draft.cacheDir = settings.cacheDir;
-    draft.exportDir = settings.exportDir;
-    draft.stillDir = settings.stillDir;
+    fillDraft(settings);
     liveSettings.value = settings;
     browseError.value = null;
     environmentCheck.value = null;
@@ -116,10 +249,7 @@ async function checkEnvironment(): Promise<void> {
       };
       return;
     }
-    draft.dataRoot = result.data.dataRoot;
-    draft.cacheDir = result.data.cacheDir;
-    draft.exportDir = result.data.exportDir;
-    draft.stillDir = result.data.stillDir;
+    fillDraft(result.data);
     browseError.value = null;
     environmentCheck.value = {
       tone: 'success',
@@ -137,13 +267,25 @@ async function checkEnvironment(): Promise<void> {
 
 function submit(): void {
   if (props.saving || lockedByEnvironment.value) return;
-  const value = {
+  const rootPaths = {
     dataRoot: draft.dataRoot.trim(),
     cacheDir: draft.cacheDir.trim(),
     exportDir: draft.exportDir.trim(),
     stillDir: draft.stillDir.trim(),
   };
-  if (Object.values(value).some((path) => !path)) return;
+  if (Object.values(rootPaths).some((path) => !path)) return;
+  const value: SettingsSetArgs = { ...rootPaths };
+  for (const key of [
+    'proxyCacheDir',
+    'frameCacheDir',
+    'waveformCacheDir',
+    'thumbCacheDir',
+    'exportSubDir',
+    'stillSubDir',
+  ] as const) {
+    const path = draft[key].trim();
+    if (path) value[key] = path;
+  }
   emit('save', value);
 }
 </script>
@@ -153,7 +295,7 @@ function submit(): void {
     <div
       v-if="open"
       class="modal-mask"
-      @pointerdown.self="!saving && !checkingEnvironment
+      @pointerdown.self="!saving && !checkingEnvironment && !resettingDefaults
         && emit('close')"
     >
       <form class="settings-modal" @submit.prevent="submit">
@@ -165,7 +307,7 @@ function submit(): void {
           </div>
           <button
             type="button"
-            :disabled="saving || checkingEnvironment"
+            :disabled="saving || checkingEnvironment || resettingDefaults"
             aria-label="关闭"
             @click="emit('close')"
           >
@@ -211,24 +353,36 @@ function submit(): void {
         </div>
 
         <section class="path-list">
-          <label v-for="item in pathItems" :key="item.key" class="path-field">
+          <label
+            v-for="item in pathItems"
+            :key="item.key"
+            class="path-field"
+            :class="{ inherited: item.optional && !draft[item.key].trim() }"
+          >
             <span class="path-copy">
               <span class="path-icon"><AppIcon :name="item.icon" :size="14" /></span>
               <span>
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.description }}</small>
+                <small v-if="item.optional" class="inherit-hint">
+                  {{
+                    draft[item.key].trim()
+                      ? '已设置独立目录'
+                      : `继承：${inheritedPath(item.key) || item.inheritedFrom}`
+                  }}
+                </small>
               </span>
             </span>
             <span class="path-input">
               <input
                 v-model="draft[item.key]"
-                :disabled="lockedByEnvironment || saving"
+                :disabled="lockedByEnvironment || saving || resettingDefaults"
                 spellcheck="false"
-                :placeholder="`选择${item.title}`"
+                :placeholder="pathPlaceholder(item)"
               />
               <button
                 type="button"
-                :disabled="lockedByEnvironment || saving"
+                :disabled="lockedByEnvironment || saving || resettingDefaults"
                 @click="choosePath(item.key)"
               >
                 浏览…
@@ -237,18 +391,35 @@ function submit(): void {
           </label>
         </section>
 
-        <div v-if="dataRootChanged" class="migration-warning">
-          保存后会先检查旧目录中的项目，由你选择迁移、跳过或取消本次目录更改。
+        <div v-if="storageRootChanged" class="migration-warning">
+          {{
+            dataRootChanged
+              ? '数据根目录变更后，会先检查旧项目并询问是否迁移。'
+              : '缓存根目录变更后，旧缓存不会自动迁移，新缓存将写入新位置。'
+          }}
         </div>
         <div v-if="browseError || error" class="settings-error">{{ browseError || error }}</div>
 
         <footer>
           <span>导出、截图和缓存目录会按项目 ID 自动建立子目录。</span>
-          <button type="button" :disabled="saving || checkingEnvironment" @click="emit('close')">取消</button>
+          <button
+            type="button"
+            :disabled="saving || checkingEnvironment || resettingDefaults"
+            @click="resetDefaults"
+          >
+            {{ resettingDefaults ? '读取默认值…' : '还原默认' }}
+          </button>
+          <button
+            type="button"
+            :disabled="saving || checkingEnvironment || resettingDefaults"
+            @click="emit('close')"
+          >
+            取消
+          </button>
           <button
             class="primary"
             type="submit"
-            :disabled="saving || lockedByEnvironment || checkingEnvironment"
+            :disabled="saving || lockedByEnvironment || checkingEnvironment || resettingDefaults"
           >
             {{ saving ? '保存中…' : '保存设置' }}
           </button>
@@ -496,6 +667,21 @@ function submit(): void {
 .path-copy small {
   color: var(--text-faint);
   font-size: 9px;
+}
+
+.path-copy .inherit-hint {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.path-field.inherited {
+  border-color: rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.035);
+}
+
+.path-field.inherited .path-input input::placeholder {
+  color: rgba(148, 163, 184, 0.72);
 }
 
 .path-icon {

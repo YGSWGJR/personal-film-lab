@@ -17,6 +17,12 @@ export const settingsSchema = z.object({
   cacheDir: settingsDirectorySchema,
   exportDir: settingsDirectorySchema,
   stillDir: settingsDirectorySchema,
+  proxyCacheDir: settingsDirectorySchema.optional(),
+  frameCacheDir: settingsDirectorySchema.optional(),
+  waveformCacheDir: settingsDirectorySchema.optional(),
+  thumbCacheDir: settingsDirectorySchema.optional(),
+  exportSubDir: settingsDirectorySchema.optional(),
+  stillSubDir: settingsDirectorySchema.optional(),
 });
 
 export const settingsSetArgsSchema = settingsSchema;
