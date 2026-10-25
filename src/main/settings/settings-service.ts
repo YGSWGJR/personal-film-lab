@@ -28,6 +28,7 @@ export class SettingsService {
   constructor(
     private readonly getWindow: () => BrowserWindow | null,
     private readonly onChange?: (next: Settings, previous: Settings) => void,
+    private readonly beforeVerify?: (settingsPath: string) => void,
   ) {
     this.settingsPath = join(app.getPath('userData'), 'settings.json');
     this.stored = this.loadStored();
@@ -41,11 +42,13 @@ export class SettingsService {
         cacheDir: envRoot,
         exportDir: join(envRoot, 'projects'),
         stillDir: join(envRoot, 'projects'),
+        settingsPath: this.settingsPath,
         environmentOverride: true,
       };
     }
     return {
       ...(this.stored ?? defaultSettings()),
+      settingsPath: this.settingsPath,
       environmentOverride: false,
     };
   }
@@ -64,10 +67,20 @@ export class SettingsService {
     }
 
     const previousStored = this.stored;
-    const next: Settings = { ...normalized, environmentOverride: false };
+    const next: Settings = {
+      ...normalized,
+      settingsPath: this.settingsPath,
+      environmentOverride: false,
+    };
     this.stored = normalized;
     try {
       this.writeStored(normalized);
+      this.beforeVerify?.(this.settingsPath);
+      if (!verifyStoredSettings(this.settingsPath, normalized)) {
+        throw new SettingsError('SETTINGS_VERIFY_FAILED', '设置写入后校验不一致，请重试', {
+          settingsPath: this.settingsPath,
+        });
+      }
       this.onChange?.(next, current);
     } catch (error) {
       this.stored = previousStored;
@@ -126,6 +139,24 @@ export class SettingsService {
   private writeStored(settings: SettingsSetArgs): void {
     mkdirSync(dirname(this.settingsPath), { recursive: true });
     writeFileSync(this.settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+  }
+}
+
+export function verifyStoredSettings(
+  settingsPath: string,
+  expected: SettingsSetArgs,
+): boolean {
+  try {
+    const parsed = settingsSetArgsSchema.safeParse(
+      JSON.parse(readFileSync(settingsPath, 'utf8')) as unknown,
+    );
+    if (!parsed.success) return false;
+    const stored = normalizeSettings(parsed.data);
+    return (Object.keys(expected) as Array<keyof SettingsSetArgs>).every(
+      (key) => stored[key] === expected[key],
+    );
+  } catch {
+    return false;
   }
 }
 

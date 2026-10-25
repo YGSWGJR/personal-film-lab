@@ -39,12 +39,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let detectChecks: Record<string, unknown> = {};
   let sessionRecoveryChecks: Record<string, unknown> = {};
   let settingsMigrationChecks: Record<string, unknown> = {};
+  let settingsVerifyChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -174,6 +175,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, settingsMigrationChecksAssertions(settingsMigrationChecks));
     }
 
+    if (process.env['SMOKE_SETTINGS_VERIFY'] === '1') {
+      settingsVerifyChecks = await runSettingsVerifyChecks(
+        win,
+        process.env['SMOKE_SETTINGS_EXPORT_DIR'] ?? '',
+      );
+      Object.assign(checks, settingsVerifyChecksAssertions(settingsVerifyChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -187,7 +196,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -309,6 +318,75 @@ function settingsMigrationChecksAssertions(result: Record<string, any>): Record<
     settingsMigrationIdempotent: result.idempotentOk !== false,
     settingsMigrationData: result.dataOk !== false,
   };
+}
+
+function settingsVerifyChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    settingsVerifySave: result.saveOk === true,
+    settingsVerifyRead: result.readBackOk === true,
+    settingsVerifyToast: result.toastOk === true,
+    settingsVerifyPath: result.pathOk === true,
+  };
+}
+
+async function runSettingsVerifyChecks(
+  win: BrowserWindow,
+  exportDir: string,
+): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 10000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      try {
+        await sleep(2500);
+        document.querySelector('button[title="设置"]')?.click();
+        const modal = await waitFor(() => document.querySelector('.settings-modal'));
+        out.modalOk = Boolean(modal);
+        if (!modal) return out;
+        const field = Array.from(modal.querySelectorAll('.path-field')).find((item) =>
+          String(item.querySelector('strong')?.textContent || '').includes('导出目录')
+        );
+        const input = field?.querySelector('input');
+        if (!input) return out;
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+          ?.set?.call(input, ${JSON.stringify(exportDir)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await sleep(50);
+        const submit = modal.querySelector('button[type="submit"]');
+        submit?.click();
+        const closed = await waitFor(() => !document.querySelector('.settings-modal'));
+        out.saveOk = Boolean(closed);
+        const toast = await waitFor(() => document.querySelector('.toast'));
+        await sleep(100);
+        const toastText = String(toast?.textContent || '');
+        const settings = await window.api.settings.get();
+        out.readBackOk = settings.ok === true
+          && settings.data.exportDir.replace(/\\\\/g, '/').toLowerCase()
+            === ${JSON.stringify(exportDir.replace(/\\/g, '/'))}.toLowerCase();
+        out.settingsPath = settings.ok ? settings.data.settingsPath : null;
+        out.pathOk = settings.ok === true
+          && Boolean(settings.data.settingsPath)
+          && String(settings.data.settingsPath).endsWith('settings.json');
+        out.toastOk = toastText.includes('设置已保存')
+          && Boolean(out.settingsPath)
+          && toastText.includes(String(out.settingsPath));
+        out.toastText = toastText;
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
 }
 
 async function runSettingsMigrationChecks(

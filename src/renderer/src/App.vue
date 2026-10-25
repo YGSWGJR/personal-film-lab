@@ -1377,15 +1377,20 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
       return;
     }
     settings.value = result.data;
+    const settingsPath = result.data.settingsPath ?? 'settings.json';
     const dataRootChanged = Boolean(previousRoot && previousRoot !== result.data.dataRoot);
     if (!dataRootChanged) {
       await closeSettings();
-      showToast('设置已保存，新的缓存、导出和截图路径已生效。', 'success');
+      showToast(
+        `设置已保存到 ${settingsPath}，新的缓存、导出和截图路径已生效。`,
+        'success',
+        '设置已保存',
+      );
       return;
     }
 
     await closeSettings();
-    showToast('数据目录已保存，正在检查旧项目是否可以迁移。');
+    showToast(`数据目录设置已保存到 ${settingsPath}，正在检查旧项目是否可以迁移。`);
   } finally {
     settingsSaving.value = false;
   }

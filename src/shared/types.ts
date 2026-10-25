@@ -15,6 +15,8 @@ export interface Settings {
   cacheDir: string;
   exportDir: string;
   stillDir: string;
+  /** settings.json 的实际位置，用于保存成功后的用户确认 */
+  settingsPath?: string;
   /** DSH_DATA_ROOT 环境变量生效时，路径设置被环境覆盖 */
   environmentOverride: boolean;
 }
