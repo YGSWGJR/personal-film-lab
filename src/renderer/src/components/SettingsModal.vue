@@ -150,7 +150,7 @@ function submit(): void {
         </section>
 
         <div v-if="dataRootChanged" class="migration-warning">
-          更改数据根目录后，现有项目数据不会自动迁移；新项目将写入新位置。
+          保存后会先检查旧目录中的项目，由你选择迁移、跳过或取消本次目录更改。
         </div>
         <div v-if="browseError || error" class="settings-error">{{ browseError || error }}</div>
 

@@ -26,6 +26,10 @@ export const settingsChooseDirectoryArgsSchema = z.object({
   defaultPath: z.string().trim().min(1).max(2000).optional(),
 });
 
+export const settingsMigrationConfirmArgsSchema = z.object({
+  projectIds: z.array(z.string().trim().min(1).max(200)).min(1).max(1000),
+});
+
 export const dataScanCandidatesArgsSchema = z.object({});
 
 export const dataImportProjectArgsSchema = z.object({

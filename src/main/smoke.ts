@@ -38,12 +38,13 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let importChecks: Record<string, unknown> = {};
   let detectChecks: Record<string, unknown> = {};
   let sessionRecoveryChecks: Record<string, unknown> = {};
+  let settingsMigrationChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -150,6 +151,29 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, sessionRecoveryChecksAssertions(sessionRecoveryChecks));
     }
 
+    const migrationMode = process.env['SMOKE_SETTINGS_MIGRATION'];
+    if (migrationMode) {
+      const oldRoot = join(app.getPath('userData'), 'lapian');
+      const targetRoot = process.env['SMOKE_SETTINGS_TARGET'] ?? '';
+      const projectId = process.env['SMOKE_SETTINGS_PROJECT_ID'] ?? '';
+      settingsMigrationChecks = await runSettingsMigrationChecks(
+        win,
+        migrationMode,
+        oldRoot,
+        targetRoot,
+        projectId,
+      );
+      if (migrationMode === 'confirm' && projectId) {
+        settingsMigrationChecks.assetCopied = existsSync(
+          join(targetRoot, 'projects', projectId, 'stills', 'ipc.png'),
+        );
+        settingsMigrationChecks.oldAssetPreserved = existsSync(
+          join(oldRoot, 'projects', projectId, 'stills', 'ipc.png'),
+        );
+      }
+      Object.assign(checks, settingsMigrationChecksAssertions(settingsMigrationChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -163,7 +187,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -272,6 +296,183 @@ function sessionRecoveryChecksAssertions(result: Record<string, any>): Record<st
     sessionRecoveryAction: result.actionOk === true,
     sessionRecoveryFinalState: result.finalStateOk === true,
   };
+}
+
+function settingsMigrationChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    settingsMigrationSet: result.setOk === true,
+    settingsMigrationDialog: result.dialogOk === true,
+    settingsMigrationSelection: result.selectionOk === true,
+    settingsMigrationFinalState: result.finalOk === true,
+    settingsMigrationAsset: result.assetCopied !== false,
+    settingsMigrationSourcePreserved: result.oldAssetPreserved !== false,
+    settingsMigrationIdempotent: result.idempotentOk !== false,
+    settingsMigrationData: result.dataOk !== false,
+  };
+}
+
+async function runSettingsMigrationChecks(
+  win: BrowserWindow,
+  mode: string,
+  oldRoot: string,
+  targetRoot: string,
+  projectId: string,
+): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = { mode: ${JSON.stringify(mode)} };
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalize = (value) => String(value || '').replace(/\\\\/g, '/').replace(/\\/+$/, '').toLowerCase();
+      const targetRoot = ${JSON.stringify(targetRoot.replace(/\\/g, '/'))};
+      const oldRoot = ${JSON.stringify(oldRoot.replace(/\\/g, '/'))};
+      const projectId = ${JSON.stringify(projectId)};
+      const waitFor = async (check, timeoutMs = 20000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const buttonText = (button) => String(button && button.textContent || '').replace(/\\s+/g, '');
+      try {
+        await sleep(2500);
+        const changed = await window.api.settings.set({
+          dataRoot: targetRoot,
+          cacheDir: targetRoot,
+          exportDir: targetRoot + '/projects',
+          stillDir: targetRoot + '/projects',
+        });
+        out.setOk = changed.ok === true;
+        out.setResult = changed;
+        if (!changed.ok) return out;
+
+        if (${JSON.stringify(mode)} === 'no-candidates') {
+          const settled = await waitFor(async () => {
+            const settings = await window.api.settings.get();
+            const projects = await window.api.project.list();
+            return settings.ok
+              && normalize(settings.data.dataRoot) === normalize(targetRoot)
+              && projects.ok
+              ? { settings, projects }
+              : null;
+          });
+          await sleep(500);
+          out.dialogOk = !document.querySelector('.import-wizard');
+          out.selectionOk = true;
+          out.finalOk = Boolean(settled)
+            && settled.projects.data.length === 0;
+          out.idempotentOk = true;
+          return out;
+        }
+
+        const wizard = await waitFor(() => document.querySelector('.import-wizard'));
+        out.dialogOk = Boolean(wizard);
+        if (!wizard) return out;
+        const title = String(wizard.querySelector('h2')?.textContent || '').replace(/\\s+/g, '');
+        const labels = Array.from(wizard.querySelectorAll('.import-wizard-actions button'))
+          .map(buttonText);
+        const candidates = wizard.querySelectorAll('.import-candidate');
+        out.title = title;
+        out.labels = labels;
+        out.candidateCount = candidates.length;
+
+        if (${JSON.stringify(mode)} === 'visual') {
+          out.selectionOk = title.includes('迁移旧项目')
+            && candidates.length === 1
+            && labels.includes('仅迁移选中');
+          out.finalOk = true;
+          out.idempotentOk = true;
+          return out;
+        }
+
+        if (${JSON.stringify(mode)} === 'cancel') {
+          out.selectionOk = title.includes('迁移旧项目') && candidates.length === 1;
+          Array.from(wizard.querySelectorAll('.import-wizard-actions button'))
+            .find((button) => buttonText(button) === '取消更改')?.click();
+          await waitFor(() => !document.querySelector('.import-wizard'));
+          const settled = await waitFor(async () => {
+            const settings = await window.api.settings.get();
+            const projects = await window.api.project.list();
+            return settings.ok
+              && normalize(settings.data.dataRoot) === normalize(oldRoot)
+              && projects.ok
+              && projects.data.some((project) => project.id === projectId)
+              ? { settings, projects }
+              : null;
+          });
+          out.finalOk = Boolean(settled);
+          out.idempotentOk = true;
+          return out;
+        }
+
+        if (${JSON.stringify(mode)} === 'skip') {
+          out.selectionOk = title.includes('迁移旧项目')
+            && candidates.length === 1
+            && labels.includes('跳过（不迁移）');
+          Array.from(wizard.querySelectorAll('.import-wizard-actions button'))
+            .find((button) => buttonText(button) === '跳过（不迁移）')?.click();
+          await waitFor(() => !document.querySelector('.import-wizard'));
+          const settled = await waitFor(async () => {
+            const settings = await window.api.settings.get();
+            const projects = await window.api.project.list();
+            return settings.ok
+              && normalize(settings.data.dataRoot) === normalize(targetRoot)
+              && projects.ok
+              ? { settings, projects }
+              : null;
+          });
+          out.finalOk = Boolean(settled) && settled.projects.data.length === 0;
+          out.idempotentOk = true;
+          return out;
+        }
+
+        out.selectionOk = title.includes('迁移旧项目')
+          && candidates.length === 1
+          && labels.includes('仅迁移选中');
+        const checkbox = wizard.querySelector('.import-candidate input');
+        if (checkbox && !checkbox.checked) checkbox.click();
+        await sleep(50);
+        Array.from(wizard.querySelectorAll('.import-wizard-actions button'))
+          .find((button) => buttonText(button) === '仅迁移选中')?.click();
+        await waitFor(() => !document.querySelector('.import-wizard'), 30000);
+        const settled = await waitFor(async () => {
+          const settings = await window.api.settings.get();
+          const projects = await window.api.project.list();
+          const workspace = window.__CAPTURE_WORKSPACE_STATE__?.() ?? null;
+          return settings.ok
+            && normalize(settings.data.dataRoot) === normalize(targetRoot)
+            && projects.ok
+            && projects.data.some((project) => project.id === projectId)
+            && workspace?.projectId === projectId
+            ? { settings, projects, workspace }
+            : null;
+        }, 30000);
+        out.finalOk = Boolean(settled);
+        if (settled) {
+          const shots = await window.api.shot.list({ projectId });
+          const stills = await window.api.still.list({ projectId });
+          out.dataOk = shots.ok === true
+            && shots.data.length === 1
+            && stills.ok === true
+            && stills.data.length === 1;
+          const repeated = await window.api.data.importProject({
+            root: oldRoot,
+            projectId,
+          });
+          out.idempotentOk = repeated.ok === true
+            && repeated.data.imported === false
+            && repeated.data.reason === 'already-exists';
+          out.repeated = repeated;
+        }
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
 }
 
 async function runSessionRecoveryChecks(

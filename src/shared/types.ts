@@ -31,6 +31,26 @@ export interface SettingsChooseDirectoryArgs {
   defaultPath?: string;
 }
 
+export interface SettingsDataRootChangingEvent {
+  previousRoot: string;
+  nextRoot: string;
+  projectCount: number;
+}
+
+export interface SettingsMigrationPreview {
+  root: string;
+  projects: CandidateProject[];
+}
+
+export interface SettingsMigrationConfirmArgs {
+  projectIds: string[];
+}
+
+export interface SettingsMigrationResult {
+  imported: Project[];
+  skipped: string[];
+}
+
 export interface CandidateProject {
   id: string;
   name: string;
@@ -53,6 +73,11 @@ export interface SettingsApi {
   get(): Promise<IpcResult<Settings>>;
   set(args: SettingsSetArgs): Promise<IpcResult<Settings>>;
   chooseDirectory(args: SettingsChooseDirectoryArgs): Promise<IpcResult<string | null>>;
+  previewMigration(): Promise<IpcResult<SettingsMigrationPreview>>;
+  confirmMigration(args: SettingsMigrationConfirmArgs): Promise<IpcResult<SettingsMigrationResult>>;
+  skipMigration(): Promise<IpcResult<Settings>>;
+  cancelMigration(): Promise<IpcResult<Settings>>;
+  onDataRootChanging(listener: (event: SettingsDataRootChangingEvent) => void): () => void;
 }
 
 export interface DataApi {

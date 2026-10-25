@@ -10,6 +10,11 @@ export const IPC = {
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
   SETTINGS_CHOOSE_DIRECTORY: 'settings:chooseDirectory',
+  SETTINGS_PREVIEW_MIGRATION: 'settings:previewMigration',
+  SETTINGS_CONFIRM_MIGRATION: 'settings:confirmMigration',
+  SETTINGS_SKIP_MIGRATION: 'settings:skipMigration',
+  SETTINGS_CANCEL_MIGRATION: 'settings:cancelMigration',
+  SETTINGS_DATA_ROOT_CHANGING: 'settings:dataRootChanging',
 
   /** session 域：工作区会话恢复 */
   SESSION_GET: 'session:get',

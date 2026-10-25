@@ -43,6 +43,7 @@ import type {
   Project,
   RenderBounds,
   Settings,
+  SettingsDataRootChangingEvent,
   SettingsSetArgs,
   Shot,
   Still,
@@ -92,12 +93,14 @@ const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
 const detectionJobId = ref<string | null>(null);
 const importWizardOpen = ref(false);
-const importWizardMode = ref<'startup' | 'session'>('startup');
+const importWizardMode = ref<'startup' | 'session' | 'settings'>('startup');
 const importWizardItems = ref<Array<CandidateProject & { root: string; key: string }>>([]);
 const importWizardSelected = ref<string[]>([]);
 const importWizardBusy = ref(false);
 const importWizardError = ref<string | null>(null);
 const missingSessionProjectId = ref<string | null>(null);
+const settingsMigrationPreviousRoot = ref<string | null>(null);
+const settingsMigrationNextRoot = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
 const audioWaveform = ref<AudioWaveform | null>(null);
 const audioLoading = ref(false);
@@ -1050,7 +1053,10 @@ function showUrlImportPending(): void {
   showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
 }
 
-function openImportWizard(mode: 'startup' | 'session', sources: CandidateSource[]): void {
+function openImportWizard(
+  mode: 'startup' | 'session' | 'settings',
+  sources: CandidateSource[],
+): void {
   importWizardMode.value = mode;
   importWizardItems.value = sources.flatMap((source) =>
     source.projects.map((project) => ({
@@ -1098,6 +1104,111 @@ async function handleMissingSessionProject(projectId: string | null): Promise<vo
   openImportWizard('session', result.data);
 }
 
+async function handleDataRootChanging(event: SettingsDataRootChangingEvent): Promise<void> {
+  settingsMigrationPreviousRoot.value = event.previousRoot;
+  settingsMigrationNextRoot.value = event.nextRoot;
+  if (event.projectCount === 0) {
+    await finalizePreparedDataRootSwitch();
+    return;
+  }
+
+  const preview = await window.api.settings.previewMigration();
+  if (!preview.ok) {
+    showToast(preview.error.message, 'error', preview.error.code);
+    openImportWizard('settings', []);
+    importWizardError.value = `无法读取旧数据目录：${preview.error.message}`;
+    return;
+  }
+  if (preview.data.projects.length === 0) {
+    await skipSettingsMigration();
+    return;
+  }
+  openImportWizard('settings', [
+    { root: preview.data.root, projects: preview.data.projects },
+  ]);
+}
+
+async function refreshWorkspaceAfterDataRootSwitch(preferred: Project[] = []): Promise<void> {
+  await closePlayer();
+  resetAudioWaveform();
+  enterDemoWorkspace();
+  const projects = unwrap(await window.api.project.list());
+  const project = preferred[0] ?? projects?.[0] ?? null;
+  if (project) await loadProject(project);
+}
+
+async function finalizePreparedDataRootSwitch(): Promise<void> {
+  await loadSettings();
+  await refreshWorkspaceAfterDataRootSwitch();
+  showToast('数据目录已切换，旧目录中的项目未迁移。', 'success', '设置已生效');
+}
+
+async function confirmSettingsMigration(items: Array<CandidateProject & { root: string; key: string }>): Promise<void> {
+  if (importWizardBusy.value) return;
+  importWizardBusy.value = true;
+  importWizardError.value = null;
+  try {
+    const result = await window.api.settings.confirmMigration({
+      projectIds: items.map((item) => item.id),
+    });
+    if (!result.ok) {
+      importWizardError.value = result.error.message;
+      return;
+    }
+    importWizardOpen.value = false;
+    await loadSettings();
+    await refreshWorkspaceAfterDataRootSwitch(result.data.imported);
+    showToast(
+      result.data.skipped.length > 0
+        ? `已迁移 ${result.data.imported.length} 个项目，跳过 ${result.data.skipped.length} 个已有项目。`
+        : `已迁移 ${result.data.imported.length} 个项目到新目录。`,
+      'success',
+      '数据迁移完成',
+    );
+  } finally {
+    importWizardBusy.value = false;
+  }
+}
+
+async function skipSettingsMigration(): Promise<void> {
+  if (importWizardBusy.value) return;
+  importWizardBusy.value = true;
+  importWizardError.value = null;
+  try {
+    const result = await window.api.settings.skipMigration();
+    if (!result.ok) {
+      importWizardError.value = result.error.message;
+      return;
+    }
+    settings.value = result.data;
+    importWizardOpen.value = false;
+    await refreshWorkspaceAfterDataRootSwitch();
+    showToast('已切换到新数据目录，旧项目未复制。', 'success', '设置已生效');
+  } finally {
+    importWizardBusy.value = false;
+  }
+}
+
+async function cancelSettingsMigration(): Promise<void> {
+  if (importWizardBusy.value) return;
+  importWizardBusy.value = true;
+  importWizardError.value = null;
+  try {
+    const result = await window.api.settings.cancelMigration();
+    if (!result.ok) {
+      importWizardError.value = result.error.message;
+      return;
+    }
+    settings.value = result.data;
+    importWizardOpen.value = false;
+    settingsMigrationPreviousRoot.value = null;
+    settingsMigrationNextRoot.value = null;
+    showToast('已取消数据目录更改，原设置和数据保持不变。');
+  } finally {
+    importWizardBusy.value = false;
+  }
+}
+
 function toggleImportCandidate(key: string): void {
   importWizardSelected.value = importWizardSelected.value.includes(key)
     ? importWizardSelected.value.filter((item) => item !== key)
@@ -1111,6 +1222,10 @@ async function importCandidates(importAll: boolean): Promise<void> {
     : importWizardItems.value.filter((item) => importWizardSelected.value.includes(item.key));
   if (selected.length === 0) {
     importWizardError.value = '请至少选择一个项目';
+    return;
+  }
+  if (importWizardMode.value === 'settings') {
+    await confirmSettingsMigration(selected);
     return;
   }
 
@@ -1269,19 +1384,8 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
       return;
     }
 
-    await closePlayer();
-    settingsOpen.value = false;
-    resetAudioWaveform();
-    enterDemoWorkspace();
-    const projects = unwrap(await window.api.project.list());
-    if (projects && projects[0]) {
-      await loadProject(projects[0]);
-    }
-    showToast(
-      '数据目录已切换。现有项目不会自动迁移，新项目将写入新位置。',
-      'success',
-      '设置已生效',
-    );
+    await closeSettings();
+    showToast('数据目录已保存，正在检查旧项目是否可以迁移。');
   } finally {
     settingsSaving.value = false;
   }
@@ -1560,6 +1664,9 @@ onMounted(async () => {
   }
 
   unsubscribers.push(
+    api.settings.onDataRootChanging((event) => {
+      void handleDataRootChanging(event);
+    }),
     api.player.onState((state) => Object.assign(player, state)),
     api.player.onTime((event) => {
       player.timeMs = event.timeMs;
@@ -1797,15 +1904,31 @@ onBeforeUnmount(() => {
         <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="import-wizard-title">
           <header class="import-wizard-head">
             <div>
-              <p>{{ importWizardMode === 'session' ? '上次会话恢复' : '数据目录恢复' }}</p>
+              <p>
+                {{
+                  importWizardMode === 'settings'
+                    ? '数据目录迁移'
+                    : importWizardMode === 'session'
+                      ? '上次会话恢复'
+                      : '数据目录恢复'
+                }}
+              </p>
               <h2 id="import-wizard-title">
                 {{
-                  importWizardMode === 'session'
-                    ? '上次打开的项目未找到'
-                    : '发现可恢复的项目'
+                  importWizardMode === 'settings'
+                    ? '迁移旧项目到新目录'
+                    : importWizardMode === 'session'
+                      ? '上次打开的项目未找到'
+                      : '发现可恢复的项目'
                 }}
               </h2>
-              <span v-if="importWizardMode === 'session'">
+              <span v-if="importWizardMode === 'settings'">
+                原目录中的项目可以复制到新目录。迁移不会删除原数据，已有同名项目会跳过。
+                <small v-if="settingsMigrationPreviousRoot">
+                  {{ settingsMigrationPreviousRoot }} → {{ settingsMigrationNextRoot }}
+                </small>
+              </span>
+              <span v-else-if="importWizardMode === 'session'">
                 {{
                   importWizardItems.length > 0
                     ? `可能已删除或数据目录已变更。检测到 ${importWizardItems.length} 个可恢复项目，导入只会复制数据。`
@@ -1846,19 +1969,16 @@ onBeforeUnmount(() => {
           <p v-if="importWizardError" class="import-wizard-error">{{ importWizardError }}</p>
 
           <footer class="import-wizard-actions">
-            <button type="button" :disabled="importWizardBusy" @click="dismissImportWizard">
-              {{
-                importWizardMode === 'session'
-                  ? importWizardItems.length > 0
-                    ? '忽略并新建'
-                    : '知道了'
-                  : '暂不导入'
-              }}
-            </button>
-            <span></span>
-            <template v-if="importWizardItems.length > 0">
+            <template v-if="importWizardMode === 'settings'">
+              <button type="button" :disabled="importWizardBusy" @click="cancelSettingsMigration">
+                取消更改
+              </button>
+              <span></span>
+              <button type="button" :disabled="importWizardBusy" @click="skipSettingsMigration">
+                跳过（不迁移）
+              </button>
               <button type="button" :disabled="importWizardBusy" @click="importCandidates(true)">
-                全部导入
+                迁移全部
               </button>
               <button
                 class="primary"
@@ -1868,12 +1988,41 @@ onBeforeUnmount(() => {
               >
                 {{
                   importWizardBusy
-                    ? '正在导入…'
-                    : importWizardMode === 'session'
-                      ? '导入项目'
-                      : '导入所选'
+                    ? '正在迁移…'
+                    : '仅迁移选中'
                 }}
               </button>
+            </template>
+            <template v-else>
+              <button type="button" :disabled="importWizardBusy" @click="dismissImportWizard">
+                {{
+                  importWizardMode === 'session'
+                    ? importWizardItems.length > 0
+                      ? '忽略并新建'
+                      : '知道了'
+                    : '暂不导入'
+                }}
+              </button>
+              <span></span>
+              <template v-if="importWizardItems.length > 0">
+                <button type="button" :disabled="importWizardBusy" @click="importCandidates(true)">
+                  全部导入
+                </button>
+                <button
+                  class="primary"
+                  type="button"
+                  :disabled="importWizardBusy || importWizardSelected.length === 0"
+                  @click="importCandidates(false)"
+                >
+                  {{
+                    importWizardBusy
+                      ? '正在导入…'
+                      : importWizardMode === 'session'
+                        ? '导入项目'
+                        : '导入所选'
+                  }}
+                </button>
+              </template>
             </template>
           </footer>
         </section>
@@ -2001,6 +2150,15 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.55;
+}
+
+.import-wizard-head small {
+  display: block;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 9px;
 }
 
 .import-candidate-list {

@@ -48,6 +48,7 @@ import {
   playerSetVolumeArgsSchema,
   scopeExtractAudioWaveformArgsSchema,
   settingsChooseDirectoryArgsSchema,
+  settingsMigrationConfirmArgsSchema,
   settingsSetArgsSchema,
   statsProjectArgsSchema,
   workspaceStateSchema,
@@ -84,6 +85,10 @@ import type {
   ScopeExtractAudioWaveformArgs,
   Settings,
   SettingsChooseDirectoryArgs,
+  SettingsDataRootChangingEvent,
+  SettingsMigrationConfirmArgs,
+  SettingsMigrationPreview,
+  SettingsMigrationResult,
   SettingsSetArgs,
   WorkspaceState,
   TranscodeProxyArgs,
@@ -138,6 +143,10 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SETTINGS_GET]: emptyArgsSchema,
   [IPC.SETTINGS_SET]: settingsSetArgsSchema,
   [IPC.SETTINGS_CHOOSE_DIRECTORY]: settingsChooseDirectoryArgsSchema,
+  [IPC.SETTINGS_PREVIEW_MIGRATION]: emptyArgsSchema,
+  [IPC.SETTINGS_CONFIRM_MIGRATION]: settingsMigrationConfirmArgsSchema,
+  [IPC.SETTINGS_SKIP_MIGRATION]: emptyArgsSchema,
+  [IPC.SETTINGS_CANCEL_MIGRATION]: emptyArgsSchema,
   [IPC.SESSION_GET]: emptyArgsSchema,
   [IPC.SESSION_SAVE]: workspaceStateSchema,
   [IPC.SESSION_CLEAR]: emptyArgsSchema,
@@ -230,6 +239,7 @@ const EVENT_WHITELIST = {
   onStillCreated: IPC.STILL_EVENT_CREATED,
   onExportProgress: IPC.EXPORT_EVENT_PROGRESS,
   onExportDone: IPC.EXPORT_EVENT_DONE,
+  onDataRootChanging: IPC.SETTINGS_DATA_ROOT_CHANGING,
 } as const;
 
 async function invoke<T>(channel: string, args: unknown[] = []): Promise<IpcResult<T>> {
@@ -265,6 +275,13 @@ const settingsApi = {
   set: (args: SettingsSetArgs) => invoke<Settings>(IPC.SETTINGS_SET, [args]),
   chooseDirectory: (args: SettingsChooseDirectoryArgs) =>
     invoke<string | null>(IPC.SETTINGS_CHOOSE_DIRECTORY, [args]),
+  previewMigration: () => invoke<SettingsMigrationPreview>(IPC.SETTINGS_PREVIEW_MIGRATION),
+  confirmMigration: (args: SettingsMigrationConfirmArgs) =>
+    invoke<SettingsMigrationResult>(IPC.SETTINGS_CONFIRM_MIGRATION, [args]),
+  skipMigration: () => invoke<Settings>(IPC.SETTINGS_SKIP_MIGRATION),
+  cancelMigration: () => invoke<Settings>(IPC.SETTINGS_CANCEL_MIGRATION),
+  onDataRootChanging: (listener: (event: SettingsDataRootChangingEvent) => void) =>
+    subscribe<SettingsDataRootChangingEvent>(EVENT_WHITELIST.onDataRootChanging, listener),
 };
 
 const sessionApi = {

@@ -1,11 +1,21 @@
 import { app, BrowserWindow } from 'electron';
+import { resolve } from 'node:path';
 import { DataLayer } from '../data/db';
 import { ProjectPackageService } from '../data/project-package';
 import { IPC } from '../shared/ipc-channels';
-import type { WorkspaceState } from '../shared/types';
+import type {
+  CandidateProject,
+  Project,
+  Settings,
+  SettingsDataRootChangingEvent,
+  SettingsMigrationPreview,
+  SettingsMigrationResult,
+  WorkspaceState,
+} from '../shared/types';
 import { createMainWindow } from './app';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
+import { importProjectFrom, scanCandidateRoots } from './data/import-service';
 import { DetectService } from './detect/detect-service';
 import { ExportService } from './export/export-service';
 import { registerIpcHandlers } from './ipc';
@@ -14,7 +24,7 @@ import { PlayerService } from './player/player-service';
 import { resolveAssetRoots, resolveDataRoot, bindSettingsProvider } from './paths';
 import { ScopeService } from './scope/scope-service';
 import { SessionService } from './session/session-service';
-import { SettingsService } from './settings/settings-service';
+import { SettingsError, SettingsService } from './settings/settings-service';
 import { runSmokeTest } from './smoke';
 import { StatsService } from './stats/stats-service';
 import { TermTransferService } from './terms/term-transfer-service';
@@ -44,6 +54,16 @@ let statsService: StatsService | null = null;
 let exitCaptureStarted = false;
 let allowWindowClose = false;
 let closeCaptureStarted = false;
+
+interface PendingDataRootMigration {
+  previousSettings: Settings;
+  previousRoot: string;
+  targetRoot: string;
+  targetLayer: DataLayer;
+  candidates: CandidateProject[];
+}
+
+let pendingDataRootMigration: PendingDataRootMigration | null = null;
 
 async function captureWorkspaceSession(win: BrowserWindow): Promise<void> {
   if (!sessionService || win.isDestroyed()) return;
@@ -116,6 +136,125 @@ function rebuildDataServices(): void {
   previousLayer?.close();
 }
 
+function requirePendingMigration(): PendingDataRootMigration {
+  const pending = pendingDataRootMigration;
+  if (!pending) {
+    throw new SettingsError('SETTINGS_MIGRATION_NOT_PENDING', '没有待确认的数据目录迁移');
+  }
+  return pending;
+}
+
+function previewDataRootMigration(): SettingsMigrationPreview {
+  const pending = requirePendingMigration();
+  return { root: pending.previousRoot, projects: pending.candidates };
+}
+
+function confirmDataRootMigration(projectIds: string[]): SettingsMigrationResult {
+  const pending = requirePendingMigration();
+  const requested = [...new Set(projectIds)];
+  const available = new Set(pending.candidates.map((project) => project.id));
+  const unknown = requested.filter((projectId) => !available.has(projectId));
+  if (unknown.length > 0) {
+    throw new SettingsError('SETTINGS_MIGRATION_INVALID_SELECTION', '迁移列表中不存在所选项目', {
+      projectIds: unknown,
+    });
+  }
+
+  const imported: Project[] = [];
+  const skipped: string[] = [];
+  for (const projectId of requested) {
+    const result = importProjectFrom(
+      pending.targetLayer,
+      pending.previousRoot,
+      projectId,
+      [pending.previousSettings.stillDir],
+    );
+    if (result.imported) imported.push(result.project);
+    else skipped.push(projectId);
+  }
+
+  pending.targetLayer.close();
+  pendingDataRootMigration = null;
+  rebuildDataServices();
+  return { imported, skipped };
+}
+
+function skipDataRootMigration(): Settings {
+  const pending = requirePendingMigration();
+  pending.targetLayer.close();
+  pendingDataRootMigration = null;
+  rebuildDataServices();
+  return settingsService!.get();
+}
+
+function cancelDataRootMigration(): Settings {
+  const pending = requirePendingMigration();
+  const restored = settingsService!.restore(pending.previousSettings);
+  pending.targetLayer.close();
+  pendingDataRootMigration = null;
+  return restored;
+}
+
+function handleDataRootChange(next: Settings, previous: Settings): void {
+  if (pendingDataRootMigration) {
+    throw new SettingsError(
+      'SETTINGS_MIGRATION_ALREADY_PENDING',
+      '上一次数据目录更改尚未处理，请先完成或取消迁移',
+    );
+  }
+  const previousRoot = resolve(previous.dataRoot);
+  const targetRoot = resolve(next.dataRoot);
+  const targetLayer = new DataLayer(targetRoot);
+  try {
+    const source = scanCandidateRoots(targetLayer, [previousRoot]).find(
+      (item) => resolve(item.root) === previousRoot,
+    );
+    const candidates = source?.projects ?? [];
+    const event: SettingsDataRootChangingEvent = {
+      previousRoot,
+      nextRoot: targetRoot,
+      projectCount: candidates.length,
+    };
+
+    if (candidates.length === 0) {
+      targetLayer.close();
+      rebuildDataServices();
+      mainWindow?.webContents.send(IPC.SETTINGS_DATA_ROOT_CHANGING, event);
+      return;
+    }
+
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      throw new SettingsError('WINDOW_UNAVAILABLE', '主窗口尚未就绪，无法确认数据迁移');
+    }
+    pendingDataRootMigration = {
+      previousSettings: previous,
+      previousRoot,
+      targetRoot,
+      targetLayer,
+      candidates,
+    };
+    mainWindow.webContents.send(IPC.SETTINGS_DATA_ROOT_CHANGING, event);
+  } catch (error) {
+    if (pendingDataRootMigration?.targetLayer === targetLayer) {
+      pendingDataRootMigration = null;
+    }
+    targetLayer.close();
+    throw error;
+  }
+}
+
+function restorePendingMigrationOnShutdown(): void {
+  const pending = pendingDataRootMigration;
+  if (!pending) return;
+  pending.targetLayer.close();
+  pendingDataRootMigration = null;
+  try {
+    settingsService?.restore(pending.previousSettings);
+  } catch (error) {
+    console.warn(`[settings] 退出时恢复待迁移目录失败：${(error as Error).message}`);
+  }
+}
+
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
 
@@ -172,6 +311,10 @@ registerIpcHandlers({
   getDetect: () => detectService,
   getScope: () => scopeService,
   getSettings: () => settingsService,
+  previewSettingsMigration: () => previewDataRootMigration(),
+  confirmSettingsMigration: (projectIds) => confirmDataRootMigration(projectIds),
+  skipSettingsMigration: () => skipDataRootMigration(),
+  cancelSettingsMigration: () => cancelDataRootMigration(),
   getSession: () => sessionService,
   getStats: () => statsService,
 });
@@ -181,7 +324,7 @@ app.whenReady().then(() => {
   settingsService = new SettingsService(
     () => mainWindow,
     (next, previous) => {
-      if (next.dataRoot !== previous.dataRoot) rebuildDataServices();
+      if (next.dataRoot !== previous.dataRoot) handleDataRootChange(next, previous);
     },
   );
   bindSettingsProvider(() => settingsService!.get());
@@ -214,6 +357,7 @@ app.on('window-all-closed', () => {
 });
 
 function cleanupServices(): void {
+  restorePendingMigrationOnShutdown();
   dataLayer?.close();
   dataLayer = null;
   packageService = null;

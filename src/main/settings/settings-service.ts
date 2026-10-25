@@ -82,6 +82,26 @@ export class SettingsService {
     return next;
   }
 
+  /** 恢复已确认的旧设置，不触发目录切换回调（用于取消待确认迁移）。 */
+  restore(settings: Settings): Settings {
+    if (environmentDataRoot()) {
+      throw new SettingsError(
+        'SETTINGS_ENV_LOCKED',
+        'DSH_DATA_ROOT 环境变量正在覆盖路径设置，无法恢复目录设置。',
+      );
+    }
+    const normalized = normalizeSettings(settings);
+    const previousStored = this.stored;
+    this.stored = normalized;
+    try {
+      this.writeStored(normalized);
+    } catch (error) {
+      this.stored = previousStored;
+      throw error;
+    }
+    return this.get();
+  }
+
   async chooseDirectory(args: SettingsChooseDirectoryArgs): Promise<string | null> {
     const win = this.getWindow();
     if (!win) throw new SettingsError('WINDOW_UNAVAILABLE', '主窗口尚未就绪');

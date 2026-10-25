@@ -34,6 +34,9 @@ import type {
   ScopeExtractAudioWaveformArgs,
   Settings,
   SettingsChooseDirectoryArgs,
+  SettingsMigrationConfirmArgs,
+  SettingsMigrationPreview,
+  SettingsMigrationResult,
   SettingsSetArgs,
   Shot,
   ShotCreateArgs,
@@ -92,6 +95,10 @@ export interface IpcDeps {
   getDetect(): DetectService | null;
   getScope(): ScopeService | null;
   getSettings(): SettingsService | null;
+  previewSettingsMigration(): SettingsMigrationPreview;
+  confirmSettingsMigration(projectIds: string[]): SettingsMigrationResult;
+  skipSettingsMigration(): Settings;
+  cancelSettingsMigration(): Settings;
   getSession(): SessionService | null;
   getStats(): StatsService | null;
 }
@@ -185,6 +192,24 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: SettingsChooseDirectoryArgs): Promise<string | null> =>
       requireSettings().chooseDirectory(args),
     ),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_PREVIEW_MIGRATION,
+    withEnvelope((): SettingsMigrationPreview => deps.previewSettingsMigration()),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_CONFIRM_MIGRATION,
+    withEnvelope((args: SettingsMigrationConfirmArgs): SettingsMigrationResult =>
+      deps.confirmSettingsMigration(args.projectIds),
+    ),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_SKIP_MIGRATION,
+    withEnvelope((): Settings => deps.skipSettingsMigration()),
+  );
+  ipcMain.handle(
+    IPC.SETTINGS_CANCEL_MIGRATION,
+    withEnvelope((): Settings => deps.cancelSettingsMigration()),
   );
 
   // ---------- session ----------
