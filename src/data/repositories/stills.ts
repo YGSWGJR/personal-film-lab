@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Annotation, Still, StillCreateArgs, StillUpdateArgs } from '../../shared/types';
 import type { DataLayer } from '../db';
 import { DataError } from '../errors';
-import { toProjectRelativePath } from '../paths';
+import { removeProjectFiles, toProjectRelativePath } from '../paths';
 import { nowIso } from './projects';
 
 interface StillRow {
@@ -134,12 +134,18 @@ export class StillRepository {
     return this.get(current.id);
   }
 
-  delete(id: string): void {
+  delete(id: string, extraSafeRoots: string[] = []): void {
     const current = this.get(id);
     this.layer.transaction(() => {
       this.db.prepare('DELETE FROM stills WHERE id = ?').run(id);
       this.layer.projects.touch(current.projectId);
     });
+    removeProjectFiles(
+      this.layer.dataRoot,
+      current.projectId,
+      [current.filePath, current.thumbPath],
+      extraSafeRoots,
+    );
   }
 
   private assertProject(projectId: string): void {

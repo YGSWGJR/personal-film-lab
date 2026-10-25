@@ -82,6 +82,7 @@ import { SettingsError, type SettingsService } from '../settings/settings-servic
 import { SessionError, type SessionService } from '../session/session-service';
 import type { StatsService } from '../stats/stats-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
+import { resolveProjectStillDir } from '../paths';
 
 export interface IpcDeps {
   getWindow(): BrowserWindow | null;
@@ -413,7 +414,9 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.SHOT_DELETE,
     withEnvelope((args: { id: string }): { deleted: true } => {
-      requireData().shots.delete(args.id);
+      const data = requireData();
+      const projectId = data.shots.get(args.id).projectId;
+      data.shots.delete(args.id, [resolveProjectStillDir(projectId)]);
       return { deleted: true };
     }),
   );
@@ -452,7 +455,9 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.STILL_DELETE,
     withEnvelope((args: { id: string }): { deleted: true } => {
-      requireData().stills.delete(args.id);
+      const data = requireData();
+      const projectId = data.stills.get(args.id).projectId;
+      data.stills.delete(args.id, [resolveProjectStillDir(projectId)]);
       return { deleted: true };
     }),
   );

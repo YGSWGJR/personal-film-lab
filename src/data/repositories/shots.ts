@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Shot, ShotCreateArgs, ShotPreview, ShotUpdateArgs } from '../../shared/types';
 import type { DataLayer } from '../db';
 import { DataError, isSqliteConstraintError } from '../errors';
+import { removeProjectFiles } from '../paths';
 import { nowIso } from './projects';
 
 interface ShotRow {
@@ -128,12 +129,24 @@ export class ShotRepository {
     return this.get(current.id);
   }
 
-  delete(id: string): void {
+  delete(id: string, extraSafeRoots: string[] = []): void {
     const current = this.get(id);
+    const stillFiles = this.db
+      .prepare('SELECT file_path, thumb_path FROM stills WHERE shot_id = ?')
+      .all(id) as Array<{ file_path: string; thumb_path: string | null }>;
     this.layer.transaction(() => {
+      this.db.prepare('DELETE FROM shot_tags WHERE shot_id = ?').run(id);
+      this.db.prepare('DELETE FROM notes WHERE shot_id = ?').run(id);
+      this.db.prepare('DELETE FROM stills WHERE shot_id = ?').run(id);
       this.db.prepare('DELETE FROM shots WHERE id = ?').run(id);
       this.layer.projects.touch(current.projectId);
     });
+    removeProjectFiles(
+      this.layer.dataRoot,
+      current.projectId,
+      stillFiles.flatMap((still) => [still.file_path, still.thumb_path]),
+      extraSafeRoots,
+    );
   }
 
   /** 应用检测预览：保留 locked 镜头，替换其他镜头并跳过与 locked 区间重叠的候选。 */

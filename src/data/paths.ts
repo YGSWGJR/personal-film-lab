@@ -44,6 +44,36 @@ export function resolveProjectFilePath(dataRoot: string, projectId: string, file
     : resolve(dir, filePath);
 }
 
+/** 删除项目关联的单个文件；路径必须位于项目目录或调用方声明的安全根目录内。 */
+export function removeProjectFiles(
+  dataRoot: string,
+  projectId: string,
+  filePaths: Array<string | null | undefined>,
+  extraSafeRoots: string[] = [],
+): void {
+  const projectDir = projectDirOf(dataRoot, projectId);
+  const safeRoots = [projectDir, ...extraSafeRoots].map((root) => resolve(root));
+  const seen = new Set<string>();
+  for (const filePath of filePaths) {
+    if (!filePath) continue;
+    const target = resolveProjectFilePath(dataRoot, projectId, filePath);
+    if (seen.has(target)) continue;
+    seen.add(target);
+    const safe = safeRoots.some(
+      (root) => target.startsWith(`${root}${sep}`) && target !== root,
+    );
+    if (!safe) {
+      console.warn(`[data] skip unsafe file deletion outside project roots: ${target}`);
+      continue;
+    }
+    try {
+      rmSync(target, { force: true });
+    } catch (error) {
+      console.warn(`[data] file deletion failed: ${target}: ${(error as Error).message}`);
+    }
+  }
+}
+
 /** 文件系统安全名（用于导出包名） */
 export function sanitizeName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|]/g, '_').trim();
