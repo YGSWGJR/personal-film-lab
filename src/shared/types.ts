@@ -812,6 +812,8 @@ export interface StoryboardExportArgs {
   };
   headers?: StoryboardHeader[];
   imageStrategy?: StoryboardImageStrategy;
+  /** S33-2：导出时并入右侧标签与镜头笔记（默认 true） */
+  includeTags?: boolean;
 }
 
 export interface StoryboardExportResult {
