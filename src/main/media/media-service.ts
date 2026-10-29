@@ -14,6 +14,7 @@ import type {
   MediaProbeArgs,
   MediaProbeResult,
   MediaProgressEvent,
+  ProxyTier,
   TranscodeProxyArgs,
   TranscodeProxyResult,
   TranscodeQueueItem,
@@ -98,7 +99,8 @@ export interface ProxySizeOptions {
 export class MediaService {
   private readonly jobs = new Map<string, ActiveJob>();
   private readonly transcodeQueue: TranscodeQueueEntry[] = [];
-  private transcodeActive: TranscodeQueueEntry | null = null;
+  private transcodeActive: TranscodeQueueEntry[] = [];
+  private transcodeConcurrency = 2;
   private readonly transcodeRecent: TranscodeQueueEntry[] = [];
 
   constructor(private readonly getWindow: () => BrowserWindow | null) {}
@@ -392,7 +394,8 @@ export class MediaService {
     try {
       const sourcePath = this.validateInput(args.sourcePath);
       const sourceStat = this.statOrThrow(sourcePath, 'INPUT_NOT_FOUND', '源文件不可读');
-      const hash = proxyKey(sourcePath, sourceStat.size, sourceStat.mtimeMs);
+      const tier = args.tier ?? '540p';
+      const hash = proxyKey(sourcePath, sourceStat.size, sourceStat.mtimeMs, tier);
       const outputPath = args.outputPath
         ? this.validateOutputPath(args.outputPath)
         : join(resolveProxyCacheDir(), `${hash}-proxy.mp4`);
@@ -473,7 +476,7 @@ export class MediaService {
   queueList(): TranscodeQueueItem[] {
     const items = [
       ...this.transcodeQueue,
-      ...(this.transcodeActive ? [this.transcodeActive] : []),
+      ...this.transcodeActive,
       ...this.transcodeRecent,
     ];
     return items.map(({ jobId, sourcePath, hash, state, percent, message, encoderUsed, startedAt }) => ({
@@ -486,6 +489,11 @@ export class MediaService {
       encoderUsed,
       startedAt,
     }));
+  }
+
+  setTranscodeConcurrency(concurrency: 1 | 2): void {
+    this.transcodeConcurrency = concurrency;
+    if (this.transcodeActive.length < this.transcodeConcurrency) this.pump();
   }
 
   private async getCachedTranscodeResult(
@@ -534,29 +542,30 @@ export class MediaService {
   }
 
   private findPendingTranscode(hash: string): TranscodeQueueEntry | null {
-    if (this.transcodeActive?.hash === hash) return this.transcodeActive;
+    const active = this.transcodeActive.find((item) => item.hash === hash);
+    if (active) return active;
     return this.transcodeQueue.find((item) => item.hash === hash) ?? null;
   }
 
   private pump(): void {
-    if (this.transcodeActive || this.transcodeQueue.length === 0) return;
-    const item = this.transcodeQueue.shift();
-    if (!item) return;
-
-    this.transcodeActive = item;
-    item.state = 'running';
-    item.percent = 0;
-    item.message = '开始转码代理';
-    item.startedAt = Date.now();
-    this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
-    this.emitProgress({
-      jobId: item.jobId,
-      stage: 'transcode',
-      percent: 0,
-      message: item.message,
-      queueState: 'running',
-    });
-    void this.processQueuedTranscode(item);
+    while (this.transcodeActive.length < this.transcodeConcurrency && this.transcodeQueue.length > 0) {
+      const item = this.transcodeQueue.shift();
+      if (!item) break;
+      this.transcodeActive.push(item);
+      item.state = 'running';
+      item.percent = 0;
+      item.message = '开始转码代理';
+      item.startedAt = Date.now();
+      this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
+      this.emitProgress({
+        jobId: item.jobId,
+        stage: 'transcode',
+        percent: 0,
+        message: item.message,
+        queueState: 'running',
+      });
+      void this.processQueuedTranscode(item);
+    }
   }
 
   private async processQueuedTranscode(item: TranscodeQueueEntry): Promise<void> {
@@ -595,7 +604,7 @@ export class MediaService {
   }
 
   private finalizeQueueEntry(item: TranscodeQueueEntry): void {
-    if (this.transcodeActive === item) this.transcodeActive = null;
+    this.transcodeActive = this.transcodeActive.filter((active) => active !== item);
     this.jobs.delete(item.jobId);
     this.transcodeRecent.push(item);
     if (this.transcodeRecent.length > 20) this.transcodeRecent.shift();
@@ -617,12 +626,17 @@ export class MediaService {
       : selectBestEncoder(await resolveAvailableEncoders());
     item.encoderUsed = encoder.name;
     const proxyMode = args.proxyMode ?? 'balanced';
+    const tier = args.tier ?? '540p';
+    const tierResolution = resolutionForTier(tier);
+    const effectiveResolution =
+      args.proxyResolution && args.proxyResolution !== 'auto' ? args.proxyResolution : tierResolution;
+    const effectiveCrf = args.crf ?? (tier === '360p' ? 28 : 26);
     const audioCopied = Boolean(meta.hasAudio && AUDIO_COPY_CODECS.has(meta.audioCodec ?? ''));
     const proxySize = computeProxySize({
       srcWidth: meta.width,
       srcHeight: meta.height,
       mode: proxyMode,
-      resolution: args.proxyResolution,
+      resolution: effectiveResolution,
       maxHeight: args.maxHeight,
     });
     const targetWidth = proxySize.width;
@@ -646,7 +660,7 @@ export class MediaService {
       '0:a:0?',
       '-vf',
       `scale=${targetWidth}:${evenHeight}`,
-      ...buildVideoEncoderArgs(encoderName, proxyMode),
+      ...buildVideoEncoderArgs(encoderName, proxyMode, effectiveCrf),
       '-g',
       String(gopFrames),
       '-keyint_min',
@@ -695,6 +709,7 @@ export class MediaService {
       timeoutMs,
       signal: controller.signal,
       onStdoutLine,
+      lowPriority: true,
     });
 
     if (
@@ -725,6 +740,7 @@ export class MediaService {
         timeoutMs,
         signal: controller.signal,
         onStdoutLine,
+        lowPriority: true,
       });
     }
 
@@ -798,8 +814,9 @@ export class MediaService {
       return { jobId, cancelled: true };
     }
 
-    if (this.transcodeActive?.jobId === jobId) {
-      this.transcodeActive.controller.abort();
+    const active = this.transcodeActive.find((item) => item.jobId === jobId);
+    if (active) {
+      active.controller.abort();
       return { jobId, cancelled: true };
     }
 
@@ -999,8 +1016,11 @@ function clampInt(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-function proxyKey(sourcePath: string, size: number, mtimeMs: number): string {
-  const digest = createHash('sha256').update(`${resolve(sourcePath)}|${size}|${mtimeMs}`).digest('hex');
+function proxyKey(sourcePath: string, size: number, mtimeMs: number, tier?: ProxyTier): string {
+  const identity = tier
+    ? `${resolve(sourcePath)}|${size}|${mtimeMs}|${tier}`
+    : `${resolve(sourcePath)}|${size}|${mtimeMs}`;
+  const digest = createHash('sha256').update(identity).digest('hex');
   return digest.slice(0, 24);
 }
 
@@ -1012,7 +1032,7 @@ export function computeProxySize(opts: ProxySizeOptions): { width: number; heigh
   let targetHeight: number;
 
   if (explicitHeight !== null) {
-    targetHeight = Math.min(sourceEvenHeight, explicitHeight);
+    targetHeight = Math.min(sourceEvenHeight, explicitHeight, opts.maxHeight ?? explicitHeight);
   } else {
     const maxHeight = opts.mode === 'quality' ? 1080 : 540;
     targetHeight = Math.max(240, Math.min(srcHeight / 2, maxHeight));
@@ -1044,11 +1064,17 @@ function explicitResolutionHeight(resolution: ProxyResolution | undefined): numb
   }
 }
 
-function buildVideoEncoderArgs(encoderName: string, mode: ProxyMode): string[] {
+function resolutionForTier(tier: ProxyTier): ProxyResolution {
+  if (tier === '360p') return 'p360';
+  if (tier === '720p') return 'p720';
+  return 'p540';
+}
+
+function buildVideoEncoderArgs(encoderName: string, mode: ProxyMode, crf?: number): string[] {
   switch (encoderName) {
     case 'h264_nvenc': {
       const preset = mode === 'fast' ? 'p6' : mode === 'quality' ? 'p4' : 'p5';
-      const cq = mode === 'fast' ? '30' : mode === 'quality' ? '24' : '28';
+      const cq = String(crf ?? (mode === 'fast' ? 30 : mode === 'quality' ? 24 : 28));
       const maxrate = mode === 'quality' ? '6M' : '4M';
       const bufsize = mode === 'quality' ? '8M' : '6M';
       return [
@@ -1064,7 +1090,7 @@ function buildVideoEncoderArgs(encoderName: string, mode: ProxyMode): string[] {
     }
     case 'hevc_nvenc': {
       const preset = mode === 'fast' ? 'p6' : mode === 'quality' ? 'p4' : 'p5';
-      const cq = mode === 'fast' ? '30' : mode === 'quality' ? '24' : '30';
+      const cq = String(crf ?? (mode === 'fast' ? 30 : mode === 'quality' ? 24 : 30));
       const maxrate = mode === 'quality' ? '6M' : '3M';
       const bufsize = mode === 'quality' ? '8M' : '4M';
       return [
@@ -1079,25 +1105,25 @@ function buildVideoEncoderArgs(encoderName: string, mode: ProxyMode): string[] {
       ];
     }
     case 'h264_qsv':
-      return ['-c:v', 'h264_qsv', '-global_quality', qsvQuality(mode, '28')];
+      return ['-c:v', 'h264_qsv', '-global_quality', String(crf ?? qsvQuality(mode, '28'))];
     case 'hevc_qsv':
-      return ['-c:v', 'hevc_qsv', '-global_quality', qsvQuality(mode, '30')];
+      return ['-c:v', 'hevc_qsv', '-global_quality', String(crf ?? qsvQuality(mode, '30'))];
     case 'h264_amf':
       return [
         '-c:v', 'h264_amf',
         '-quality', 'balanced',
-        '-qp_i', amfQuality(mode, '26'),
-        '-qp_p', amfQuality(mode, '26'),
+        '-qp_i', String(crf ?? amfQuality(mode, '26')),
+        '-qp_p', String(crf ?? amfQuality(mode, '26')),
       ];
     case 'hevc_amf':
       return [
         '-c:v', 'hevc_amf',
         '-quality', 'balanced',
-        '-qp_i', amfQuality(mode, '28'),
-        '-qp_p', amfQuality(mode, '28'),
+        '-qp_i', String(crf ?? amfQuality(mode, '28')),
+        '-qp_p', String(crf ?? amfQuality(mode, '28')),
       ];
     case 'libx264':
-      return x264Args(mode);
+      return x264Args(mode, crf);
     default:
       return ['-c:v', encoderName];
   }
@@ -1111,11 +1137,11 @@ function amfQuality(mode: ProxyMode, balancedQuality: string): string {
   return mode === 'fast' ? '30' : mode === 'quality' ? '22' : balancedQuality;
 }
 
-function x264Args(mode: ProxyMode): string[] {
+function x264Args(mode: ProxyMode, crf?: number): string[] {
   const tune = ['-tune', 'fastdecode'];
-  if (mode === 'fast') return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', ...tune];
-  if (mode === 'quality') return ['-c:v', 'libx264', '-preset', 'medium', '-crf', '24', ...tune];
-  return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', ...tune];
+  if (mode === 'fast') return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', String(crf ?? 30), ...tune];
+  if (mode === 'quality') return ['-c:v', 'libx264', '-preset', 'medium', '-crf', String(crf ?? 24), ...tune];
+  return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', String(crf ?? 28), ...tune];
 }
 
 function firstFinite(values: Array<string | number | undefined | null>): number | null {

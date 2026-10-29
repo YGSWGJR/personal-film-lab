@@ -55,6 +55,7 @@ export class SettingsService {
         cacheDir: envRoot,
         exportDir: join(envRoot, 'projects'),
         stillDir: join(envRoot, 'projects'),
+        proxyTier: '540p',
         settingsPath: this.settingsPath,
         environmentOverride: true,
       };
@@ -75,7 +76,8 @@ export class SettingsService {
     }
     const current = this.get();
     const normalized = normalizeSettings(args);
-    for (const path of Object.values(normalized)) {
+    for (const key of SETTINGS_PATH_FIELDS) {
+      const path = normalized[key];
       if (path) mkdirSync(path, { recursive: true });
     }
 
@@ -165,7 +167,10 @@ export function verifyStoredSettings(
     );
     if (!parsed.success) return false;
     const stored = normalizeSettings(parsed.data);
-    return SETTINGS_PATH_FIELDS.every((key) => stored[key] === expected[key]);
+    return (
+      SETTINGS_PATH_FIELDS.every((key) => stored[key] === expected[key]) &&
+      stored.proxyTier === expected.proxyTier
+    );
   } catch {
     return false;
   }
@@ -183,6 +188,7 @@ function normalizeSettings(args: SettingsSetArgs): SettingsSetArgs {
     thumbCacheDir: normalizeOptionalPath(args.thumbCacheDir),
     exportSubDir: normalizeOptionalPath(args.exportSubDir),
     stillSubDir: normalizeOptionalPath(args.stillSubDir),
+    proxyTier: args.proxyTier ?? '540p',
   };
 }
 

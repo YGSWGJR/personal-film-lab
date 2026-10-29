@@ -78,6 +78,7 @@ const toast = ref<{ title: string; message: string; tone: 'default' | 'error' | 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let noteTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingNoteShotId: string | null = null;
+let transcodeQueueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 const termEditorOpen = ref(false);
 const editingTerm = ref<Term | null>(null);
 const termSaving = ref(false);
@@ -86,6 +87,8 @@ const exporting = ref(false);
 const exportProgress = ref<ExportProgressEvent | null>(null);
 const transcoding = ref(false);
 const transcodeProgress = ref<MediaProgressEvent | null>(null);
+const transcodeRunningCount = ref(0);
+const transcodeQueuedCount = ref(0);
 const detectionOpen = ref(false);
 const detecting = ref(false);
 const applyingDetection = ref(false);
@@ -127,6 +130,7 @@ let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
 let lastPlayerBounds: RenderBounds | null = null;
 let overlayPlayerHidden = false;
+let requestedTranscodeConcurrency: 1 | 2 = 2;
 const pendingPlayerLayer = ref<OverlayLayer | null>(null);
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let restoringSession = true;
@@ -520,52 +524,88 @@ async function createProjectForMedia(media: MediaInfo): Promise<Project | null> 
 async function openVideo(): Promise<void> {
   if (busy.value) return;
   busy.value = true;
+  let backgroundProxy: { projectId: string; sourcePath: string } | null = null;
   try {
     const media = unwrap(await window.api.player.openDialog());
     if (!media) return;
     loadedPlaybackPath.value = media.path;
     const project = await createProjectForMedia(media);
     if (project) {
-      let targetProject = project;
-      let usedProxy = false;
-      transcoding.value = true;
-      transcodeProgress.value = {
-        jobId: '',
-        stage: 'transcode',
-        percent: 0,
-        message: '正在生成 720p 代理',
-      };
-      const proxy = unwrap(
-        await window.api.media.transcodeProxy({
-          sourcePath: media.path,
-          maxHeight: 720,
-          crf: 26,
-        }),
-      );
-      if (proxy) {
-        const updated = unwrap(
-          await window.api.project.update({
-            id: project.id,
-            patch: { media: { proxyPath: proxy.outputPath } },
-          }),
-        );
-        if (updated) {
-          targetProject = updated;
-          usedProxy = true;
-        }
-      }
-      await loadProject(targetProject);
-      showToast(
-        usedProxy
-          ? '影片导入完成，可开始镜头检测或手动打点。'
-          : '代理转码失败，当前直接使用源文件；仍可继续拉片。',
-        usedProxy ? 'success' : 'error',
-      );
+      await loadProject(project);
+      backgroundProxy = { projectId: project.id, sourcePath: media.path };
+      showToast('影片已导入，可立即播放；代理正在后台生成。', 'success');
     }
   } finally {
-    transcoding.value = false;
-    transcodeProgress.value = null;
     busy.value = false;
+  }
+  if (backgroundProxy) {
+    setTimeout(() => void startBackgroundProxy(backgroundProxy.projectId, backgroundProxy.sourcePath), 0);
+  }
+}
+
+async function startBackgroundProxy(projectId: string, sourcePath: string): Promise<void> {
+  const tier = settings.value?.proxyTier ?? '540p';
+  transcoding.value = true;
+  transcodeProgress.value = {
+    jobId: '',
+    stage: 'transcode',
+    percent: 0,
+    message: `正在后台生成 ${tier} 代理`,
+    queueState: 'waiting',
+  };
+  try {
+    const proxy = unwrap(
+      await window.api.media.transcodeProxy({
+        sourcePath,
+        tier,
+      }),
+    );
+    if (!proxy) return;
+    const updated = unwrap(
+      await window.api.project.update({
+        id: projectId,
+        patch: { media: { proxyPath: proxy.outputPath } },
+      }),
+    );
+    if (updated) {
+      if (activeProject.value?.id === projectId) activeProject.value = updated;
+      showToast(`${tier} 代理已生成，下次打开项目将使用代理。`, 'success');
+    }
+  } finally {
+    await refreshTranscodeQueueState();
+  }
+}
+
+async function refreshTranscodeQueueState(): Promise<void> {
+  try {
+    const result = await window.api.media.queueList();
+    if (!result.ok) return;
+    transcodeRunningCount.value = result.data.filter((item) => item.state === 'running').length;
+    transcodeQueuedCount.value = result.data.filter((item) => item.state === 'waiting').length;
+    transcoding.value = transcodeRunningCount.value + transcodeQueuedCount.value > 0;
+    if (!transcoding.value) transcodeProgress.value = null;
+  } catch (error) {
+    console.warn('[transcode] 队列状态读取失败', error);
+  }
+}
+
+function scheduleTranscodeQueueRefresh(): void {
+  if (transcodeQueueRefreshTimer) return;
+  transcodeQueueRefreshTimer = setTimeout(() => {
+    transcodeQueueRefreshTimer = null;
+    void refreshTranscodeQueueState();
+  }, 120);
+}
+
+async function syncTranscodeConcurrency(): Promise<void> {
+  const concurrency: 1 | 2 = detecting.value || (player.hasFile && !player.paused) ? 1 : 2;
+  if (concurrency === requestedTranscodeConcurrency) return;
+  const previous = requestedTranscodeConcurrency;
+  requestedTranscodeConcurrency = concurrency;
+  const result = await window.api.media.setTranscodeConcurrency({ concurrency });
+  if (!result.ok) {
+    requestedTranscodeConcurrency = previous;
+    console.warn(`[transcode] 并发调整失败：${result.error.code} ${result.error.message}`);
   }
 }
 
@@ -582,6 +622,7 @@ async function openMediaPath(path: string, autoplay: boolean, reportError = true
     if (autoplay) {
       const next = unwrap(await window.api.player.play());
       if (next) Object.assign(player, next);
+      void syncTranscodeConcurrency();
     }
     return true;
   } catch (error) {
@@ -604,6 +645,7 @@ async function closePlayer(): Promise<void> {
     fps: 0,
     layer: 'normal',
   });
+  void syncTranscodeConcurrency();
 }
 
 async function togglePlayback(): Promise<void> {
@@ -620,7 +662,10 @@ async function togglePlayback(): Promise<void> {
       return;
     }
     const state = unwrap(await window.api.player.toggle());
-    if (state) Object.assign(player, state);
+    if (state) {
+      Object.assign(player, state);
+      void syncTranscodeConcurrency();
+    }
   } finally {
     busy.value = false;
   }
@@ -1246,7 +1291,7 @@ function stopDetectionPolling(): void {
 }
 
 async function openDetection(): Promise<void> {
-  if (busy.value || transcoding.value) {
+  if (busy.value) {
     showToast('当前任务尚未结束，请稍后再运行镜头检测。');
     return;
   }
@@ -1704,6 +1749,7 @@ async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
   stopDetectionPolling();
   detecting.value = true;
+  void syncTranscodeConcurrency();
   applyingDetection.value = false;
   detectionError.value = null;
   detectionResult.value = null;
@@ -1728,6 +1774,7 @@ async function startDetection(): Promise<void> {
   if (!started) {
     detecting.value = false;
     detectionError.value = '无法启动镜头检测';
+    void syncTranscodeConcurrency();
     return;
   }
   detectionJobId.value = started.jobId;
@@ -1737,6 +1784,7 @@ async function startDetection(): Promise<void> {
     if (!result.ok) {
       detectionError.value = result.error.message;
       detecting.value = false;
+      void syncTranscodeConcurrency();
       stopDetectionPolling();
       showToast(result.error.message, 'error', result.error.code);
       return;
@@ -1744,10 +1792,12 @@ async function startDetection(): Promise<void> {
     if (result.data.status === 'error') {
       detectionError.value = result.data.error ?? '镜头检测失败';
       detecting.value = false;
+      void syncTranscodeConcurrency();
       stopDetectionPolling();
       showToast(detectionError.value, 'error', '镜头检测失败');
     } else if (result.data.status === 'cancelled') {
       detecting.value = false;
+      void syncTranscodeConcurrency();
       stopDetectionPolling();
     }
   }, 500);
@@ -1758,6 +1808,7 @@ async function cancelDetection(): Promise<void> {
   unwrap(await window.api.detect.cancel({ jobId: detectionJobId.value }));
   stopDetectionPolling();
   detecting.value = false;
+  void syncTranscodeConcurrency();
   detectionOpen.value = false;
   showToast('镜头检测已取消。');
 }
@@ -1794,6 +1845,7 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
     showToast(message, 'error', '镜头应用失败');
   } finally {
     applyingDetection.value = false;
+    void syncTranscodeConcurrency();
   }
 }
 
@@ -1957,7 +2009,10 @@ onMounted(async () => {
     api.settings.onDataRootChanging((event) => {
       void handleDataRootChanging(event);
     }),
-    api.player.onState((state) => Object.assign(player, state)),
+    api.player.onState((state) => {
+      Object.assign(player, state);
+      void syncTranscodeConcurrency();
+    }),
     api.player.onTime((event) => {
       player.timeMs = event.timeMs;
       previewTimeMs.value = event.timeMs;
@@ -1973,11 +2028,14 @@ onMounted(async () => {
       player.width = media.width;
       player.height = media.height;
       player.fps = media.fps;
+      void syncTranscodeConcurrency();
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
     api.media.onProgress((event) => {
-      if (transcoding.value && event.stage === 'transcode') {
+      if (event.stage === 'transcode') {
         transcodeProgress.value = event;
+        transcoding.value = true;
+        scheduleTranscodeQueueRefresh();
       }
     }),
     api.detect.onProgress((event) => {
@@ -1991,6 +2049,7 @@ onMounted(async () => {
       detectionResult.value = event.result;
       detectionProgress.value = { jobId: event.jobId, stage: 'analyze', percent: 100 };
       detecting.value = false;
+      void syncTranscodeConcurrency();
       stopDetectionPolling();
     }),
     api.still.onCreated((still) => upsertStill(still)),
@@ -2025,6 +2084,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload);
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
+  if (transcodeQueueRefreshTimer) clearTimeout(transcodeQueueRefreshTimer);
   stopDetectionPolling();
   audioGeneration += 1;
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
@@ -2186,13 +2246,16 @@ onBeforeUnmount(() => {
     <transition name="toast">
       <div v-if="transcoding" class="transfer-toast">
         <div class="transfer-head">
-          <span>正在生成播放代理</span>
+          <span>后台转码 {{ transcodeRunningCount }}/2</span>
           <strong>{{ transcodeProgress?.percent ?? 0 }}%</strong>
         </div>
         <div class="transfer-track">
           <i :style="{ width: `${transcodeProgress?.percent ?? 0}%` }"></i>
         </div>
-        <small>{{ transcodeProgress?.message ?? '准备转码…' }}</small>
+        <small>
+          {{ transcodeProgress?.message ?? '准备转码…' }}
+          <template v-if="transcodeQueuedCount > 0"> · 队列中 {{ transcodeQueuedCount }}</template>
+        </small>
       </div>
     </transition>
 

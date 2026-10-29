@@ -312,6 +312,13 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     IPC.MEDIA_QUEUE_LIST,
     withEnvelope((): TranscodeQueueItem[] => requireMedia().queueList()),
   );
+  ipcMain.handle(
+    IPC.MEDIA_SET_TRANSCODE_CONCURRENCY,
+    withEnvelope((args: { concurrency: 1 | 2 }): { concurrency: number } => {
+      requireMedia().setTranscodeConcurrency(args.concurrency);
+      return { concurrency: args.concurrency };
+    }),
+  );
 
   // ---------- scope ----------
   ipcMain.handle(

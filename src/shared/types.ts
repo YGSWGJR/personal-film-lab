@@ -10,6 +10,8 @@ export interface AppInfo {
   appDataPath: string;
 }
 
+export type ProxyTier = '360p' | '540p' | '720p';
+
 export interface Settings {
   dataRoot: string;
   cacheDir: string;
@@ -25,6 +27,7 @@ export interface Settings {
   settingsPath?: string;
   /** DSH_DATA_ROOT 环境变量生效时，路径设置被环境覆盖 */
   environmentOverride: boolean;
+  proxyTier?: ProxyTier;
 }
 
 export interface SettingsSetArgs {
@@ -38,6 +41,7 @@ export interface SettingsSetArgs {
   thumbCacheDir?: string;
   exportSubDir?: string;
   stillSubDir?: string;
+  proxyTier?: ProxyTier;
 }
 
 export interface SettingsChooseDirectoryArgs {
@@ -301,6 +305,8 @@ export interface TranscodeProxyArgs {
   proxyMode?: 'fast' | 'balanced' | 'quality';
   /** 代理分辨率：auto 走档位规则，显式档覆盖自动规则，默认 auto */
   proxyResolution?: 'auto' | 'p240' | 'p360' | 'p540' | 'p720' | 'p1080';
+  /** S33-4：用户代理档位，参与缓存身份，默认 540p */
+  tier?: ProxyTier;
   /** 默认 60 分钟 */
   timeoutMs?: number;
 }
@@ -367,6 +373,7 @@ export interface MediaApi {
   transcodeProxy(args: TranscodeProxyArgs): Promise<IpcResult<TranscodeProxyResult>>;
   cancelJob(args: CancelJobArgs): Promise<IpcResult<CancelJobResult>>;
   queueList(): Promise<IpcResult<TranscodeQueueItem[]>>;
+  setTranscodeConcurrency(args: { concurrency: 1 | 2 }): Promise<IpcResult<{ concurrency: number }>>;
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
 }
 
