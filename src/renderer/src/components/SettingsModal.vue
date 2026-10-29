@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
-import type { Settings, SettingsSetArgs } from '../../../shared/types';
+import type { ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
 
-type PathKey = keyof SettingsSetArgs;
+type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier'>;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 type SettingsDraft = Record<PathKey, string>;
 
@@ -33,6 +33,12 @@ const draft = reactive<SettingsDraft>({
 });
 const browseError = ref<string | null>(null);
 const liveSettings = ref<Settings | null>(null);
+const proxyTier = ref<ProxyTier>('540p');
+const proxyTierOptions = [
+  { value: '360p', label: '360p', hint: '最快' },
+  { value: '540p', label: '540p', hint: '均衡' },
+  { value: '720p', label: '720p', hint: '更清晰' },
+] as const;
 const checkingEnvironment = ref(false);
 const environmentCheck = ref<EnvironmentCheck | null>(null);
 const resettingDefaults = ref(false);
@@ -129,6 +135,7 @@ function fillDraft(settings: Settings): void {
   draft.thumbCacheDir = settings.thumbCacheDir ?? '';
   draft.exportSubDir = settings.exportSubDir ?? '';
   draft.stillSubDir = settings.stillSubDir ?? '';
+  proxyTier.value = settings.proxyTier ?? '540p';
 }
 
 function joinDisplayPath(base: string, ...parts: string[]): string {
@@ -186,6 +193,7 @@ async function resetDefaults(): Promise<void> {
     draft.thumbCacheDir = '';
     draft.exportSubDir = '';
     draft.stillSubDir = '';
+    proxyTier.value = '540p';
     environmentCheck.value = null;
   } finally {
     resettingDefaults.value = false;
@@ -275,6 +283,7 @@ function submit(): void {
   };
   if (Object.values(rootPaths).some((path) => !path)) return;
   const value: SettingsSetArgs = { ...rootPaths };
+  value.proxyTier = proxyTier.value;
   for (const key of [
     'proxyCacheDir',
     'frameCacheDir',
@@ -351,6 +360,26 @@ function submit(): void {
         >
           {{ environmentCheck.text }}
         </div>
+
+        <section class="proxy-tier-section">
+          <div class="tier-copy">
+            <strong>代理档位</strong>
+            <small>后台代理分辨率越高越清晰，同时占用更多转码时间。</small>
+          </div>
+          <div class="tier-options">
+            <button
+              v-for="option in proxyTierOptions"
+              :key="option.value"
+              type="button"
+              :class="{ active: proxyTier === option.value }"
+              :disabled="lockedByEnvironment || saving || resettingDefaults"
+              @click="proxyTier = option.value"
+            >
+              <strong>{{ option.label }}</strong>
+              <small>{{ option.hint }}</small>
+            </button>
+          </div>
+        </section>
 
         <section class="path-list">
           <label
@@ -617,6 +646,75 @@ function submit(): void {
   border-color: rgba(225, 29, 72, 0.3);
   background: rgba(225, 29, 72, 0.08);
   color: #fda4af;
+}
+
+.proxy-tier-section {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 12px 16px 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.tier-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tier-copy strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.tier-copy small {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.tier-options {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(3, 64px);
+  gap: 6px;
+}
+
+.tier-options button {
+  display: flex;
+  min-height: 42px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+}
+
+.tier-options button strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.tier-options button small {
+  font-size: 9px;
+}
+
+.tier-options button:hover:not(:disabled),
+.tier-options button.active {
+  border-color: var(--red);
+  background: var(--red-soft);
+}
+
+.tier-options button.active strong {
+  color: #fff;
 }
 
 .settings-error {

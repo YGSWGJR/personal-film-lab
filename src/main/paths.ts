@@ -21,6 +21,7 @@ export function defaultSettings(): SettingsSetArgs {
     thumbCacheDir: undefined,
     exportSubDir: undefined,
     stillSubDir: undefined,
+    proxyTier: '540p',
   };
 }
 

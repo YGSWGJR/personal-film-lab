@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { MediaError } from './media-error';
 
 export interface RunProcessOptions {
@@ -10,6 +10,7 @@ export interface RunProcessOptions {
   onStderrLine?: (line: string) => void;
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
+  lowPriority?: boolean;
 }
 
 export interface RunProcessResult {
@@ -47,6 +48,7 @@ export function runProcess(options: RunProcessOptions): Promise<RunProcessResult
     onStderrLine,
     maxStdoutBytes = DEFAULT_MAX_STDOUT,
     maxStderrBytes = DEFAULT_MAX_STDERR,
+    lowPriority = false,
   } = options;
 
   return new Promise<RunProcessResult>((resolve, reject) => {
@@ -64,6 +66,10 @@ export function runProcess(options: RunProcessOptions): Promise<RunProcessResult
         }),
       );
       return;
+    }
+
+    if (lowPriority && process.platform === 'win32' && child.pid) {
+      setBelowNormalPriority(child.pid);
     }
 
     let stdout = '';
@@ -195,4 +201,34 @@ export function runProcess(options: RunProcessOptions): Promise<RunProcessResult
       });
     });
   });
+}
+
+function setBelowNormalPriority(pid: number): void {
+  try {
+    const wmic = spawnSync(
+      'wmic',
+      ['process', 'where', `processid=${pid}`, 'CALL', 'setpriority', '16384'],
+      { windowsHide: true, stdio: 'ignore', timeout: 2500 },
+    );
+    if (!wmic.error && wmic.status === 0) return;
+  } catch {
+    // WMIC 可能在较新 Windows 中被移除，继续使用 PowerShell 回退。
+  }
+
+  try {
+    spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction Stop).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal`,
+      ],
+      { windowsHide: true, stdio: 'ignore', timeout: 2500 },
+    );
+  } catch {
+    // 权限不足或进程已退出时保持正常优先级，不影响转码结果。
+  }
 }

@@ -23,6 +23,7 @@ export const settingsSchema = z.object({
   thumbCacheDir: settingsDirectorySchema.optional(),
   exportSubDir: settingsDirectorySchema.optional(),
   stillSubDir: settingsDirectorySchema.optional(),
+  proxyTier: z.enum(['360p', '540p', '720p']).optional(),
 });
 
 export const settingsSetArgsSchema = settingsSchema;
@@ -132,7 +133,12 @@ export const mediaTranscodeProxyArgsSchema = z.object({
   encoder: z.string().min(1).max(32).optional(),
   proxyMode: z.enum(['fast', 'balanced', 'quality']).optional(),
   proxyResolution: z.enum(['auto', 'p240', 'p360', 'p540', 'p720', 'p1080']).optional(),
+  tier: z.enum(['360p', '540p', '720p']).optional(),
   timeoutMs: z.number().int().positive().max(6 * 3_600_000).optional(),
+});
+
+export const mediaSetConcurrencyArgsSchema = z.object({
+  concurrency: z.union([z.literal(1), z.literal(2)]),
 });
 
 /** media:cancelJob */
