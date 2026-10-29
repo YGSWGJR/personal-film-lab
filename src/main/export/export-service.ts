@@ -26,12 +26,14 @@ import type {
   Annotation,
   ExportDoneEvent,
   ExportProgressEvent,
+  Note,
   Shot,
   Still,
   StoryboardExportArgs,
   StoryboardExportResult,
   StoryboardHeader,
   StoryboardImageStrategy,
+  Tag,
 } from '../../shared/types';
 import { formatTimeMs } from '../../shared/time';
 import type { CaptureService } from '../capture/capture-service';
@@ -59,6 +61,14 @@ interface StoryboardRow {
   imagePath: string | null;
 }
 
+interface StoryboardTexts {
+  shotSize: string;
+  cameraMethod: string;
+  dialogue: string;
+  remark: string;
+  note: string | null;
+}
+
 export class ExportService {
   constructor(
     private readonly data: DataLayer,
@@ -84,12 +94,34 @@ export class ExportService {
 
     const rows = await this.buildRows(jobId, project.id, shots, args.imageStrategy ?? 'both');
     const headers = mergeHeaders(args.headers);
+    const includeTags = args.includeTags ?? true;
+    const tagById = new Map<string, Tag>();
+    const noteByShot = new Map<string, Note>();
+    if (includeTags) {
+      for (const tag of this.data.tags.list()) tagById.set(tag.id, tag);
+      for (const note of this.data.notes.list({ projectId: project.id })) {
+        noteByShot.set(note.shotId, note);
+      }
+    }
+    const textsByShot = new Map<string, StoryboardTexts>();
+    if (includeTags) {
+      for (const row of rows) {
+        textsByShot.set(row.shot.id, this.buildShotTexts(row.shot, tagById, noteByShot));
+      }
+    }
     this.emitProgress({ jobId, percent: 72, stage: 'render', message: '正在排版分镜本' });
 
     if (args.format === 'pdf') {
-      await this.exportPdf(project.name, headers, rows, outputPath, args.imageStrategy ?? 'both');
+      await this.exportPdf(
+        project.name,
+        headers,
+        rows,
+        outputPath,
+        args.imageStrategy ?? 'both',
+        textsByShot,
+      );
     } else {
-      await this.exportDocx(project.name, headers, rows, outputPath);
+      await this.exportDocx(project.name, headers, rows, outputPath, textsByShot);
     }
 
     this.emitProgress({ jobId, percent: 100, stage: 'write', message: '导出完成' });
@@ -156,6 +188,47 @@ export class ExportService {
     return rows;
   }
 
+  private buildShotTexts(
+    shot: Shot,
+    tagById: Map<string, Tag>,
+    noteByShot: Map<string, Note>,
+  ): StoryboardTexts {
+    const tags = shot.tagIds
+      .map((id) => tagById.get(id))
+      .filter((tag): tag is Tag => Boolean(tag))
+      .sort((left, right) => left.sortOrder - right.sortOrder);
+
+    const namesOf = (...categories: string[]): string[] => {
+      const allowed = new Set(categories);
+      return tags.filter((tag) => allowed.has(tag.category)).map((tag) => tag.name);
+    };
+    const append = (base: string | null, label: string, names: string[]): string => {
+      const unique = names.filter((name) => name !== base);
+      if (unique.length === 0) return base ?? '';
+      const suffix = `${label}：${unique.join('、')}`;
+      return base ? `${base} · ${suffix}` : suffix;
+    };
+
+    const cameraMethod = append(
+      append(shot.cameraMethod, '机位', namesOf('机位')) || shot.cameraMethod,
+      '运镜',
+      namesOf('运镜'),
+    );
+    const remark = append(
+      append(shot.remark, '光线', namesOf('光线')) || shot.remark,
+      '剪辑',
+      namesOf('剪辑'),
+    );
+
+    return {
+      shotSize: append(shot.shotSize, '景别', namesOf('景别')),
+      cameraMethod,
+      dialogue: append(shot.dialogue, '声音', namesOf('声音')),
+      remark,
+      note: noteByShot.get(shot.id)?.text.trim() || null,
+    };
+  }
+
   private outputPathOf(projectId: string, projectName: string, format: 'pdf' | 'docx'): string {
     const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-');
     const exportsDir = resolveProjectExportDir(projectId);
@@ -169,12 +242,13 @@ export class ExportService {
     rows: StoryboardRow[],
     outputPath: string,
     strategy: StoryboardImageStrategy,
+    textsByShot: Map<string, StoryboardTexts>,
   ): Promise<void> {
     const projectId = rows[0]?.shot.projectId;
     if (!projectId) throw new ExportError('EXPORT_NO_SHOTS', '没有可导出的镜头');
     const sectionDir = dirname(outputPath);
     const tempHtml = join(sectionDir, `storyboard-${randomUUID()}.html`);
-    const html = this.renderHtml(projectName, headers, rows, strategy);
+    const html = this.renderHtml(projectName, headers, rows, strategy, textsByShot);
     writeFileSync(tempHtml, html, 'utf8');
 
     let printWindow: BrowserWindow | null = null;
@@ -217,6 +291,7 @@ export class ExportService {
     headers: StoryboardHeader[],
     rows: StoryboardRow[],
     strategy: StoryboardImageStrategy,
+    textsByShot: Map<string, StoryboardTexts>,
   ): string {
     const date = new Intl.DateTimeFormat('zh-CN', {
       year: 'numeric',
@@ -229,16 +304,24 @@ export class ExportService {
     const body = rows
       .map((row) => {
         const shot = row.shot;
+        const texts = textsByShot.get(shot.id);
+        const shotSize = escapeHtml(texts?.shotSize || shot.shotSize || '—');
+        const cameraMethod = escapeHtml(texts?.cameraMethod || shot.cameraMethod || '—');
+        const dialogue = escapeHtml(texts?.dialogue || shot.dialogue || '—');
+        const remark = escapeHtml(texts?.remark || shot.remark || '—');
+        const noteHtml = texts?.note
+          ? `<div class="shot-note">笔记：${escapeHtml(texts.note)}</div>`
+          : '';
         return `
           <tr>
             <td class="mono center">${String(shot.index).padStart(2, '0')}</td>
             <td class="mono center">${formatDuration(shot.durationMs)}</td>
             <td class="image-cell thumb">${this.renderImage(row.thumbnailPath, '缩略图', row.thumbnail?.timeMs)}</td>
-            <td class="center">${escapeHtml(shot.shotSize ?? '—')}</td>
-            <td>${escapeHtml(shot.cameraMethod ?? '—')}</td>
-            <td class="image-cell content">${this.renderMainImage(row)}</td>
-            <td class="text">${escapeHtml(shot.dialogue ?? '—')}</td>
-            <td class="text">${escapeHtml(shot.remark ?? '—')}</td>
+            <td class="center">${shotSize}</td>
+            <td>${cameraMethod}</td>
+            <td class="image-cell content">${this.renderMainImage(row)}${noteHtml}</td>
+            <td class="text">${dialogue}</td>
+            <td class="text">${remark}</td>
           </tr>
         `;
       })
@@ -277,6 +360,7 @@ export class ExportService {
             .annotation-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
             .still-time { margin-top: 2px; color: #475569; font-family: "Cascadia Mono", Consolas, monospace; font-size: 5.2pt; white-space: nowrap; }
             .annotation-note { margin-top: 2px; color: #64748b; font-size: 6pt; }
+            .shot-note { margin-top: 4px; padding-top: 4px; border-top: 1px dashed #cbd5e1; color: #1e293b; font-size: 6.5pt; line-height: 1.4; white-space: pre-wrap; text-align: left; }
             col:nth-child(1) { width: 5%; } col:nth-child(2) { width: 7%; } col:nth-child(3) { width: 9%; }
             col:nth-child(4) { width: 6%; } col:nth-child(5) { width: 8%; } col:nth-child(6) { width: 32%; }
             col:nth-child(7) { width: 19%; } col:nth-child(8) { width: 14%; }
@@ -340,6 +424,7 @@ export class ExportService {
     headers: StoryboardHeader[],
     rows: StoryboardRow[],
     outputPath: string,
+    textsByShot: Map<string, StoryboardTexts>,
   ): Promise<void> {
     const headerRow = new TableRow({
       tableHeader: true,
@@ -355,9 +440,9 @@ export class ExportService {
       ),
     });
 
-    const rowElements = rows.map(
-      (row, rowIndex) =>
-        new TableRow({
+    const rowElements = rows.map((row, rowIndex) => {
+      const texts = textsByShot.get(row.shot.id);
+      return new TableRow({
           cantSplit: true,
           children: [
             docxCell(String(row.shot.index).padStart(2, '0'), 0, AlignmentType.CENTER, true, rowFill(rowIndex)),
@@ -370,8 +455,8 @@ export class ExportService {
               false,
               rowFill(rowIndex),
             ),
-            docxCell(row.shot.shotSize ?? '—', 3, AlignmentType.CENTER, false, rowFill(rowIndex)),
-            docxCell(row.shot.cameraMethod ?? '—', 4, undefined, false, rowFill(rowIndex)),
+            docxCell(texts?.shotSize || row.shot.shotSize || '—', 3, AlignmentType.CENTER, false, rowFill(rowIndex)),
+            docxCell(texts?.cameraMethod || row.shot.cameraMethod || '—', 4, undefined, false, rowFill(rowIndex)),
             docxImageCell(
               row.imagePath,
               5,
@@ -379,12 +464,13 @@ export class ExportService {
               row.mainStill?.timeMs,
               true,
               rowFill(rowIndex),
+              texts?.note,
             ),
-            docxCell(row.shot.dialogue ?? '—', 6, undefined, false, rowFill(rowIndex)),
-            docxCell(row.shot.remark ?? '—', 7, undefined, false, rowFill(rowIndex)),
+            docxCell(texts?.dialogue || row.shot.dialogue || '—', 6, undefined, false, rowFill(rowIndex)),
+            docxCell(texts?.remark || row.shot.remark || '—', 7, undefined, false, rowFill(rowIndex)),
           ],
-        }),
-    );
+        });
+    });
 
     const document = new Document({
       creator: '个人拉片工作台',
@@ -540,6 +626,7 @@ function docxImageCell(
   timeMs?: number,
   large = false,
   fill?: string,
+  note?: string | null,
 ): TableCell {
   const children: Paragraph[] = [];
   if (filePath && existsSync(filePath)) {
@@ -573,6 +660,9 @@ function docxImageCell(
   }
   if (annotationCount > 0) {
     children.push(docxParagraph(`标注 ${annotationCount}`, { align: AlignmentType.CENTER, color: '64748B', size: 14 }));
+  }
+  if (note) {
+    children.push(docxParagraph(`笔记：${note}`, { align: AlignmentType.LEFT, size: 14 }));
   }
   return new TableCell({
     width: { size: DOCX_COLUMN_WIDTHS[column], type: WidthType.DXA },

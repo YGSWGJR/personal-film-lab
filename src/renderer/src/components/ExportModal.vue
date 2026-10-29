@@ -24,6 +24,7 @@ const emit = defineEmits<{
       shotIds: string[];
       headers: StoryboardHeader[];
       imageStrategy: StoryboardImageStrategy;
+      includeTags: boolean;
     },
   ];
 }>();
@@ -43,6 +44,7 @@ const selectedIds = ref<string[]>([]);
 const headers = reactive<StoryboardHeader[]>(defaults.map((item) => ({ ...item })));
 const format = ref<StoryboardFormat>('pdf');
 const imageStrategy = ref<StoryboardImageStrategy>('both');
+const includeTags = ref(true);
 
 const allSelected = computed(
   () => props.shots.length > 0 && selectedIds.value.length === props.shots.length,
@@ -81,6 +83,7 @@ function submit(): void {
     shotIds: [...selectedIds.value],
     headers: headers.map((header) => ({ ...header })),
     imageStrategy: imageStrategy.value,
+    includeTags: includeTags.value,
   });
 }
 </script>
@@ -160,6 +163,15 @@ function submit(): void {
                   <strong>画面大图</strong><span>侧重画面内容</span>
                 </button>
               </div>
+            </div>
+
+            <div class="setting-block">
+              <div class="section-head"><strong>内容选项</strong></div>
+              <label class="toggle-row">
+                <input v-model="includeTags" type="checkbox" />
+                <span>包含标签与镜头笔记</span>
+                <small>景别→景别格 · 机位/运镜→摄法运镜格 · 声音→台词格 · 光线/剪辑→备注格 · 笔记→画面内容格</small>
+              </label>
             </div>
 
             <div class="setting-block headers-block">
@@ -424,6 +436,37 @@ function submit(): void {
 
 .choice.active strong {
   color: #fff;
+}
+
+.toggle-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.toggle-row span {
+  min-width: 0;
+}
+
+.toggle-row input {
+  grid-column: 1;
+  grid-row: 1;
+  accent-color: var(--red);
+}
+
+.toggle-row small {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .header-grid {

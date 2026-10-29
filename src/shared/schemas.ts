@@ -448,6 +448,7 @@ export const storyboardExportArgsSchema = z.object({
     .max(8)
     .optional(),
   imageStrategy: z.enum(['both', 'thumbnail', 'full']).optional(),
+  includeTags: z.boolean().optional(),
 });
 
 export const statsProjectArgsSchema = z.object({
