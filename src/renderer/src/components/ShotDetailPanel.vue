@@ -26,6 +26,9 @@ const emit = defineEmits<{
   toggleTag: [tag: Tag];
   setAnnotations: [annotations: Annotation[]];
   createTag: [value: { category: string; name: string }];
+  deleteTag: [tag: Tag];
+  deleteCategory: [category: string];
+  createCategory: [value: { category: string; name: string }];
   createTerm: [];
   editTerm: [term: DetailTerm];
   importTerms: [];
@@ -44,6 +47,7 @@ const drawing = ref<{
 const textEditor = ref<{ x: number; y: number; value: string } | null>(null);
 const stillRoot = ref<HTMLElement | null>(null);
 const tagDraft = ref<{ category: string; name: string } | null>(null);
+const categoryDraft = ref<{ name: string; tagName: string } | null>(null);
 
 const categoryOrder = ['景别', '机位', '运镜', '光线', '声音', '剪辑'];
 const assignedTagIds = computed(() => new Set(props.shot?.tagIds ?? []));
@@ -207,6 +211,15 @@ function submitCustomTag(): void {
   tagDraft.value = null;
 }
 
+function submitNewCategory(): void {
+  if (!categoryDraft.value) return;
+  const category = categoryDraft.value.name.trim();
+  const name = categoryDraft.value.tagName.trim();
+  if (!category || !name) return;
+  emit('createCategory', { category, name });
+  categoryDraft.value = null;
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener('pointerup', finishDrawingFromWindow);
 });
@@ -300,7 +313,15 @@ onBeforeUnmount(() => {
 
       <div class="tag-grid">
         <section v-for="group in tagGroups" :key="group.category" class="tag-group">
-          <div class="tag-title">{{ group.category }}</div>
+          <div class="tag-title">
+            {{ group.category }}
+            <span
+              v-if="!categoryOrder.includes(group.category)"
+              class="title-del"
+              title="删除分类"
+              @click="emit('deleteCategory', group.category)"
+            >×</span>
+          </div>
           <div class="chips">
             <button
               v-for="tag in group.items"
@@ -311,6 +332,12 @@ onBeforeUnmount(() => {
               @click="emit('toggleTag', tag)"
             >
               {{ tag.name }}
+              <span
+                v-if="!tag.builtin"
+                class="chip-del"
+                title="删除标签"
+                @click.stop="emit('deleteTag', tag)"
+              >×</span>
             </button>
             <button class="chip add" type="button" title="新增自定义标签" @click="beginCustomTag(group.category)">+</button>
           </div>
@@ -329,6 +356,34 @@ onBeforeUnmount(() => {
             <button class="primary" type="submit" :disabled="!tagDraft.name.trim()">添加</button>
             <button type="button" @click="tagDraft = null">取消</button>
           </form>
+        </section>
+        <section class="tag-group new-cat">
+          <template v-if="categoryDraft">
+            <form class="custom-tag-form" @submit.prevent="submitNewCategory">
+              <input
+                v-model="categoryDraft.name"
+                maxlength="20"
+                placeholder="分类名（如 特效）"
+                autofocus
+                @keydown.esc="categoryDraft = null"
+              />
+              <input
+                v-model="categoryDraft.tagName"
+                maxlength="100"
+                placeholder="该分类下首个标签（如 光晕）"
+                @keydown.esc="categoryDraft = null"
+              />
+              <button class="primary" type="submit" :disabled="!categoryDraft.name.trim() || !categoryDraft.tagName.trim()">创建</button>
+              <button type="button" @click="categoryDraft = null">取消</button>
+            </form>
+          </template>
+          <button
+            v-else
+            class="chip add"
+            type="button"
+            title="新建分类"
+            @click="categoryDraft = { name: '', tagName: '' }"
+          >+ 新建分类</button>
         </section>
       </div>
 
@@ -573,6 +628,24 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.title-del {
+  margin-left: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: color 120ms ease, opacity 120ms ease;
+}
+
+.tag-title:hover .title-del {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.title-del:hover {
+  color: var(--red);
+}
+
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -580,6 +653,7 @@ onBeforeUnmount(() => {
 }
 
 .chip {
+  position: relative;
   display: inline-flex;
   height: 20px;
   align-items: center;
@@ -601,6 +675,33 @@ onBeforeUnmount(() => {
   color: #fff;
 }
 
+.chip-del {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 16px;
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  transition: color 120ms ease, opacity 120ms ease;
+}
+
+.chip:hover .chip-del {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chip-del:hover {
+  color: var(--red);
+}
+
 .chip.add {
   border-style: dashed;
   color: var(--text-muted);
@@ -616,6 +717,17 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
   margin-top: 8px;
+}
+
+.new-cat {
+  padding: 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+}
+
+.new-cat .custom-tag-form {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  margin-top: 0;
 }
 
 .custom-tag-form input {
