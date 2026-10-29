@@ -144,6 +144,7 @@ const player = reactive<PlayerState>({
   fps: 0,
   layer: 'normal',
 });
+const muteBeforeVolume = ref(1);
 
 const skeleton: SkeletonState = {
   ready: false,
@@ -1660,6 +1661,25 @@ async function restorePlaybackState(state: WorkspaceState): Promise<void> {
   if (volume.ok) Object.assign(player, volume.data);
 }
 
+async function handleSetVolume(volume: number): Promise<void> {
+  const clamped = Math.max(0, Math.min(1, volume));
+  const result = await window.api.player.setVolume({ volume: clamped });
+  if (result.ok) {
+    Object.assign(player, result.data);
+  } else {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
+async function handleToggleMute(): Promise<void> {
+  if (player.volume === 0) {
+    await handleSetVolume(muteBeforeVolume.value > 0 ? muteBeforeVolume.value : 1);
+    return;
+  }
+  muteBeforeVolume.value = player.volume;
+  await handleSetVolume(0);
+}
+
 window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
 
 watch(
@@ -1822,6 +1842,17 @@ function handleKeydown(event: KeyboardEvent): void {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     void saveCurrentNote();
+    return;
+  }
+  if (event.key.toLowerCase() === 'm' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    void handleToggleMute();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+    event.preventDefault();
+    const delta = event.key === 'ArrowUp' ? 0.05 : -0.05;
+    void handleSetVolume(Math.round((player.volume + delta) * 20) / 20);
     return;
   }
   if (event.code === 'Space') {
@@ -2103,6 +2134,8 @@ onBeforeUnmount(() => {
         @bounds="setPlayerBounds"
         @capture="captureStill"
         @set-layer="setPlayerLayer"
+        @set-volume="handleSetVolume"
+        @toggle-mute="handleToggleMute"
       />
 
       <ShotDetailPanel

@@ -62,6 +62,10 @@ defineProps<{
       <path d="M11 5 6.5 9H3v6h3.5L11 19z" />
       <path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12" />
     </template>
+    <template v-else-if="name === 'muted'">
+      <path d="M11 5 6.5 9H3v6h3.5L11 19z" />
+      <path d="M16 9l5 6M21 9l-5 6" />
+    </template>
     <template v-else-if="name === 'camera'">
       <path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" />
       <circle cx="12" cy="13" r="4" />
