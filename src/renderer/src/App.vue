@@ -919,6 +919,63 @@ async function createCustomTag(value: { category: string; name: string }): Promi
   showToast(`已添加“${value.name}”并应用到当前镜头。`, 'success');
 }
 
+async function handleDeleteTag(tag: Tag): Promise<void> {
+  if (tag.builtin) return;
+  const usedBy = shots.value.filter((shot) => shot.tagIds.includes(tag.id)).length;
+  const ok = window.confirm(`删除标签「${tag.name}」？将同时从 ${usedBy} 个镜头移除。`);
+  if (!ok) return;
+
+  if (!demoMode.value) {
+    const result = await window.api.tag.delete({ id: tag.id });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+  }
+
+  tags.value = tags.value.filter((item) => item.id !== tag.id);
+  for (const shot of shots.value) {
+    if (!shot.tagIds.includes(tag.id)) continue;
+    Object.assign(shot, { tagIds: shot.tagIds.filter((id) => id !== tag.id) });
+  }
+  showToast(`已删除标签「${tag.name}」。`, 'success');
+}
+
+async function handleDeleteCategory(category: string): Promise<void> {
+  if (DEFAULT_TAG_GROUPS.some((group) => group.category === category)) return;
+  const members = tags.value.filter((tag) => tag.category === category);
+  if (members.length === 0) return;
+
+  const memberIds = new Set(members.map((tag) => tag.id));
+  const usedBy = new Set(
+    shots.value
+      .filter((shot) => shot.tagIds.some((id) => memberIds.has(id)))
+      .map((shot) => shot.id),
+  );
+  const ok = window.confirm(
+    `删除分类「${category}」？将删除其下 ${members.length} 个标签，并从 ${usedBy.size} 个镜头移除。`,
+  );
+  if (!ok) return;
+
+  if (!demoMode.value) {
+    for (const tag of members) {
+      const result = await window.api.tag.delete({ id: tag.id });
+      if (!result.ok) {
+        showToast(`删除「${tag.name}」失败：${result.error.message}`, 'error', result.error.code);
+        return;
+      }
+    }
+  }
+
+  tags.value = tags.value.filter((tag) => !memberIds.has(tag.id));
+  for (const shot of shots.value) {
+    Object.assign(shot, {
+      tagIds: shot.tagIds.filter((id) => !memberIds.has(id)),
+    });
+  }
+  showToast(`已删除分类「${category}」。`, 'success');
+}
+
 function openNewTerm(): void {
   editingTerm.value = null;
   termEditorOpen.value = true;
@@ -2062,6 +2119,9 @@ onBeforeUnmount(() => {
         @insert-term="insertTerm"
         @toggle-tag="toggleTag"
         @create-tag="createCustomTag"
+        @delete-tag="handleDeleteTag"
+        @delete-category="handleDeleteCategory"
+        @create-category="createCustomTag"
         @create-term="openNewTerm"
         @edit-term="openEditTerm"
         @import-terms="importTerms"
