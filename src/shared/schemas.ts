@@ -33,6 +33,33 @@ export const settingsChooseDirectoryArgsSchema = z.object({
   defaultPath: z.string().trim().min(1).max(2000).optional(),
 });
 
+const aiTaskIdSchema = z.enum([
+  'continuity',
+  'notes',
+  'export-summary',
+  'terminology',
+  'visual-description',
+]);
+
+export const aiCopyPromptArgsSchema = z.object({
+  projectId: z.string().min(1),
+  tasks: z.array(aiTaskIdSchema).max(5),
+});
+
+export const aiProjectArgsSchema = z.object({
+  projectId: z.string().min(1),
+});
+
+export const aiMcpSetEnabledArgsSchema = z.object({
+  enabled: z.boolean(),
+});
+
+export const aiMcpAuthResponseSchema = z.object({
+  requestId: z.string().min(1),
+  allowed: z.boolean(),
+  remember: z.boolean(),
+});
+
 export const settingsMigrationConfirmArgsSchema = z.object({
   projectIds: z.array(z.string().trim().min(1).max(200)).min(1).max(1000),
 });

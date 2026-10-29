@@ -6,6 +6,15 @@ export const IPC = {
   /** app 域：返回版本 / 平台 / 用户数据目录（I 方向） */
   APP_INFO: 'app:info',
 
+  /** AI 助手 / 本地 MCP */
+  AI_COPY_PROMPT: 'ai:copyPrompt',
+  AI_GET_SNAPSHOT: 'ai:getShotSnapshot',
+  AI_START_MCP: 'ai:startMcp',
+  AI_GET_MCP_STATUS: 'ai:getMcpStatus',
+  AI_RESPOND_MCP_AUTH: 'ai:respondMcpAuth',
+  AI_MCP_AUTH_REQUEST: 'ai:event:mcpAuthRequest',
+  AI_MCP_DATA_CHANGED: 'ai:event:mcpDataChanged',
+
   /** settings 域 */
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
-import type { ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
+import type { AiMcpStatus, ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
 
 type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier'>;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
@@ -12,11 +12,14 @@ const props = defineProps<{
   settings: Settings | null;
   saving: boolean;
   error: string | null;
+  mcpStatus: AiMcpStatus | null;
+  mcpBusy: boolean;
 }>();
 
 const emit = defineEmits<{
   close: [];
   save: [value: SettingsSetArgs];
+  toggleMcp: [];
 }>();
 
 const draft = reactive<SettingsDraft>({
@@ -381,6 +384,23 @@ function submit(): void {
           </div>
         </section>
 
+        <section class="mcp-setting">
+          <div class="mcp-copy">
+            <strong>本地 MCP</strong>
+            <small>允许支持 MCP 的 Agent 读取当前项目；写操作仍会请求授权。</small>
+            <code v-if="mcpStatus?.command">{{ mcpStatus.command }}</code>
+            <small v-if="mcpStatus?.error" class="mcp-error">{{ mcpStatus.error }}</small>
+          </div>
+          <button
+            type="button"
+            :class="{ active: mcpStatus?.running }"
+            :disabled="mcpBusy"
+            @click="emit('toggleMcp')"
+          >
+            {{ mcpBusy ? '处理中…' : mcpStatus?.running ? '已开启 · 点击关闭' : '已关闭 · 点击开启' }}
+          </button>
+        </section>
+
         <section class="path-list">
           <label
             v-for="item in pathItems"
@@ -721,6 +741,69 @@ function submit(): void {
   border-color: rgba(239, 68, 68, 0.4);
   background: rgba(239, 68, 68, 0.09);
   color: #fca5a5;
+}
+
+.mcp-setting {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.mcp-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mcp-copy strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.mcp-copy small {
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.mcp-copy code {
+  max-width: 510px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.mcp-copy .mcp-error {
+  color: var(--red);
+}
+
+.mcp-setting > button {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.mcp-setting > button.active {
+  border-color: rgba(34, 197, 94, 0.42);
+  background: rgba(34, 197, 94, 0.1);
+  color: #86efac;
 }
 
 .path-list {

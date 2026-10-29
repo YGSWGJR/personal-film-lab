@@ -49,6 +49,106 @@ export interface SettingsChooseDirectoryArgs {
   defaultPath?: string;
 }
 
+export type AiTaskId =
+  | 'continuity'
+  | 'notes'
+  | 'export-summary'
+  | 'terminology'
+  | 'visual-description';
+
+export interface AiSnapshotShot {
+  id: string;
+  index: number;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  shotSize: string | null;
+  cameraMethod: string | null;
+  dialogue: string | null;
+  remark: string | null;
+  tagIds: string[];
+  tags: Record<string, string[]>;
+  note: string | null;
+  noteLength: number;
+  origin: 'auto' | 'manual';
+  locked: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiProjectSnapshot {
+  project: {
+    id: string;
+    name: string;
+    filename: string | null;
+    container: string | null;
+    durationMs: number;
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    videoCodec: string | null;
+    audioCodec: string | null;
+    shotCount: number;
+  };
+  shots: AiSnapshotShot[];
+  generatedAt: string;
+}
+
+export interface AiContinuityCandidate {
+  fromShotId: string;
+  fromShotIndex: number;
+  toShotId: string;
+  toShotIndex: number;
+  reasons: string[];
+}
+
+export interface AiCopyPromptArgs {
+  projectId: string;
+  tasks: AiTaskId[];
+}
+
+export interface AiCopyPromptResult {
+  copied: true;
+  characters: number;
+}
+
+export interface AiMcpStatus {
+  enabled: boolean;
+  running: boolean;
+  command: string;
+  port: number | null;
+  error: string | null;
+}
+
+export interface AiMcpAuthRequest {
+  requestId: string;
+  agentName: string;
+  action: string;
+  detail: string;
+  createdAt: string;
+}
+
+export interface AiMcpAuthResponseArgs {
+  requestId: string;
+  allowed: boolean;
+  remember: boolean;
+}
+
+export interface AiMcpDataChangedEvent {
+  projectId: string;
+  shotId: string;
+}
+
+export interface AiApi {
+  copyPrompt(args: AiCopyPromptArgs): Promise<IpcResult<AiCopyPromptResult>>;
+  getShotSnapshot(args: { projectId: string }): Promise<IpcResult<AiProjectSnapshot>>;
+  startMcp(args: { enabled: boolean }): Promise<IpcResult<AiMcpStatus>>;
+  getMcpStatus(): Promise<IpcResult<AiMcpStatus>>;
+  onMcpAuthRequest(listener: (request: AiMcpAuthRequest) => void): () => void;
+  respondMcpAuth(args: AiMcpAuthResponseArgs): Promise<IpcResult<{ responded: boolean }>>;
+  onDataChanged(listener: (event: AiMcpDataChangedEvent) => void): () => void;
+}
+
 export interface SettingsDataRootChangingEvent {
   previousRoot: string;
   nextRoot: string;
@@ -411,6 +511,7 @@ export interface WindowApi {
   data: DataApi;
   detect: DetectApi;
   stats: StatsApi;
+  ai: AiApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
