@@ -1903,8 +1903,9 @@ function handleKeydown(event: KeyboardEvent): void {
   }
   if ((event.ctrlKey || event.metaKey) && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
     event.preventDefault();
-    const delta = event.key === 'ArrowUp' ? 0.05 : -0.05;
-    void handleSetVolume(Math.round((player.volume + delta) * 20) / 20);
+    const step = event.shiftKey ? 0.1 : 0.01;
+    const delta = event.key === 'ArrowUp' ? step : -step;
+    void handleSetVolume(Math.round((player.volume + delta) * 100) / 100);
     return;
   }
   if (event.code === 'Space') {

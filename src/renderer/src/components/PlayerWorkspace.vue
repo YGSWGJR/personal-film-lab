@@ -41,6 +41,10 @@ const emit = defineEmits<{
 const videoSlot = ref<HTMLElement | null>(null);
 const controlsVisible = ref(true);
 const volumeOpen = ref(false);
+const volumeDragging = ref(false);
+const volumeEditing = ref(false);
+const volumeDraft = ref('0');
+let volumeWheelCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
 const timecode = computed(() => formatTimecode(props.displayTimeMs));
@@ -63,10 +67,55 @@ const layerNext = computed<OverlayLayer>(() => {
   if (props.player.layer === 'bottom') return 'hidden';
   return 'normal';
 });
+const volumePercent = computed(() => Math.round(props.player.volume * 100));
 
 function cycleLayer(): void {
   if (!props.player.hasFile) return;
   emit('setLayer', layerNext.value);
+}
+
+function onVolumeSliderInput(event: Event): void {
+  volumeDragging.value = true;
+  emit('setVolume', Number((event.target as HTMLInputElement).value) / 100);
+}
+
+function onVolumeSliderChange(event: Event): void {
+  emit('setVolume', Number((event.target as HTMLInputElement).value) / 100);
+  volumeDragging.value = false;
+}
+
+function beginVolumeInput(): void {
+  volumeDraft.value = String(volumePercent.value);
+  volumeEditing.value = true;
+  volumeOpen.value = true;
+}
+
+function commitVolumeInput(): void {
+  if (!volumeEditing.value) return;
+  const value = Number(volumeDraft.value);
+  volumeEditing.value = false;
+  if (!Number.isFinite(value)) return;
+  emit('setVolume', Math.max(0, Math.min(1, Math.round(value) / 100)));
+}
+
+function cancelVolumeInput(): void {
+  volumeEditing.value = false;
+}
+
+function onVolumeWheel(event: WheelEvent): void {
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('.volume-pop, .timeline') || event.deltaY === 0) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  event.preventDefault();
+  const step = event.shiftKey ? 0.01 : 0.05;
+  const direction = event.deltaY < 0 ? 1 : -1;
+  emit('setVolume', Math.round((props.player.volume + direction * step) * 100) / 100);
+  volumeOpen.value = true;
+  if (volumeWheelCloseTimer) clearTimeout(volumeWheelCloseTimer);
+  volumeWheelCloseTimer = setTimeout(() => {
+    volumeWheelCloseTimer = null;
+    if (!volumeDragging.value && !volumeEditing.value) volumeOpen.value = false;
+  }, 900);
 }
 
 function formatTimecode(ms: number): string {
@@ -102,12 +151,13 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
+  if (volumeWheelCloseTimer) clearTimeout(volumeWheelCloseTimer);
   window.removeEventListener('resize', pushBounds);
 });
 </script>
 
 <template>
-  <main class="player-workspace">
+  <main class="player-workspace" @wheel="onVolumeWheel">
     <section class="viewer-card">
       <div class="viewer-meta">
         <span><i class="live-dot"></i>MPV · D3D11</span>
@@ -195,9 +245,9 @@ onBeforeUnmount(() => {
         <div
           class="volume-control"
           @mouseenter="volumeOpen = true"
-          @mouseleave="volumeOpen = false"
+          @mouseleave="!volumeDragging && !volumeEditing && (volumeOpen = false)"
           @focusin="volumeOpen = true"
-          @focusout="volumeOpen = false"
+          @focusout="!volumeDragging && !volumeEditing && (volumeOpen = false)"
         >
           <button
             class="transport-button volume-button"
@@ -208,18 +258,46 @@ onBeforeUnmount(() => {
             <AppIcon :name="player.volume === 0 ? 'muted' : 'volume'" :size="15" />
           </button>
           <div v-show="volumeOpen" class="volume-pop">
+            <div class="volume-range-wrap">
+              <span
+                v-if="volumeDragging"
+                class="volume-bubble"
+                :style="{ left: `${volumePercent}%` }"
+              >{{ volumePercent }}%</span>
+              <input
+                class="volume-slider"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                aria-label="音量"
+                :value="volumePercent"
+                @pointerdown="volumeDragging = true"
+                @input="onVolumeSliderInput"
+                @change="onVolumeSliderChange"
+              />
+            </div>
             <input
-              class="volume-slider"
-              type="range"
+              v-if="volumeEditing"
+              v-model="volumeDraft"
+              class="volume-number"
+              type="number"
               min="0"
               max="100"
-              step="5"
-              aria-label="音量"
-              :value="Math.round(player.volume * 100)"
-              @input="emit('setVolume', Number(($event.target as HTMLInputElement).value) / 100)"
-              @change="emit('setVolume', Number(($event.target as HTMLInputElement).value) / 100)"
+              step="1"
+              aria-label="输入音量百分比"
+              autofocus
+              @blur="commitVolumeInput"
+              @keydown.enter.prevent="commitVolumeInput"
+              @keydown.esc.prevent="cancelVolumeInput"
             />
-            <span class="volume-value">{{ Math.round(player.volume * 100) }}%</span>
+            <button
+              v-else
+              class="volume-value"
+              type="button"
+              title="点击输入精确音量"
+              @click="beginVolumeInput"
+            >{{ volumePercent }}%</button>
           </div>
         </div>
       </div>
@@ -689,10 +767,49 @@ onBeforeUnmount(() => {
   accent-color: var(--blue);
 }
 
+.volume-range-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.volume-bubble {
+  position: absolute;
+  bottom: calc(100% + 5px);
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 10px;
+  pointer-events: none;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
 .volume-value {
   min-width: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--text-muted);
+  cursor: text;
   font-size: 12px;
+  text-align: right;
+}
+
+.volume-number {
+  width: 46px;
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: 0;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 11px;
   text-align: right;
 }
 
