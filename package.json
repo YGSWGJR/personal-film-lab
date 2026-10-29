@@ -87,6 +87,7 @@
     "npmRebuild": false
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "better-sqlite3": "^13.0.3",
     "docx": "^9.14.0",
     "echarts": "^6.1.0",

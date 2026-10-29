@@ -2,6 +2,11 @@ import { app, ipcMain, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import { withEnvelope } from '../../shared/ipc-result';
 import type {
+  AiCopyPromptArgs,
+  AiCopyPromptResult,
+  AiMcpAuthResponseArgs,
+  AiMcpStatus,
+  AiProjectSnapshot,
   AppInfo,
   CandidateSource,
   CancelJobResult,
@@ -75,6 +80,7 @@ import { importProjectFrom, scanCandidateRoots } from '../data/import-service';
 import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
+import type { AiAccessService } from '../ai/mcp-server';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
@@ -102,6 +108,7 @@ export interface IpcDeps {
   cancelSettingsMigration(): Settings;
   getSession(): SessionService | null;
   getStats(): StatsService | null;
+  getAi(): AiAccessService | null;
 }
 
 /**
@@ -118,6 +125,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     const media = deps.getMedia();
     if (!media) throw new MediaError('MEDIA_UNAVAILABLE', '媒体服务尚未初始化');
     return media;
+  };
+  const requireAi = (): AiAccessService => {
+    const service = deps.getAi();
+    if (!service) throw new Error('AI 服务尚未就绪');
+    return service;
   };
   const requireData = (): DataLayer => {
     const data = deps.getData();
@@ -177,6 +189,27 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       platform: process.platform,
       appDataPath: app.getPath('userData'),
     })),
+  );
+
+  ipcMain.handle(
+    IPC.AI_COPY_PROMPT,
+    withEnvelope((args: AiCopyPromptArgs): AiCopyPromptResult => requireAi().copyPrompt(args)),
+  );
+  ipcMain.handle(
+    IPC.AI_GET_SNAPSHOT,
+    withEnvelope((args: { projectId: string }): AiProjectSnapshot => requireAi().getSnapshot(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.AI_START_MCP,
+    withEnvelope((args: { enabled: boolean }): Promise<AiMcpStatus> => requireAi().setEnabled(args.enabled)),
+  );
+  ipcMain.handle(
+    IPC.AI_GET_MCP_STATUS,
+    withEnvelope((): AiMcpStatus => requireAi().getStatus()),
+  );
+  ipcMain.handle(
+    IPC.AI_RESPOND_MCP_AUTH,
+    withEnvelope((args: AiMcpAuthResponseArgs): { responded: boolean } => requireAi().respondMcpAuth(args)),
   );
 
   // ---------- settings ----------

@@ -14,6 +14,7 @@ import type {
   WorkspaceState,
 } from '../shared/types';
 import { createMainWindow } from './app';
+import { AiAccessService, runMcpStdioServer } from './ai/mcp-server';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
 import { importProjectFrom, scanCandidateRoots } from './data/import-service';
@@ -31,6 +32,7 @@ import { StatsService } from './stats/stats-service';
 import { TermTransferService } from './terms/term-transfer-service';
 
 const IS_SMOKE_TEST = process.argv.includes('--smoke-test');
+const IS_AI_MCP = process.argv.includes('--ai-mcp');
 
 /**
  * S31：把 Electron userData（设置文件 / session / Chromium 缓存）重定向到 G 盘，
@@ -69,6 +71,7 @@ migrateUserDataSettingsOnce();
  * 必须关闭 Chromium 的 DirectComposition；否则会被网页合成层盖住。
  */
 app.commandLine.appendSwitch('disable-direct-composition');
+if (IS_AI_MCP) app.disableHardwareAcceleration();
 registerAssetScheme();
 
 let mainWindow: BrowserWindow | null = null;
@@ -84,6 +87,7 @@ let scopeService: ScopeService | null = null;
 let settingsService: SettingsService | null = null;
 let sessionService: SessionService | null = null;
 let statsService: StatsService | null = null;
+let aiService: AiAccessService | null = null;
 let exitCaptureStarted = false;
 let allowWindowClose = false;
 let closeCaptureStarted = false;
@@ -332,27 +336,38 @@ function ensureMainWindow(): BrowserWindow {
   return win;
 }
 
-registerIpcHandlers({
-  getWindow: () => mainWindow,
-  getPlayer: () => playerService,
-  getMedia: () => mediaService,
-  getData: () => dataLayer,
-  getPackage: () => packageService,
-  getCapture: () => captureService,
-  getTermTransfer: () => termTransferService,
-  getExport: () => exportService,
-  getDetect: () => detectService,
-  getScope: () => scopeService,
-  getSettings: () => settingsService,
-  previewSettingsMigration: () => previewDataRootMigration(),
-  confirmSettingsMigration: (projectIds) => confirmDataRootMigration(projectIds),
-  skipSettingsMigration: () => skipDataRootMigration(),
-  cancelSettingsMigration: () => cancelDataRootMigration(),
-  getSession: () => sessionService,
-  getStats: () => statsService,
-});
+if (!IS_AI_MCP) {
+  registerIpcHandlers({
+    getWindow: () => mainWindow,
+    getPlayer: () => playerService,
+    getMedia: () => mediaService,
+    getData: () => dataLayer,
+    getPackage: () => packageService,
+    getCapture: () => captureService,
+    getTermTransfer: () => termTransferService,
+    getExport: () => exportService,
+    getDetect: () => detectService,
+    getScope: () => scopeService,
+    getSettings: () => settingsService,
+    getAi: () => aiService,
+    previewSettingsMigration: () => previewDataRootMigration(),
+    confirmSettingsMigration: (projectIds) => confirmDataRootMigration(projectIds),
+    skipSettingsMigration: () => skipDataRootMigration(),
+    cancelSettingsMigration: () => cancelDataRootMigration(),
+    getSession: () => sessionService,
+    getStats: () => statsService,
+  });
+}
 
 app.whenReady().then(() => {
+  if (IS_AI_MCP) {
+    void runMcpStdioServer().catch((error) => {
+      console.error(`[ai-mcp] ${error instanceof Error ? error.message : String(error)}`);
+      app.exit(1);
+    });
+    return;
+  }
+
   sessionService = new SessionService();
   settingsService = new SettingsService(
     () => mainWindow,
@@ -371,6 +386,12 @@ app.whenReady().then(() => {
 
   registerAssetProtocol(() => resolveAssetRoots());
   const win = ensureMainWindow();
+  aiService = new AiAccessService({
+    getWindow: () => mainWindow,
+    getData: () => dataLayer,
+    getSessionState: () => sessionService?.get() ?? null,
+  });
+  void aiService.initialize();
 
   if (IS_SMOKE_TEST) {
     void runSmokeTest(win, { getPlayer: () => playerService });
@@ -384,7 +405,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (!IS_AI_MCP && process.platform !== 'darwin') {
     app.quit();
   }
 });
@@ -405,6 +426,8 @@ function cleanupServices(): void {
   sessionService?.flush();
   sessionService = null;
   statsService = null;
+  void aiService?.dispose();
+  aiService = null;
 }
 
 app.on('before-quit', (event) => {

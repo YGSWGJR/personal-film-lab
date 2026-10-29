@@ -74,7 +74,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'app,data,detect,export,media,note,player,project,scope,session,settings,shot,stats,still,tag,term';
+      state?.apiKeys === 'ai,app,data,detect,export,media,note,player,project,scope,session,settings,shot,stats,still,tag,term';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );

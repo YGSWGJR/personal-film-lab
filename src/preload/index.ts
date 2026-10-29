@@ -3,6 +3,10 @@ import { z, type ZodType } from 'zod';
 import { IPC } from '../shared/ipc-channels';
 import { fail } from '../shared/ipc-result';
 import {
+  aiCopyPromptArgsSchema,
+  aiMcpAuthResponseSchema,
+  aiMcpSetEnabledArgsSchema,
+  aiProjectArgsSchema,
   emptyArgsSchema,
   dataImportProjectArgsSchema,
   dataScanCandidatesArgsSchema,
@@ -55,6 +59,13 @@ import {
   workspaceStateSchema,
 } from '../shared/schemas';
 import type {
+  AiCopyPromptArgs,
+  AiCopyPromptResult,
+  AiMcpAuthRequest,
+  AiMcpAuthResponseArgs,
+  AiMcpDataChangedEvent,
+  AiMcpStatus,
+  AiProjectSnapshot,
   AppInfo,
   AudioWaveform,
   CandidateSource,
@@ -141,6 +152,11 @@ import type {
 /** 白名单：通道 → 入参校验 schema；未登记的通道不会转发 */
 const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.APP_INFO]: emptyArgsSchema,
+  [IPC.AI_COPY_PROMPT]: aiCopyPromptArgsSchema,
+  [IPC.AI_GET_SNAPSHOT]: aiProjectArgsSchema,
+  [IPC.AI_START_MCP]: aiMcpSetEnabledArgsSchema,
+  [IPC.AI_GET_MCP_STATUS]: emptyArgsSchema,
+  [IPC.AI_RESPOND_MCP_AUTH]: aiMcpAuthResponseSchema,
   [IPC.SETTINGS_GET]: emptyArgsSchema,
   [IPC.SETTINGS_SET]: settingsSetArgsSchema,
   [IPC.SETTINGS_CHOOSE_DIRECTORY]: settingsChooseDirectoryArgsSchema,
@@ -231,6 +247,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
 
 /** 主进程 → 渲染层事件白名单 */
 const EVENT_WHITELIST = {
+  onMcpAuthRequest: IPC.AI_MCP_AUTH_REQUEST,
+  onAiMcpDataChanged: IPC.AI_MCP_DATA_CHANGED,
   onState: IPC.PLAYER_EVENT_STATE,
   onTime: IPC.PLAYER_EVENT_TIME,
   onLoaded: IPC.PLAYER_EVENT_LOADED,
@@ -270,6 +288,20 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const appApi = {
   getInfo: () => invoke<AppInfo>(IPC.APP_INFO),
+};
+
+const aiApi = {
+  copyPrompt: (args: AiCopyPromptArgs) => invoke<AiCopyPromptResult>(IPC.AI_COPY_PROMPT, [args]),
+  getShotSnapshot: (args: { projectId: string }) =>
+    invoke<AiProjectSnapshot>(IPC.AI_GET_SNAPSHOT, [args]),
+  startMcp: (args: { enabled: boolean }) => invoke<AiMcpStatus>(IPC.AI_START_MCP, [args]),
+  getMcpStatus: () => invoke<AiMcpStatus>(IPC.AI_GET_MCP_STATUS),
+  onMcpAuthRequest: (listener: (request: AiMcpAuthRequest) => void) =>
+    subscribe<AiMcpAuthRequest>(EVENT_WHITELIST.onMcpAuthRequest, listener),
+  respondMcpAuth: (args: AiMcpAuthResponseArgs) =>
+    invoke<{ responded: boolean }>(IPC.AI_RESPOND_MCP_AUTH, [args]),
+  onDataChanged: (listener: (event: AiMcpDataChangedEvent) => void) =>
+    subscribe<AiMcpDataChangedEvent>(EVENT_WHITELIST.onAiMcpDataChanged, listener),
 };
 
 const settingsApi = {
@@ -428,6 +460,7 @@ const statsApi = {
 
 const api: WindowApi = {
   app: appApi,
+  ai: aiApi,
   settings: settingsApi,
   session: sessionApi,
   player: playerApi,

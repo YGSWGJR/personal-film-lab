@@ -4,6 +4,7 @@ import emptyProjectImage from '../../../assets/design/design_empty_project_1024x
 import emptyShotsImage from '../../../assets/design/design_empty_shots_1024x768.png';
 import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x768.png';
 import cutIcon from '../../../assets/design/design_icon_cut_48.png';
+import AiAssistantMenu from './components/AiAssistantMenu.vue';
 import AppIcon from './components/AppIcon.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
@@ -27,6 +28,10 @@ import type { SkeletonState } from './env';
 import type { BoundaryChange, DetailTerm, TimelineMarker, WorkspaceShot } from './types/workspace';
 import type {
   AppInfo,
+  AiMcpAuthRequest,
+  AiMcpDataChangedEvent,
+  AiMcpStatus,
+  AiTaskId,
   AudioWaveform,
   CandidateProject,
   CandidateSource,
@@ -125,6 +130,11 @@ const settings = ref<Settings | null>(null);
 const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
 const statsOpen = ref(false);
+const aiMenuOpen = ref(false);
+const aiCopying = ref(false);
+const aiMcpStatus = ref<AiMcpStatus | null>(null);
+const aiMcpBusy = ref(false);
+const aiAuthRequest = ref<AiMcpAuthRequest | null>(null);
 const shotScrollTop = ref(0);
 let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
@@ -205,7 +215,9 @@ const overlayOpen = computed(
     termEditorOpen.value ||
     settingsOpen.value ||
     statsOpen.value ||
-    importWizardOpen.value,
+    importWizardOpen.value ||
+    aiMenuOpen.value ||
+    aiAuthRequest.value !== null,
 );
 
 function hidePlayerForOverlay(): void {
@@ -1621,6 +1633,66 @@ async function closeSettings(): Promise<void> {
   await nextTick();
 }
 
+async function refreshAiMcpStatus(): Promise<void> {
+  const result = await window.api.ai.getMcpStatus();
+  if (result.ok) aiMcpStatus.value = result.data;
+  else console.warn(`[ai] ${result.error.code} ${result.error.message}`);
+}
+
+async function copyAiPrompt(tasks: AiTaskId[]): Promise<void> {
+  const project = activeProject.value;
+  if (!project || demoMode.value || aiCopying.value) return;
+  aiCopying.value = true;
+  try {
+    const result = await window.api.ai.copyPrompt({ projectId: project.id, tasks: [...tasks] });
+    if (!result.ok) throw new Error(result.error.message);
+    showToast('提示词已复制，请粘贴给 AI 完成该任务。', 'success');
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error', '复制失败');
+  } finally {
+    aiCopying.value = false;
+  }
+}
+
+async function toggleAiMcp(): Promise<void> {
+  if (aiMcpBusy.value) return;
+  aiMcpBusy.value = true;
+  try {
+    const enabled = !aiMcpStatus.value?.running;
+    const result = await window.api.ai.startMcp({ enabled });
+    if (!result.ok) throw new Error(result.error.message);
+    aiMcpStatus.value = result.data;
+    showToast(enabled ? '本地 MCP 已开启。' : '本地 MCP 已关闭。', 'success');
+  } catch (error) {
+    await refreshAiMcpStatus();
+    showToast(error instanceof Error ? error.message : String(error), 'error', 'MCP 操作失败');
+  } finally {
+    aiMcpBusy.value = false;
+  }
+}
+
+async function respondAiMcpAuth(value: { allowed: boolean; remember: boolean }): Promise<void> {
+  const request = aiAuthRequest.value;
+  if (!request) return;
+  aiAuthRequest.value = null;
+  const result = await window.api.ai.respondMcpAuth({
+    requestId: request.requestId,
+    allowed: value.allowed,
+    remember: value.remember,
+  });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', '授权响应失败');
+    return;
+  }
+  showToast(value.allowed ? '已允许 AI 写入镜头笔记。' : '已拒绝 AI 写入请求。');
+}
+
+async function handleAiMcpDataChanged(event: AiMcpDataChangedEvent): Promise<void> {
+  if (!activeProject.value || activeProject.value.id !== event.projectId) return;
+  const refreshed = await refreshProjectData(event.projectId, event.shotId);
+  if (refreshed) showToast('AI 已写入镜头笔记，界面数据已刷新。', 'success');
+}
+
 async function openStats(): Promise<void> {
   if (demoMode.value || !activeProject.value) {
     showToast('请先打开一个真实项目，再查看学习统计。');
@@ -1971,6 +2043,7 @@ onMounted(async () => {
   }
 
   await loadSettings();
+  await refreshAiMcpStatus();
 
   let savedSession: WorkspaceState | null = null;
   const sessionResult = await api.session.get();
@@ -2066,6 +2139,12 @@ onMounted(async () => {
         message: `已写入 ${event.filePath}`,
       };
     }),
+    api.ai.onMcpAuthRequest((request) => {
+      aiAuthRequest.value = request;
+    }),
+    api.ai.onDataChanged((event) => {
+      void handleAiMcpDataChanged(event);
+    }),
   );
 
   await nextTick();
@@ -2126,6 +2205,21 @@ onBeforeUnmount(() => {
           <kbd>S</kbd>
         </button>
         <button class="nav-item" type="button" @click="openExport">导出分镜本</button>
+        <AiAssistantMenu
+          :open="aiMenuOpen"
+          :has-project="Boolean(activeProject) && !demoMode"
+          :project-name="activeProject?.name ?? ''"
+          :mcp-status="aiMcpStatus"
+          :mcp-busy="aiMcpBusy"
+          :copying="aiCopying"
+          :auth-request="aiAuthRequest"
+          @toggle="aiMenuOpen = !aiMenuOpen"
+          @close="aiMenuOpen = false"
+          @copy-prompt="copyAiPrompt"
+          @copy-snapshot="copyAiPrompt([])"
+          @toggle-mcp="toggleAiMcp"
+          @respond-auth="respondAiMcpAuth"
+        />
       </nav>
 
       <div class="topbar-right">
@@ -2412,8 +2506,11 @@ onBeforeUnmount(() => {
       :settings="settings"
       :saving="settingsSaving"
       :error="settingsError"
+      :mcp-status="aiMcpStatus"
+      :mcp-busy="aiMcpBusy"
       @close="closeSettings"
       @save="saveSettings"
+      @toggle-mcp="toggleAiMcp"
     />
 
     <StatsModal
