@@ -34,10 +34,13 @@ const emit = defineEmits<{
   bounds: [bounds: RenderBounds];
   capture: [];
   setLayer: [level: OverlayLayer];
+  setVolume: [volume: number];
+  toggleMute: [];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
 const controlsVisible = ref(true);
+const volumeOpen = ref(false);
 let resizeObserver: ResizeObserver | null = null;
 
 const timecode = computed(() => formatTimecode(props.displayTimeMs));
@@ -175,7 +178,7 @@ onBeforeUnmount(() => {
       @boundary-commit="emit('boundaryCommit', $event)"
     />
 
-    <div class="transport">
+    <div v-show="controlsVisible" class="transport">
       <div class="transport-left">
         <button class="transport-button" type="button" title="打开影片" @click="emit('open')">
           <AppIcon name="folder" :size="15" />
@@ -189,9 +192,36 @@ onBeforeUnmount(() => {
         <button class="transport-button" type="button" title="下一帧 (→)" @click="emit('step', 1)">
           <AppIcon name="step-forward" :size="15" />
         </button>
-        <button class="transport-button" type="button" :title="controlsVisible ? '隐藏音量' : '显示音量'">
-          <AppIcon name="volume" :size="15" />
-        </button>
+        <div
+          class="volume-control"
+          @mouseenter="volumeOpen = true"
+          @mouseleave="volumeOpen = false"
+          @focusin="volumeOpen = true"
+          @focusout="volumeOpen = false"
+        >
+          <button
+            class="transport-button volume-button"
+            type="button"
+            :title="player.volume === 0 ? '取消静音' : '静音 (M)'"
+            @click="volumeOpen = true; emit('toggleMute')"
+          >
+            <AppIcon :name="player.volume === 0 ? 'muted' : 'volume'" :size="15" />
+          </button>
+          <div v-show="volumeOpen" class="volume-pop">
+            <input
+              class="volume-slider"
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              aria-label="音量"
+              :value="Math.round(player.volume * 100)"
+              @input="emit('setVolume', Number(($event.target as HTMLInputElement).value) / 100)"
+              @change="emit('setVolume', Number(($event.target as HTMLInputElement).value) / 100)"
+            />
+            <span class="volume-value">{{ Math.round(player.volume * 100) }}%</span>
+          </div>
+        </div>
       </div>
 
       <div class="time-readout">
@@ -606,6 +636,7 @@ onBeforeUnmount(() => {
 }
 
 .transport {
+  position: relative;
   display: grid;
   height: 36px;
   min-height: 36px;
@@ -625,6 +656,44 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.volume-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.volume-button {
+  position: relative;
+}
+
+.volume-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  transform: translateX(-50%);
+}
+
+.volume-slider {
+  width: 120px;
+  accent-color: var(--blue);
+}
+
+.volume-value {
+  min-width: 34px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: right;
 }
 
 .transport-right {
