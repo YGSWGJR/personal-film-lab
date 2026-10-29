@@ -21,7 +21,7 @@ import type {
 } from '../../shared/types';
 import { isHardwareEncoder, resolveAvailableEncoders, selectBestEncoder } from './encoders';
 import { resolveFfmpegBinaries, type FfmpegBinaries } from './ffmpeg-binaries';
-import { resolveAvailableHwaccels, selectHwaccel } from './hwaccel';
+import { resolveAvailableHwaccels, selectHwaccel, type SelectedHwaccel } from './hwaccel';
 import { MediaError, diagnosticsOf, tailText } from './media-error';
 import { formatCommand, runProcess } from './process-runner';
 import { resolveFrameCacheDir, resolveProxyCacheDir } from '../paths';
@@ -84,6 +84,11 @@ export interface ProxySizeOptions {
   resolution?: ProxyResolution;
   /** 兼容旧调用：仅覆盖 auto 分辨率模式的目标高度上限 */
   maxHeight?: number;
+}
+
+interface TranscodeHwaccelAttempt {
+  accel: SelectedHwaccel;
+  downloadCudaFrames: boolean;
 }
 
 /**
@@ -643,8 +648,15 @@ export class MediaService {
     const evenHeight = proxySize.height;
     const timeoutMs = args.timeoutMs ?? DEFAULT_TRANSCODE_TIMEOUT_MS;
     const gopFrames = Math.max(1, Math.round((meta.fps > 0 ? meta.fps : 30) * 2));
+    const availableHwaccels = await resolveAvailableHwaccels();
+    const selectedHwaccel = selectHwaccel(availableHwaccels);
+    const attempts = buildTranscodeHwaccelAttempts(selectedHwaccel, availableHwaccels);
 
-    const buildTranscodeArgs = (encoderName: string): string[] => [
+    const buildTranscodeArgs = (
+      encoderName: string,
+      accel: SelectedHwaccel,
+      downloadCudaFrames: boolean,
+    ): string[] => [
       '-hide_banner',
       '-loglevel',
       'error',
@@ -652,6 +664,8 @@ export class MediaService {
       '-progress',
       'pipe:1',
       '-y',
+      ...(accel === 'cuda' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : []),
+      ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
       '-i',
       sourcePath,
       '-map',
@@ -659,15 +673,16 @@ export class MediaService {
       '-map',
       '0:a:0?',
       '-vf',
-      `scale=${targetWidth}:${evenHeight}`,
+      accel === 'cuda'
+        ? `scale_cuda=${targetWidth}:${evenHeight}:format=nv12${downloadCudaFrames ? ',hwdownload,format=nv12' : ''}`
+        : `scale=${targetWidth}:${evenHeight}`,
       ...buildVideoEncoderArgs(encoderName, proxyMode, effectiveCrf),
       '-g',
       String(gopFrames),
       '-keyint_min',
       String(gopFrames),
       ...(encoderName === 'libx264' ? ['-sc_threshold', '0'] : []),
-      '-pix_fmt',
-      'yuv420p',
+      ...(accel === 'cuda' && !downloadCudaFrames ? [] : ['-pix_fmt', 'yuv420p']),
       ...(audioCopied ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k']),
       '-movflags',
       '+faststart',
@@ -681,7 +696,10 @@ export class MediaService {
     const startedAt = Date.now();
     let encoderUsed = encoder.name;
     let fallbackReason: string | undefined;
-    let ffArgs = buildTranscodeArgs(encoderUsed);
+    const fallbackNotes: string[] = [];
+    let ffArgs = buildTranscodeArgs(encoderUsed, attempts[0].accel, attempts[0].downloadCudaFrames);
+    let hwaccelUsed = attempts[0].accel;
+    let hwdownloadUsed = attempts[0].downloadCudaFrames;
 
     const onStdoutLine = (line: string): void => {
       const match = /^out_time_us=(\d+)$/u.exec(line.trim());
@@ -712,6 +730,40 @@ export class MediaService {
       lowPriority: true,
     });
 
+    for (let index = 1; index < attempts.length; index += 1) {
+      if (result.exitCode === 0 || result.timedOut || result.aborted) break;
+      const previous = attempts[index - 1];
+      const next = attempts[index];
+      const reason = tailText(result.stderr, 1000).trim() || '硬件解码失败';
+      fallbackNotes.push(`${describeHwaccelAttempt(previous)}: ${reason}`);
+      this.removeQuietly(outputPath);
+      lastPercent = 0;
+      lastEmitAt = 0;
+      item.percent = 0;
+      item.message =
+        previous.accel === 'cuda' && !previous.downloadCudaFrames && next.accel === 'cuda'
+          ? 'CUDA 帧直连编码失败，正在改用 hwdownload 回传后编码'
+          : `硬件解码不可用，正在回退 ${describeHwaccelAttempt(next)}`;
+      this.emitProgress({
+        jobId,
+        stage: 'transcode',
+        percent: 0,
+        message: item.message,
+        queueState: 'running',
+      });
+      hwaccelUsed = next.accel;
+      hwdownloadUsed = next.downloadCudaFrames;
+      ffArgs = buildTranscodeArgs(encoderUsed, next.accel, next.downloadCudaFrames);
+      result = await runProcess({
+        command: ffmpeg,
+        args: ffArgs,
+        timeoutMs,
+        signal: controller.signal,
+        onStdoutLine,
+        lowPriority: true,
+      });
+    }
+
     if (
       !result.timedOut &&
       !result.aborted &&
@@ -719,10 +771,13 @@ export class MediaService {
       encoderUsed !== 'libx264' &&
       HARDWARE_ENCODER_FAILURE_RE.test(result.stderr)
     ) {
-      fallbackReason = `${encoderUsed}: ${tailText(result.stderr, 1000).trim() || '硬件编码器启动失败'}`;
+      fallbackNotes.push(`${encoderUsed}: ${tailText(result.stderr, 1000).trim() || '硬件编码器启动失败'}`);
       this.removeQuietly(outputPath);
       encoderUsed = 'libx264';
-      ffArgs = buildTranscodeArgs(encoderUsed);
+      item.encoderUsed = encoderUsed;
+      hwaccelUsed = 'none';
+      hwdownloadUsed = false;
+      ffArgs = buildTranscodeArgs(encoderUsed, hwaccelUsed, hwdownloadUsed);
       lastPercent = 0;
       lastEmitAt = 0;
       item.percent = 0;
@@ -743,6 +798,8 @@ export class MediaService {
         lowPriority: true,
       });
     }
+
+    fallbackReason = fallbackNotes.length > 0 ? fallbackNotes.join('\n') : undefined;
 
     if (result.timedOut) {
       this.removeQuietly(outputPath);
@@ -775,7 +832,7 @@ export class MediaService {
     const finalWidth = outputInfo?.width ?? targetWidth;
     const finalHeight = outputInfo?.height ?? evenHeight;
     console.info(
-      `[transcode] complete: mode=${proxyMode} encoderUsed=${encoderUsed} width=${finalWidth} height=${finalHeight} elapsedMs=${elapsedMs} hardwareAccelerated=${hardwareAccelerated} audio=${audioCopied ? 'copy' : 'aac'}`,
+      `[transcode] complete: mode=${proxyMode} encoderUsed=${encoderUsed} hwaccelUsed=${hwaccelUsed} hwdownload=${hwdownloadUsed} width=${finalWidth} height=${finalHeight} elapsedMs=${elapsedMs} hardwareAccelerated=${hardwareAccelerated} audio=${audioCopied ? 'copy' : 'aac'}`,
     );
 
     return {
@@ -1068,6 +1125,30 @@ function resolutionForTier(tier: ProxyTier): ProxyResolution {
   if (tier === '360p') return 'p360';
   if (tier === '720p') return 'p720';
   return 'p540';
+}
+
+function buildTranscodeHwaccelAttempts(
+  selected: SelectedHwaccel,
+  available: string[],
+): TranscodeHwaccelAttempt[] {
+  const attempts: TranscodeHwaccelAttempt[] = [];
+  const supported = new Set(available.map((name) => name.toLowerCase()));
+  if (selected === 'cuda') {
+    attempts.push(
+      { accel: 'cuda', downloadCudaFrames: false },
+      { accel: 'cuda', downloadCudaFrames: true },
+    );
+    if (supported.has('d3d11va')) attempts.push({ accel: 'd3d11va', downloadCudaFrames: false });
+  } else if (selected === 'd3d11va') {
+    attempts.push({ accel: 'd3d11va', downloadCudaFrames: false });
+  }
+  attempts.push({ accel: 'none', downloadCudaFrames: false });
+  return attempts;
+}
+
+function describeHwaccelAttempt(attempt: TranscodeHwaccelAttempt): string {
+  if (attempt.accel === 'cuda' && attempt.downloadCudaFrames) return 'cuda+hwdownload';
+  return attempt.accel;
 }
 
 function buildVideoEncoderArgs(encoderName: string, mode: ProxyMode, crf?: number): string[] {
