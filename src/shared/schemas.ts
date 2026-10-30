@@ -175,6 +175,7 @@ export const mediaCancelJobArgsSchema = z.object({
 
 export const scopeExtractAudioWaveformArgsSchema = z.object({
   path: z.string().min(1),
+  proxyPath: z.string().min(1).optional(),
   bucketMs: z.number().int().min(20).max(5000).optional(),
 });
 

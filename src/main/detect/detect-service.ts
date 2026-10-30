@@ -22,8 +22,6 @@ import type {
   ShotPreview,
 } from '../../shared/types';
 import type { MediaService } from '../media/media-service';
-import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
-import { runProcess } from '../media/process-runner';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
 import { DetectError } from './detect-error';
 
@@ -347,32 +345,7 @@ export class DetectService {
     width: number,
     quality: number,
   ): Promise<void> {
-    const { ffmpeg } = await resolveFfmpegBinaries();
-    const result = await runProcess({
-      command: ffmpeg,
-      args: [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-nostdin',
-        '-i',
-        inputFramePath,
-        '-frames:v',
-        '1',
-        '-an',
-        '-sn',
-        '-vf',
-        `scale=${width}:-2`,
-        '-q:v',
-        String(quality),
-        '-y',
-        thumbnailPath,
-      ],
-      timeoutMs: 60_000,
-    });
-    if (result.timedOut || result.exitCode !== 0) {
-      throw new Error(result.timedOut ? 'thumbnail timeout' : result.stderr || 'thumbnail failed');
-    }
+    await this.media.createThumbnail(inputFramePath, thumbnailPath, width, quality);
   }
 
   private cleanupDetectFrames(framesDir: string | null): void {

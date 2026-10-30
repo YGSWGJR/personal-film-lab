@@ -391,13 +391,19 @@ function prepareAudioWaveform(project: Project): void {
   resetAudioWaveform();
   const path = project.source.path || project.media.proxyPath;
   if (!path) return;
-  void loadAudioWaveform(path, audioGeneration);
+  const proxyPath =
+    project.media.proxyPath && project.media.proxyPath !== path ? project.media.proxyPath : undefined;
+  void loadAudioWaveform(path, proxyPath, audioGeneration);
 }
 
-async function loadAudioWaveform(path: string, generation: number): Promise<void> {
+async function loadAudioWaveform(
+  path: string,
+  proxyPath: string | undefined,
+  generation: number,
+): Promise<void> {
   audioLoading.value = true;
   try {
-    const result = await window.api.scope.extractAudioWaveform({ path, bucketMs: 100 });
+    const result = await window.api.scope.extractAudioWaveform({ path, proxyPath, bucketMs: 100 });
     if (generation !== audioGeneration) return;
     if (!result.ok) {
       console.warn(`[scope] 音频波形提取失败：${result.error.code} ${result.error.message}`);
@@ -416,11 +422,12 @@ async function loadAudioWaveform(path: string, generation: number): Promise<void
 async function loadProject(
   project: Project,
   restoreState: WorkspaceState | null = null,
+  deferWaveform = false,
 ): Promise<void> {
   const projectChanged = activeProject.value?.id !== project.id;
   activeProject.value = project;
   demoMode.value = false;
-  if (projectChanged) prepareAudioWaveform(project);
+  if (projectChanged && !deferWaveform) prepareAudioWaveform(project);
   const [shotResult, stillResult, noteResult] = await Promise.all([
     window.api.shot.list({ projectId: project.id }),
     window.api.still.list({ projectId: project.id }),
@@ -543,7 +550,7 @@ async function openVideo(): Promise<void> {
     loadedPlaybackPath.value = media.path;
     const project = await createProjectForMedia(media);
     if (project) {
-      await loadProject(project);
+      await loadProject(project, null, true);
       backgroundProxy = { projectId: project.id, sourcePath: media.path };
       showToast('影片已导入，可立即播放；代理正在后台生成。', 'success');
     }
@@ -581,8 +588,13 @@ async function startBackgroundProxy(projectId: string, sourcePath: string): Prom
     );
     if (updated) {
       if (activeProject.value?.id === projectId) activeProject.value = updated;
+      prepareAudioWaveform(updated);
       showToast(`${tier} 代理已生成，下次打开项目将使用代理。`, 'success');
     }
+  } catch (error) {
+    const current = activeProject.value;
+    if (current?.id === projectId) prepareAudioWaveform(current);
+    showToast(error instanceof Error ? error.message : String(error), 'error', '后台代理生成失败');
   } finally {
     await refreshTranscodeQueueState();
   }

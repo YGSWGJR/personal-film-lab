@@ -137,12 +137,22 @@ export class MediaService {
       '-loglevel',
       'error',
       '-nostdin',
-      ...(accel === 'cuda' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : []),
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      ...(accel === 'cuda'
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '8']
+        : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
+      '-threads',
+      '1',
       '-ss',
       seconds,
       '-i',
       inputPath,
+      '-threads',
+      '1',
       '-frames:v',
       '1',
       '-an',
@@ -200,7 +210,7 @@ export class MediaService {
   }
 
   /** 由已抽出的原图生成 JPEG 缩略图，供静帧列表和分镜本使用。 */
-  async createThumbnail(inputPath: string, outputPath: string, maxWidth = 480): Promise<string> {
+  async createThumbnail(inputPath: string, outputPath: string, maxWidth = 480, quality = 4): Promise<string> {
     const sourcePath = this.validateInput(inputPath);
     const targetPath = this.validateOutputPath(outputPath);
     this.assertNotSameFile(sourcePath, targetPath);
@@ -208,19 +218,28 @@ export class MediaService {
 
     const { ffmpeg } = await this.ensureReady();
     const width = clampInt(maxWidth, 64, 1920);
+    const jpegQuality = clampInt(quality, 1, 31);
     const ffArgs = [
       '-hide_banner',
       '-loglevel',
       'error',
       '-nostdin',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      '-threads',
+      '1',
       '-i',
       sourcePath,
+      '-threads',
+      '1',
       '-frames:v',
       '1',
       '-vf',
       `scale=${width}:-2:force_original_aspect_ratio=decrease`,
       '-q:v',
-      '4',
+      String(jpegQuality),
       '-y',
       targetPath,
     ];
@@ -280,7 +299,57 @@ export class MediaService {
     }
     const spanMs = endMs - startMs;
     const fpsFilter = `fps=${1000}/${intervalMs}`;
+    const frameSize = computeProxySize({
+      srcWidth: meta.width,
+      srcHeight: meta.height,
+      mode: 'fast',
+      resolution: 'p360',
+    });
+    const frameFilter = (accel: SelectedHwaccel): string =>
+      accel === 'cuda'
+        ? `scale_cuda=${frameSize.width}:${frameSize.height}:format=nv12,hwdownload,format=nv12,${fpsFilter}`
+        : `${fpsFilter},scale=${frameSize.width}:${frameSize.height}`;
     const pattern = join(outputDir, `${prefix}%06d.${format}`);
+    const availableHwaccels = await resolveAvailableHwaccels();
+    const attempts = buildExtractFramesHwaccelAttempts(
+      selectHwaccel(availableHwaccels),
+      availableHwaccels,
+    );
+    const buildExtractFramesArgs = (accel: SelectedHwaccel): string[] => [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      '-progress',
+      'pipe:1',
+      ...(accel === 'cuda'
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '8']
+        : []),
+      ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
+      '-threads',
+      '1',
+      '-ss',
+      (startMs / 1000).toFixed(3),
+      '-i',
+      inputPath,
+      '-threads',
+      '1',
+      '-t',
+      (spanMs / 1000).toFixed(3),
+      '-an',
+      '-sn',
+      '-vf',
+      frameFilter(accel),
+      '-frames:v',
+      String(maxFrames),
+      ...(format === 'png' ? ['-compression_level', '6'] : ['-q:v', String(quality)]),
+      '-y',
+      pattern,
+    ];
 
     this.cleanOldFrames(outputDir, prefix, format);
     const jobId = controls?.jobId ?? `extract-${randomUUID()}`;
@@ -292,58 +361,62 @@ export class MediaService {
     };
     reportProgress({ jobId, stage: 'extractFrames', percent: 0, message: '开始抽帧' });
 
-    const ffArgs = [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-nostdin',
-      '-progress',
-      'pipe:1',
-      '-ss',
-      (startMs / 1000).toFixed(3),
-      '-i',
-      inputPath,
-      '-t',
-      (spanMs / 1000).toFixed(3),
-      '-an',
-      '-sn',
-      '-vf',
-      fpsFilter,
-      '-frames:v',
-      String(maxFrames),
-      ...(format === 'png' ? ['-compression_level', '6'] : ['-q:v', String(quality)]),
-      '-y',
-      pattern,
-    ];
-
     let lastPercent = 0;
     let lastEmitAt = 0;
     const startedAt = Date.now();
+    let hwaccelUsed = attempts[0];
+    let ffArgs = buildExtractFramesArgs(hwaccelUsed);
+    const onStdoutLine = (line: string): void => {
+      const match = /^out_time_us=(\d+)$/u.exec(line.trim());
+      if (!match) return;
+      const outMs = Number(match[1]) / 1000;
+      const percent = clampInt(Math.floor((outMs / spanMs) * 100), 0, 99);
+      const now = Date.now();
+      if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
+        lastPercent = percent;
+        lastEmitAt = now;
+        reportProgress({
+          jobId,
+          stage: 'extractFrames',
+          percent,
+          message: `抽帧中 ${percent}%（已处理 ${(outMs / 1000).toFixed(1)}s）`,
+        });
+      }
+    };
 
     try {
-      const result = await runProcess({
+      let result = await runProcess({
         command: ffmpeg,
         args: ffArgs,
         timeoutMs: args.timeoutMs ?? DEFAULT_FRAMES_TIMEOUT_MS,
         signal: controller.signal,
-        onStdoutLine: (line) => {
-          const match = /^out_time_us=(\d+)$/u.exec(line.trim());
-          if (!match) return;
-          const outMs = Number(match[1]) / 1000;
-          const percent = clampInt(Math.floor((outMs / spanMs) * 100), 0, 99);
-          const now = Date.now();
-          if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
-            lastPercent = percent;
-            lastEmitAt = now;
-            reportProgress({
-              jobId,
-              stage: 'extractFrames',
-              percent,
-              message: `抽帧中 ${percent}%（已处理 ${(outMs / 1000).toFixed(1)}s）`,
-            });
-          }
-        },
+        onStdoutLine,
       });
+
+      for (let index = 1; index < attempts.length; index += 1) {
+        if (result.exitCode === 0 || result.timedOut || result.aborted || controller.signal.aborted) break;
+        const next = attempts[index];
+        const reason = tailText(result.stderr, 1000).trim() || '硬件解码失败';
+        console.info(`[extractFrames] fallback ${hwaccelUsed} -> ${next}: ${reason}`);
+        this.cleanOldFrames(outputDir, prefix, format);
+        lastPercent = 0;
+        lastEmitAt = 0;
+        hwaccelUsed = next;
+        ffArgs = buildExtractFramesArgs(next);
+        reportProgress({
+          jobId,
+          stage: 'extractFrames',
+          percent: 0,
+          message: `硬件抽帧不可用，正在回退 ${next}`,
+        });
+        result = await runProcess({
+          command: ffmpeg,
+          args: ffArgs,
+          timeoutMs: args.timeoutMs ?? DEFAULT_FRAMES_TIMEOUT_MS,
+          signal: controller.signal,
+          onStdoutLine,
+        });
+      }
 
       if (result.timedOut) {
         throw new MediaError(
@@ -366,6 +439,9 @@ export class MediaService {
         });
       }
 
+      console.info(
+        `[extractFrames] complete: hwaccelUsed=${hwaccelUsed} width=${frameSize.width} height=${frameSize.height} elapsedMs=${Date.now() - startedAt}`,
+      );
       const frames = this.collectFrames(outputDir, prefix, format, intervalMs, startMs);
       if (frames.length === 0) {
         throw new MediaError('EXTRACT_FRAMES_EMPTY', '抽帧完成但没有生成文件（时间区间可能超出影片范围）', {
@@ -661,13 +737,23 @@ export class MediaService {
       '-loglevel',
       'error',
       '-nostdin',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
       '-progress',
       'pipe:1',
       '-y',
-      ...(accel === 'cuda' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : []),
+      ...(accel === 'cuda'
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '8']
+        : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
+      '-threads',
+      '1',
       '-i',
       sourcePath,
+      '-threads',
+      '1',
       '-map',
       '0:v:0',
       '-map',
@@ -1143,6 +1229,22 @@ function buildTranscodeHwaccelAttempts(
     attempts.push({ accel: 'd3d11va', downloadCudaFrames: false });
   }
   attempts.push({ accel: 'none', downloadCudaFrames: false });
+  return attempts;
+}
+
+function buildExtractFramesHwaccelAttempts(
+  selected: SelectedHwaccel,
+  available: string[],
+): SelectedHwaccel[] {
+  const supported = new Set(available.map((name) => name.toLowerCase()));
+  const attempts: SelectedHwaccel[] = [];
+  if (selected === 'cuda') {
+    attempts.push('cuda');
+    if (supported.has('d3d11va')) attempts.push('d3d11va');
+  } else if (selected === 'd3d11va') {
+    attempts.push('d3d11va');
+  }
+  attempts.push('none');
   return attempts;
 }
 

@@ -491,6 +491,8 @@ export interface AudioWaveform {
 
 export interface ScopeExtractAudioWaveformArgs {
   path: string;
+  /** 可选的低码率代理文件；存在且有效时优先用于解码，缓存键仍使用 path */
+  proxyPath?: string;
   bucketMs?: number;
 }
 
