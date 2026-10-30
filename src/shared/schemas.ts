@@ -107,6 +107,11 @@ export const playerSetVolumeArgsSchema = z.object({
   volume: z.number().min(0).max(1),
 });
 
+/** player:setSpeed（业务层归一化到 0.5 / 1 / 1.5 / 2） */
+export const playerSetSpeedArgsSchema = z.object({
+  rate: z.number().finite(),
+});
+
 /** player:setBounds（CSS 像素，相对可视区域） */
 export const playerSetBoundsArgsSchema = z.object({
   x: z.number().finite(),
@@ -165,7 +170,7 @@ export const mediaTranscodeProxyArgsSchema = z.object({
 });
 
 export const mediaSetConcurrencyArgsSchema = z.object({
-  concurrency: z.union([z.literal(1), z.literal(2)]),
+  concurrency: z.union([z.literal(1), z.literal(2), z.literal(4)]),
 });
 
 /** media:cancelJob */
@@ -175,6 +180,7 @@ export const mediaCancelJobArgsSchema = z.object({
 
 export const scopeExtractAudioWaveformArgsSchema = z.object({
   path: z.string().min(1),
+  proxyPath: z.string().min(1).optional(),
   bucketMs: z.number().int().min(20).max(5000).optional(),
 });
 

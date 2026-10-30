@@ -42,6 +42,8 @@ export const IPC = {
   PLAYER_GET_STATE: 'player:getState',
   PLAYER_GET_FRAME: 'player:getFrame',
   PLAYER_SET_VOLUME: 'player:setVolume',
+  PLAYER_GET_SPEED: 'player:getSpeed',
+  PLAYER_SET_SPEED: 'player:setSpeed',
   PLAYER_SET_BOUNDS: 'player:setBounds',
   PLAYER_SET_LAYER: 'player:setLayer',
 
@@ -59,6 +61,7 @@ export const IPC = {
   MEDIA_CANCEL_JOB: 'media:cancelJob',
   MEDIA_QUEUE_LIST: 'media:queueList',
   MEDIA_SET_TRANSCODE_CONCURRENCY: 'media:setTranscodeConcurrency',
+  GPU_GET_STATUS: 'gpu:status',
 
   /** media 域（E 方向） */
   MEDIA_EVENT_PROGRESS: 'media:event:progress',

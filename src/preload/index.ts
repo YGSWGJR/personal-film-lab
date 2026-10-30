@@ -50,6 +50,7 @@ import {
   playerSeekArgsSchema,
   playerSetBoundsArgsSchema,
   playerSetLayerArgsSchema,
+  playerSetSpeedArgsSchema,
   playerSetVolumeArgsSchema,
   scopeExtractAudioWaveformArgsSchema,
   settingsChooseDirectoryArgsSchema,
@@ -83,6 +84,7 @@ import type {
   ExtractFramesResult,
   ExtractFrameResult,
   FrameInfo,
+  GpuStatus,
   ImportResult,
   IpcResult,
   MediaInfo,
@@ -178,6 +180,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.PLAYER_GET_STATE]: emptyArgsSchema,
   [IPC.PLAYER_GET_FRAME]: emptyArgsSchema,
   [IPC.PLAYER_SET_VOLUME]: playerSetVolumeArgsSchema,
+  [IPC.PLAYER_GET_SPEED]: emptyArgsSchema,
+  [IPC.PLAYER_SET_SPEED]: playerSetSpeedArgsSchema,
   [IPC.PLAYER_SET_BOUNDS]: playerSetBoundsArgsSchema,
   [IPC.PLAYER_SET_LAYER]: playerSetLayerArgsSchema,
   [IPC.DATA_SCAN_CANDIDATES]: dataScanCandidatesArgsSchema,
@@ -189,6 +193,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_CANCEL_JOB]: mediaCancelJobArgsSchema,
   [IPC.MEDIA_QUEUE_LIST]: emptyArgsSchema,
   [IPC.MEDIA_SET_TRANSCODE_CONCURRENCY]: mediaSetConcurrencyArgsSchema,
+  [IPC.GPU_GET_STATUS]: emptyArgsSchema,
   [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
@@ -336,6 +341,8 @@ const playerApi = {
   getState: () => invoke<PlayerState>(IPC.PLAYER_GET_STATE),
   getFrame: () => invoke<FrameInfo>(IPC.PLAYER_GET_FRAME),
   setVolume: (args: { volume: number }) => invoke<PlayerState>(IPC.PLAYER_SET_VOLUME, [args]),
+  getSpeed: () => invoke<number>(IPC.PLAYER_GET_SPEED),
+  setSpeed: (args: { rate: number }) => invoke<PlayerState>(IPC.PLAYER_SET_SPEED, [args]),
   setBounds: (bounds: RenderBounds) => invoke<void>(IPC.PLAYER_SET_BOUNDS, [bounds]),
   setLayer: (args: { level: OverlayLayer }) => invoke<PlayerState>(IPC.PLAYER_SET_LAYER, [args]),
   onState: (listener: (state: PlayerState) => void) => subscribe<PlayerState>(EVENT_WHITELIST.onState, listener),
@@ -351,10 +358,14 @@ const mediaApi = {
   transcodeProxy: (args: TranscodeProxyArgs) => invoke<TranscodeProxyResult>(IPC.MEDIA_TRANSCODE_PROXY, [args]),
   cancelJob: (args: { jobId: string }) => invoke<CancelJobResult>(IPC.MEDIA_CANCEL_JOB, [args]),
   queueList: () => invoke<TranscodeQueueItem[]>(IPC.MEDIA_QUEUE_LIST),
-  setTranscodeConcurrency: (args: { concurrency: 1 | 2 }) =>
+  setTranscodeConcurrency: (args: { concurrency: 1 | 2 | 4 }) =>
     invoke<{ concurrency: number }>(IPC.MEDIA_SET_TRANSCODE_CONCURRENCY, [args]),
   onProgress: (listener: (event: MediaProgressEvent) => void) =>
     subscribe<MediaProgressEvent>(EVENT_WHITELIST.onMediaProgress, listener),
+};
+
+const gpuApi = {
+  getStatus: () => invoke<GpuStatus>(IPC.GPU_GET_STATUS),
 };
 
 const detectApi = {
@@ -465,6 +476,7 @@ const api: WindowApi = {
   session: sessionApi,
   player: playerApi,
   media: mediaApi,
+  gpu: gpuApi,
   scope: scopeApi,
   detect: detectApi,
   project: projectApi,

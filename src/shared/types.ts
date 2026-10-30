@@ -253,6 +253,9 @@ export interface MediaProbeResult extends MediaInfo {
 
 export type OverlayLayer = 'normal' | 'bottom' | 'hidden';
 
+export const PLAYBACK_SPEEDS = [0.5, 1, 1.5, 2] as const;
+export type PlaybackSpeed = (typeof PLAYBACK_SPEEDS)[number];
+
 /** 播放器状态（player:getState / player:event:state） */
 export interface PlayerState {
   hasFile: boolean;
@@ -261,6 +264,7 @@ export interface PlayerState {
   paused: boolean;
   ended: boolean;
   volume: number;
+  speed: PlaybackSpeed;
   width: number;
   height: number;
   fps: number;
@@ -323,6 +327,7 @@ export interface MediaProgressEvent {
   percent: number;
   message: string;
   queueState?: TranscodeQueueState;
+  gpu?: GpuStatus;
 }
 
 export interface MediaProbeArgs {
@@ -458,6 +463,8 @@ export interface PlayerApi {
   getState(): Promise<IpcResult<PlayerState>>;
   getFrame(): Promise<IpcResult<FrameInfo>>;
   setVolume(args: { volume: number }): Promise<IpcResult<PlayerState>>;
+  getSpeed(): Promise<IpcResult<number>>;
+  setSpeed(args: { rate: number }): Promise<IpcResult<PlayerState>>;
   setBounds(bounds: RenderBounds): Promise<IpcResult<void>>;
   setLayer(args: { level: OverlayLayer }): Promise<IpcResult<PlayerState>>;
   onState(listener: (state: PlayerState) => void): () => void;
@@ -473,8 +480,21 @@ export interface MediaApi {
   transcodeProxy(args: TranscodeProxyArgs): Promise<IpcResult<TranscodeProxyResult>>;
   cancelJob(args: CancelJobArgs): Promise<IpcResult<CancelJobResult>>;
   queueList(): Promise<IpcResult<TranscodeQueueItem[]>>;
-  setTranscodeConcurrency(args: { concurrency: 1 | 2 }): Promise<IpcResult<{ concurrency: number }>>;
+  setTranscodeConcurrency(args: { concurrency: 1 | 2 | 4 }): Promise<IpcResult<{ concurrency: number }>>;
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
+}
+
+export interface GpuStatus {
+  available: boolean;
+  utilizationPercent: number | null;
+  encoderPercent: number | null;
+  memoryUsedMiB: number | null;
+  memoryTotalMiB: number | null;
+  updatedAt: string;
+}
+
+export interface GpuApi {
+  getStatus(): Promise<IpcResult<GpuStatus>>;
 }
 
 export interface AudioWaveformBucket {
@@ -491,6 +511,8 @@ export interface AudioWaveform {
 
 export interface ScopeExtractAudioWaveformArgs {
   path: string;
+  /** 可选的低码率代理文件；存在且有效时优先用于解码，缓存键仍使用 path */
+  proxyPath?: string;
   bucketMs?: number;
 }
 
@@ -500,6 +522,7 @@ export interface WindowApi {
   session: SessionApi;
   player: PlayerApi;
   media: MediaApi;
+  gpu: GpuApi;
   scope: ScopeApi;
   project: ProjectApi;
   shot: ShotApi;

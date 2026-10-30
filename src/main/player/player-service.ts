@@ -10,7 +10,7 @@ import type {
   PlayerErrorEvent,
   OverlayLayer,
 } from '../../shared/types';
-import { MpvClient } from './mpv-client';
+import { MpvClient, normalizePlaybackSpeed } from './mpv-client';
 import { NativeOverlay, toPhysicalRect, windowHandleOf } from './native-overlay';
 import { PlayerError } from './mpv-lib';
 
@@ -208,6 +208,17 @@ export class PlayerService {
     return this.getState();
   }
 
+  async setSpeed(rate: number): Promise<PlayerState> {
+    const client = this.requirePlayer();
+    await client.setSpeed(normalizePlaybackSpeed(rate));
+    this.emitState();
+    return this.getState();
+  }
+
+  getSpeed(): number {
+    return this.client?.getSpeed() ?? 1;
+  }
+
   close(): void {
     if (!this.client) return;
     this.client.stop();
@@ -228,6 +239,7 @@ export class PlayerService {
         paused: true,
         ended: false,
         volume: 1,
+        speed: 1,
         width: 0,
         height: 0,
         fps: 0,
@@ -241,6 +253,7 @@ export class PlayerService {
       paused: client.isPaused(),
       ended: client.isEnded(),
       volume: client.getVolume(),
+      speed: client.getSpeed(),
       width: this.media.width,
       height: this.media.height,
       fps: this.media.fps,

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdirSync, readdirSync, statSync, unlinkSync, existsSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import type {
@@ -11,6 +13,7 @@ import type {
   ExtractFramesResult,
   ExtractFrameResult,
   FrameFormat,
+  GpuStatus,
   MediaProbeArgs,
   MediaProbeResult,
   MediaProgressEvent,
@@ -73,6 +76,10 @@ const DEFAULT_TRANSCODE_TIMEOUT_MS = 60 * 60_000;
 const MAX_STDERR_FOR_DIAGNOSTICS = 4000;
 const HARDWARE_ENCODER_FAILURE_RE = /encoder|not supported|Cannot load|No capable|initialization failed/i;
 const AUDIO_COPY_CODECS = new Set(['aac', 'mp3', 'ac3', 'eac3', 'opus', 'flac']);
+const GPU_STATUS_CACHE_MS = 900;
+const GPU_MEMORY_PER_JOB_MIB = 3200;
+const GPU_MEMORY_RESERVE_MIB = 1024;
+const execFileAsync = promisify(execFile);
 
 type ProxyMode = 'fast' | 'balanced' | 'quality';
 type ProxyResolution = 'auto' | 'p240' | 'p360' | 'p540' | 'p720' | 'p1080';
@@ -105,8 +112,12 @@ export class MediaService {
   private readonly jobs = new Map<string, ActiveJob>();
   private readonly transcodeQueue: TranscodeQueueEntry[] = [];
   private transcodeActive: TranscodeQueueEntry[] = [];
-  private transcodeConcurrency = 2;
+  private transcodeConcurrency: 1 | 2 | 4 = 4;
   private readonly transcodeRecent: TranscodeQueueEntry[] = [];
+  private pumpScheduled = false;
+  private gpuStatus: GpuStatus = unavailableGpuStatus();
+  private gpuStatusPromise: Promise<GpuStatus> | null = null;
+  private gpuStatusAt = 0;
 
   constructor(private readonly getWindow: () => BrowserWindow | null) {}
 
@@ -137,12 +148,22 @@ export class MediaService {
       '-loglevel',
       'error',
       '-nostdin',
-      ...(accel === 'cuda' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : []),
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      ...(accel === 'cuda'
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '16']
+        : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
+      '-threads',
+      '1',
       '-ss',
       seconds,
       '-i',
       inputPath,
+      '-threads',
+      '1',
       '-frames:v',
       '1',
       '-an',
@@ -200,7 +221,7 @@ export class MediaService {
   }
 
   /** 由已抽出的原图生成 JPEG 缩略图，供静帧列表和分镜本使用。 */
-  async createThumbnail(inputPath: string, outputPath: string, maxWidth = 480): Promise<string> {
+  async createThumbnail(inputPath: string, outputPath: string, maxWidth = 480, quality = 4): Promise<string> {
     const sourcePath = this.validateInput(inputPath);
     const targetPath = this.validateOutputPath(outputPath);
     this.assertNotSameFile(sourcePath, targetPath);
@@ -208,19 +229,28 @@ export class MediaService {
 
     const { ffmpeg } = await this.ensureReady();
     const width = clampInt(maxWidth, 64, 1920);
+    const jpegQuality = clampInt(quality, 1, 31);
     const ffArgs = [
       '-hide_banner',
       '-loglevel',
       'error',
       '-nostdin',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      '-threads',
+      '1',
       '-i',
       sourcePath,
+      '-threads',
+      '1',
       '-frames:v',
       '1',
       '-vf',
       `scale=${width}:-2:force_original_aspect_ratio=decrease`,
       '-q:v',
-      '4',
+      String(jpegQuality),
       '-y',
       targetPath,
     ];
@@ -280,7 +310,57 @@ export class MediaService {
     }
     const spanMs = endMs - startMs;
     const fpsFilter = `fps=${1000}/${intervalMs}`;
+    const frameSize = computeProxySize({
+      srcWidth: meta.width,
+      srcHeight: meta.height,
+      mode: 'fast',
+      resolution: 'p360',
+    });
+    const frameFilter = (accel: SelectedHwaccel): string =>
+      accel === 'cuda'
+        ? `scale_cuda=${frameSize.width}:${frameSize.height}:format=nv12,hwdownload,format=nv12,${fpsFilter}`
+        : `${fpsFilter},scale=${frameSize.width}:${frameSize.height}`;
     const pattern = join(outputDir, `${prefix}%06d.${format}`);
+    const availableHwaccels = await resolveAvailableHwaccels();
+    const attempts = buildExtractFramesHwaccelAttempts(
+      selectHwaccel(availableHwaccels),
+      availableHwaccels,
+    );
+    const buildExtractFramesArgs = (accel: SelectedHwaccel): string[] => [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      '-progress',
+      'pipe:1',
+      ...(accel === 'cuda'
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '16']
+        : []),
+      ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
+      '-threads',
+      '1',
+      '-ss',
+      (startMs / 1000).toFixed(3),
+      '-i',
+      inputPath,
+      '-threads',
+      '1',
+      '-t',
+      (spanMs / 1000).toFixed(3),
+      '-an',
+      '-sn',
+      '-vf',
+      frameFilter(accel),
+      '-frames:v',
+      String(maxFrames),
+      ...(format === 'png' ? ['-compression_level', '6'] : ['-q:v', String(quality)]),
+      '-y',
+      pattern,
+    ];
 
     this.cleanOldFrames(outputDir, prefix, format);
     const jobId = controls?.jobId ?? `extract-${randomUUID()}`;
@@ -292,58 +372,62 @@ export class MediaService {
     };
     reportProgress({ jobId, stage: 'extractFrames', percent: 0, message: '开始抽帧' });
 
-    const ffArgs = [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-nostdin',
-      '-progress',
-      'pipe:1',
-      '-ss',
-      (startMs / 1000).toFixed(3),
-      '-i',
-      inputPath,
-      '-t',
-      (spanMs / 1000).toFixed(3),
-      '-an',
-      '-sn',
-      '-vf',
-      fpsFilter,
-      '-frames:v',
-      String(maxFrames),
-      ...(format === 'png' ? ['-compression_level', '6'] : ['-q:v', String(quality)]),
-      '-y',
-      pattern,
-    ];
-
     let lastPercent = 0;
     let lastEmitAt = 0;
     const startedAt = Date.now();
+    let hwaccelUsed = attempts[0];
+    let ffArgs = buildExtractFramesArgs(hwaccelUsed);
+    const onStdoutLine = (line: string): void => {
+      const match = /^out_time_us=(\d+)$/u.exec(line.trim());
+      if (!match) return;
+      const outMs = Number(match[1]) / 1000;
+      const percent = clampInt(Math.floor((outMs / spanMs) * 100), 0, 99);
+      const now = Date.now();
+      if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
+        lastPercent = percent;
+        lastEmitAt = now;
+        reportProgress({
+          jobId,
+          stage: 'extractFrames',
+          percent,
+          message: `抽帧中 ${percent}%（已处理 ${(outMs / 1000).toFixed(1)}s）`,
+        });
+      }
+    };
 
     try {
-      const result = await runProcess({
+      let result = await runProcess({
         command: ffmpeg,
         args: ffArgs,
         timeoutMs: args.timeoutMs ?? DEFAULT_FRAMES_TIMEOUT_MS,
         signal: controller.signal,
-        onStdoutLine: (line) => {
-          const match = /^out_time_us=(\d+)$/u.exec(line.trim());
-          if (!match) return;
-          const outMs = Number(match[1]) / 1000;
-          const percent = clampInt(Math.floor((outMs / spanMs) * 100), 0, 99);
-          const now = Date.now();
-          if (percent > lastPercent && (percent - lastPercent >= 1 || now - lastEmitAt > 250)) {
-            lastPercent = percent;
-            lastEmitAt = now;
-            reportProgress({
-              jobId,
-              stage: 'extractFrames',
-              percent,
-              message: `抽帧中 ${percent}%（已处理 ${(outMs / 1000).toFixed(1)}s）`,
-            });
-          }
-        },
+        onStdoutLine,
       });
+
+      for (let index = 1; index < attempts.length; index += 1) {
+        if (result.exitCode === 0 || result.timedOut || result.aborted || controller.signal.aborted) break;
+        const next = attempts[index];
+        const reason = tailText(result.stderr, 1000).trim() || '硬件解码失败';
+        console.info(`[extractFrames] fallback ${hwaccelUsed} -> ${next}: ${reason}`);
+        this.cleanOldFrames(outputDir, prefix, format);
+        lastPercent = 0;
+        lastEmitAt = 0;
+        hwaccelUsed = next;
+        ffArgs = buildExtractFramesArgs(next);
+        reportProgress({
+          jobId,
+          stage: 'extractFrames',
+          percent: 0,
+          message: `硬件抽帧不可用，正在回退 ${next}`,
+        });
+        result = await runProcess({
+          command: ffmpeg,
+          args: ffArgs,
+          timeoutMs: args.timeoutMs ?? DEFAULT_FRAMES_TIMEOUT_MS,
+          signal: controller.signal,
+          onStdoutLine,
+        });
+      }
 
       if (result.timedOut) {
         throw new MediaError(
@@ -366,6 +450,9 @@ export class MediaService {
         });
       }
 
+      console.info(
+        `[extractFrames] complete: hwaccelUsed=${hwaccelUsed} width=${frameSize.width} height=${frameSize.height} elapsedMs=${Date.now() - startedAt}`,
+      );
       const frames = this.collectFrames(outputDir, prefix, format, intervalMs, startMs);
       if (frames.length === 0) {
         throw new MediaError('EXTRACT_FRAMES_EMPTY', '抽帧完成但没有生成文件（时间区间可能超出影片范围）', {
@@ -496,9 +583,62 @@ export class MediaService {
     }));
   }
 
-  setTranscodeConcurrency(concurrency: 1 | 2): void {
+  async getGpuStatus(): Promise<GpuStatus> {
+    const now = Date.now();
+    if (now - this.gpuStatusAt < GPU_STATUS_CACHE_MS) return this.gpuStatus;
+    if (this.gpuStatusPromise) return this.gpuStatusPromise;
+
+    this.gpuStatusPromise = (async () => {
+      try {
+        const { stdout } = await execFileAsync(
+          'nvidia-smi',
+          [
+            '--query-gpu=utilization.gpu,utilization.encoder,memory.used,memory.total',
+            '--format=csv,noheader,nounits',
+          ],
+          { encoding: 'utf8', timeout: 2500, windowsHide: true, maxBuffer: 1024 * 1024 },
+        );
+        this.gpuStatus = parseGpuStatus(stdout);
+      } catch {
+        this.gpuStatus = unavailableGpuStatus();
+      } finally {
+        this.gpuStatusAt = Date.now();
+        this.gpuStatusPromise = null;
+      }
+      return this.gpuStatus;
+    })();
+    return this.gpuStatusPromise;
+  }
+
+  async queryGpuMemoryUsedMiB(): Promise<number | null> {
+    return (await this.getGpuStatus()).memoryUsedMiB;
+  }
+
+  setTranscodeConcurrency(concurrency: 1 | 2 | 4): void {
     this.transcodeConcurrency = concurrency;
     if (this.transcodeActive.length < this.transcodeConcurrency) this.pump();
+  }
+
+  findProxyForSource(sourcePath: string): string | null {
+    let sourceStat: ReturnType<typeof statSync>;
+    try {
+      sourceStat = statSync(sourcePath);
+    } catch {
+      return null;
+    }
+    for (const tier of ['540p', '720p', '360p'] as const) {
+      const candidate = join(
+        resolveProxyCacheDir(),
+        `${proxyKey(sourcePath, sourceStat.size, sourceStat.mtimeMs, tier)}-proxy.mp4`,
+      );
+      try {
+        const proxyStat = statSync(candidate);
+        if (proxyStat.isFile() && proxyStat.size > 0) return candidate;
+      } catch {
+        // Try the next tier.
+      }
+    }
+    return null;
   }
 
   private async getCachedTranscodeResult(
@@ -553,24 +693,52 @@ export class MediaService {
   }
 
   private pump(): void {
-    while (this.transcodeActive.length < this.transcodeConcurrency && this.transcodeQueue.length > 0) {
-      const item = this.transcodeQueue.shift();
-      if (!item) break;
-      this.transcodeActive.push(item);
-      item.state = 'running';
-      item.percent = 0;
-      item.message = '开始转码代理';
-      item.startedAt = Date.now();
-      this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
-      this.emitProgress({
-        jobId: item.jobId,
-        stage: 'transcode',
-        percent: 0,
-        message: item.message,
-        queueState: 'running',
-      });
-      void this.processQueuedTranscode(item);
+    if (this.pumpScheduled) return;
+    this.pumpScheduled = true;
+    void (async () => {
+      let capacity = 1;
+      try {
+        capacity = await this.resolveTranscodeCapacity();
+        while (this.transcodeActive.length < capacity && this.transcodeQueue.length > 0) {
+          const item = this.transcodeQueue.shift();
+          if (!item) break;
+          this.transcodeActive.push(item);
+          item.state = 'running';
+          item.percent = 0;
+          item.message = '开始转码代理';
+          item.startedAt = Date.now();
+          this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
+          this.emitProgress({
+            jobId: item.jobId,
+            stage: 'transcode',
+            percent: 0,
+            message: item.message,
+            queueState: 'running',
+          });
+          void this.processQueuedTranscode(item);
+        }
+      } finally {
+        this.pumpScheduled = false;
+        if (this.transcodeQueue.length > 0 && this.transcodeActive.length < capacity) {
+          setTimeout(() => this.pump(), 0);
+        }
+      }
+    })();
+  }
+
+  private async resolveTranscodeCapacity(): Promise<number> {
+    const gpu = await this.getGpuStatus();
+    if (
+      !gpu.available ||
+      gpu.memoryUsedMiB === null ||
+      gpu.memoryTotalMiB === null ||
+      gpu.memoryTotalMiB <= 0
+    ) {
+      return Math.min(this.transcodeConcurrency, 2);
     }
+    const availableMiB = gpu.memoryTotalMiB - gpu.memoryUsedMiB - GPU_MEMORY_RESERVE_MIB;
+    const byMemory = Math.floor(availableMiB / GPU_MEMORY_PER_JOB_MIB);
+    return Math.max(1, Math.min(this.transcodeConcurrency, byMemory));
   }
 
   private async processQueuedTranscode(item: TranscodeQueueEntry): Promise<void> {
@@ -661,13 +829,23 @@ export class MediaService {
       '-loglevel',
       'error',
       '-nostdin',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
       '-progress',
       'pipe:1',
       '-y',
-      ...(accel === 'cuda' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : []),
+      ...(accel === 'cuda'
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '16']
+        : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
+      '-threads',
+      '1',
       '-i',
       sourcePath,
+      '-threads',
+      '1',
       '-map',
       '0:v:0',
       '-map',
@@ -1059,8 +1237,41 @@ export class MediaService {
   private emitProgress(event: MediaProgressEvent): void {
     const win = this.getWindow();
     if (!win || win.isDestroyed()) return;
-    win.webContents.send(IPC.MEDIA_EVENT_PROGRESS, event);
+    win.webContents.send(IPC.MEDIA_EVENT_PROGRESS, { ...event, gpu: this.gpuStatus });
   }
+}
+
+function unavailableGpuStatus(): GpuStatus {
+  return {
+    available: false,
+    utilizationPercent: null,
+    encoderPercent: null,
+    memoryUsedMiB: null,
+    memoryTotalMiB: null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function parseGpuStatus(output: string): GpuStatus {
+  const line = output
+    .split(/\r?\n/u)
+    .map((item) => item.trim())
+    .find(Boolean);
+  if (!line) return unavailableGpuStatus();
+  const fields = line.split(',').map((item) => item.trim());
+  const numberOrNull = (value: string | undefined): number | null => {
+    if (value === undefined || value.length === 0 || /n\/a/iu.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    available: true,
+    utilizationPercent: numberOrNull(fields[0]),
+    encoderPercent: numberOrNull(fields[1]),
+    memoryUsedMiB: numberOrNull(fields[2]),
+    memoryTotalMiB: numberOrNull(fields[3]),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function normalizeFormat(format: FrameFormat | undefined): FrameFormat {
@@ -1143,6 +1354,22 @@ function buildTranscodeHwaccelAttempts(
     attempts.push({ accel: 'd3d11va', downloadCudaFrames: false });
   }
   attempts.push({ accel: 'none', downloadCudaFrames: false });
+  return attempts;
+}
+
+function buildExtractFramesHwaccelAttempts(
+  selected: SelectedHwaccel,
+  available: string[],
+): SelectedHwaccel[] {
+  const supported = new Set(available.map((name) => name.toLowerCase()));
+  const attempts: SelectedHwaccel[] = [];
+  if (selected === 'cuda') {
+    attempts.push('cuda');
+    if (supported.has('d3d11va')) attempts.push('d3d11va');
+  } else if (selected === 'd3d11va') {
+    attempts.push('d3d11va');
+  }
+  attempts.push('none');
   return attempts;
 }
 

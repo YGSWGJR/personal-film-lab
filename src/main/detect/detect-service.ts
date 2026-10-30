@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { DataLayer } from '../../data/db';
 import { ensureProjectDirs } from '../../data/paths';
@@ -22,8 +22,6 @@ import type {
   ShotPreview,
 } from '../../shared/types';
 import type { MediaService } from '../media/media-service';
-import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
-import { runProcess } from '../media/process-runner';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
 import { DetectError } from './detect-error';
 
@@ -206,6 +204,10 @@ export class DetectService {
       }
       const project = getDetectProject(this.data, job.projectId);
       const sourcePath = resolveDetectSource(project);
+      const extractionPath = this.resolveExtractionPath(project, sourcePath);
+      console.info(
+        `[detect] extraction input=${extractionPath === sourcePath ? 'source' : 'proxy'} path=${extractionPath}`,
+      );
 
       ensureProjectDirs(this.data.dataRoot, project.id);
       framesDir = resolveDetectFramesDir(project.id);
@@ -221,7 +223,7 @@ export class DetectService {
       this.setProgress(job, 1, 'extractFrames');
       const extraction = await this.media.extractFrames(
         {
-          path: sourcePath,
+          path: extractionPath,
           outputDir: framesDir,
           intervalMs,
           startMs: 0,
@@ -341,38 +343,19 @@ export class DetectService {
     }
   }
 
+  private resolveExtractionPath(project: Project, sourcePath: string): string {
+    const configured = project.media.proxyPath;
+    if (configured && isNonEmptyFile(configured)) return configured;
+    return this.media.findProxyForSource(sourcePath) ?? sourcePath;
+  }
+
   private async createThumbnailImage(
     inputFramePath: string,
     thumbnailPath: string,
     width: number,
     quality: number,
   ): Promise<void> {
-    const { ffmpeg } = await resolveFfmpegBinaries();
-    const result = await runProcess({
-      command: ffmpeg,
-      args: [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-nostdin',
-        '-i',
-        inputFramePath,
-        '-frames:v',
-        '1',
-        '-an',
-        '-sn',
-        '-vf',
-        `scale=${width}:-2`,
-        '-q:v',
-        String(quality),
-        '-y',
-        thumbnailPath,
-      ],
-      timeoutMs: 60_000,
-    });
-    if (result.timedOut || result.exitCode !== 0) {
-      throw new Error(result.timedOut ? 'thumbnail timeout' : result.stderr || 'thumbnail failed');
-    }
+    await this.media.createThumbnail(inputFramePath, thumbnailPath, width, quality);
   }
 
   private cleanupDetectFrames(framesDir: string | null): void {
@@ -735,7 +718,11 @@ function getDetectProject(data: DataLayer, projectId: string): Project {
 }
 
 function resolveDetectSource(project: Project): string {
-  const sourcePath = project.source.path || project.media.proxyPath;
+  const sourcePath =
+    (project.source.path && isNonEmptyFile(project.source.path) ? project.source.path : null) ||
+    (project.media.proxyPath && isNonEmptyFile(project.media.proxyPath) ? project.media.proxyPath : null) ||
+    project.source.path ||
+    project.media.proxyPath;
   if (!sourcePath) {
     throw new DetectError('DETECT_SOURCE_MISSING', '项目没有可读取的视频路径', {
       projectId: project.id,
@@ -750,6 +737,15 @@ function resolveDetectSource(project: Project): string {
     });
   }
   return sourcePath;
+}
+
+function isNonEmptyFile(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
 }
 
 function resolveServerScript(): string {

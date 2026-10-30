@@ -473,6 +473,13 @@ select:focus-visible {
   font-size: 9px;
 }
 
+.transfer-toast .transfer-gpu {
+  display: block;
+  margin-top: 5px;
+  color: var(--blue-hi);
+  font-family: var(--mono);
+}
+
 @media (max-width: 1180px) {
   .workbench {
     grid-template-columns: 240px minmax(480px, 1fr) 280px;

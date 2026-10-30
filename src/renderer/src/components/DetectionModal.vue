@@ -11,6 +11,7 @@ const props = defineProps<{
   running: boolean;
   applying: boolean;
   progress: DetectProgressEvent | null;
+  gpuLabel: string;
   result: DetectResult | null;
   error: string | null;
 }>();
@@ -85,6 +86,7 @@ function applyResult(): void {
                 ? 'FFmpeg 正在建立可重建的采样帧序列'
                 : 'OpenCV 正在计算饱和度、对比度与色调差异曲线' }}
             </p>
+            <small class="gpu-status">{{ gpuLabel }}</small>
           </div>
           <button class="cancel-scan" type="button" @click="emit('cancel')">取消检测</button>
         </div>
@@ -252,6 +254,13 @@ function applyResult(): void {
   margin: 8px 0 0;
   color: var(--text-faint);
   font-size: 10px;
+}
+
+.running-copy .gpu-status {
+  margin-top: 7px;
+  color: var(--blue-hi);
+  font-family: var(--mono);
+  font-size: 9px;
 }
 
 .progress-track {

@@ -22,6 +22,10 @@ export class ScopeService {
 
   async extractAudioWaveform(args: ScopeExtractAudioWaveformArgs): Promise<AudioWaveform> {
     const path = resolve(String(args.path));
+    const inputPath = this.resolveWaveformInput(
+      path,
+      args.proxyPath ? resolve(args.proxyPath) : null,
+    );
     const bucketMs = clampInteger(args.bucketMs ?? 100, 20, 5000);
     const stat = this.validateMedia(path);
     const cacheKey = `${path.toLowerCase()}|${stat.size}|${Math.round(stat.mtimeMs)}|${bucketMs}`;
@@ -36,7 +40,7 @@ export class ScopeService {
     const active = this.audioJobs.get(cacheKey);
     if (active) return active;
 
-    const job = this.buildAudioWaveform(path, bucketMs)
+    const job = this.buildAudioWaveform(inputPath, path, bucketMs)
       .then((result) => {
         this.audioCache.set(cacheKey, result);
         this.writeDiskCache(cacheKey, result);
@@ -56,7 +60,11 @@ export class ScopeService {
     this.waveformChildren.clear();
   }
 
-  private async buildAudioWaveform(path: string, bucketMs: number): Promise<AudioWaveform> {
+  private async buildAudioWaveform(
+    path: string,
+    sourcePath: string,
+    bucketMs: number,
+  ): Promise<AudioWaveform> {
     const { ffmpeg } = await resolveFfmpegBinaries().catch((error: unknown) => {
       throw new ScopeError(
         'SCOPE_FFMPEG_UNAVAILABLE',
@@ -68,6 +76,8 @@ export class ScopeService {
       '-loglevel',
       'error',
       '-nostdin',
+      '-threads',
+      '1',
       '-i',
       path,
       '-vn',
@@ -79,6 +89,7 @@ export class ScopeService {
       'f32le',
       'pipe:1',
     ];
+    console.info(`[scope] waveform input=${path === sourcePath ? 'source' : 'proxy'} path=${path}`);
     const samplesPerBucket = Math.max(1, Math.round((AUDIO_SAMPLE_RATE * bucketMs) / 1000));
 
     return new Promise<AudioWaveform>((resolvePromise, reject) => {
@@ -167,6 +178,17 @@ export class ScopeService {
         });
       });
     });
+  }
+
+  private resolveWaveformInput(sourcePath: string, proxyPath: string | null): string {
+    if (!proxyPath) return sourcePath;
+    try {
+      const proxyStat = statSync(proxyPath, { bigint: false });
+      if (proxyStat.isFile() && proxyStat.size > 0) return proxyPath;
+    } catch {
+      // A missing or stale proxy must not prevent waveform extraction.
+    }
+    return sourcePath;
   }
 
   private validateMedia(path: string): Stats {

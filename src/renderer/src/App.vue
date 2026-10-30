@@ -39,11 +39,13 @@ import type {
   DetectProgressEvent,
   DetectResult,
   ExportProgressEvent,
+  GpuStatus,
   IpcResult,
   MediaInfo,
   MediaProgressEvent,
   Note,
   OverlayLayer,
+  PlaybackSpeed,
   PlayerErrorEvent,
   PlayerState,
   Project,
@@ -58,6 +60,7 @@ import type {
   Term,
   WorkspaceState,
 } from '../../shared/types';
+import { PLAYBACK_SPEEDS } from '../../shared/types';
 
 const info = ref<AppInfo | null>(null);
 const bridgeReady = ref(false);
@@ -84,6 +87,7 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let noteTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingNoteShotId: string | null = null;
 let transcodeQueueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let gpuPollTimer: ReturnType<typeof setInterval> | null = null;
 const termEditorOpen = ref(false);
 const editingTerm = ref<Term | null>(null);
 const termSaving = ref(false);
@@ -94,6 +98,7 @@ const transcoding = ref(false);
 const transcodeProgress = ref<MediaProgressEvent | null>(null);
 const transcodeRunningCount = ref(0);
 const transcodeQueuedCount = ref(0);
+const gpuStatus = ref<GpuStatus | null>(null);
 const detectionOpen = ref(false);
 const detecting = ref(false);
 const applyingDetection = ref(false);
@@ -140,7 +145,7 @@ let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
 let lastPlayerBounds: RenderBounds | null = null;
 let overlayPlayerHidden = false;
-let requestedTranscodeConcurrency: 1 | 2 = 2;
+let requestedTranscodeConcurrency: 1 | 2 | 4 = 4;
 const pendingPlayerLayer = ref<OverlayLayer | null>(null);
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let restoringSession = true;
@@ -153,6 +158,7 @@ const player = reactive<PlayerState>({
   paused: true,
   ended: false,
   volume: 1,
+  speed: 1,
   width: 0,
   height: 0,
   fps: 0,
@@ -219,6 +225,17 @@ const overlayOpen = computed(
     aiMenuOpen.value ||
     aiAuthRequest.value !== null,
 );
+const gpuStatusText = computed(() => {
+  const status = gpuStatus.value;
+  if (!status?.available) return 'GPU n/a';
+  const utilization = status.utilizationPercent === null ? 'n/a' : `${Math.round(status.utilizationPercent)}%`;
+  const encoder = status.encoderPercent === null ? 'n/a' : `${Math.round(status.encoderPercent)}%`;
+  const memory =
+    status.memoryUsedMiB !== null && status.memoryTotalMiB !== null
+      ? `${(status.memoryUsedMiB / 1024).toFixed(1)}/${(status.memoryTotalMiB / 1024).toFixed(1)} GB`
+      : 'n/a';
+  return `GPU ${utilization} · 编码器 ${encoder} · 显存 ${memory}`;
+});
 
 function hidePlayerForOverlay(): void {
   if (overlayPlayerHidden) return;
@@ -391,13 +408,19 @@ function prepareAudioWaveform(project: Project): void {
   resetAudioWaveform();
   const path = project.source.path || project.media.proxyPath;
   if (!path) return;
-  void loadAudioWaveform(path, audioGeneration);
+  const proxyPath =
+    project.media.proxyPath && project.media.proxyPath !== path ? project.media.proxyPath : undefined;
+  void loadAudioWaveform(path, proxyPath, audioGeneration);
 }
 
-async function loadAudioWaveform(path: string, generation: number): Promise<void> {
+async function loadAudioWaveform(
+  path: string,
+  proxyPath: string | undefined,
+  generation: number,
+): Promise<void> {
   audioLoading.value = true;
   try {
-    const result = await window.api.scope.extractAudioWaveform({ path, bucketMs: 100 });
+    const result = await window.api.scope.extractAudioWaveform({ path, proxyPath, bucketMs: 100 });
     if (generation !== audioGeneration) return;
     if (!result.ok) {
       console.warn(`[scope] 音频波形提取失败：${result.error.code} ${result.error.message}`);
@@ -416,11 +439,12 @@ async function loadAudioWaveform(path: string, generation: number): Promise<void
 async function loadProject(
   project: Project,
   restoreState: WorkspaceState | null = null,
+  deferWaveform = false,
 ): Promise<void> {
   const projectChanged = activeProject.value?.id !== project.id;
   activeProject.value = project;
   demoMode.value = false;
-  if (projectChanged) prepareAudioWaveform(project);
+  if (projectChanged && !deferWaveform) prepareAudioWaveform(project);
   const [shotResult, stillResult, noteResult] = await Promise.all([
     window.api.shot.list({ projectId: project.id }),
     window.api.still.list({ projectId: project.id }),
@@ -543,7 +567,7 @@ async function openVideo(): Promise<void> {
     loadedPlaybackPath.value = media.path;
     const project = await createProjectForMedia(media);
     if (project) {
-      await loadProject(project);
+      await loadProject(project, null, true);
       backgroundProxy = { projectId: project.id, sourcePath: media.path };
       showToast('影片已导入，可立即播放；代理正在后台生成。', 'success');
     }
@@ -581,8 +605,13 @@ async function startBackgroundProxy(projectId: string, sourcePath: string): Prom
     );
     if (updated) {
       if (activeProject.value?.id === projectId) activeProject.value = updated;
+      prepareAudioWaveform(updated);
       showToast(`${tier} 代理已生成，下次打开项目将使用代理。`, 'success');
     }
+  } catch (error) {
+    const current = activeProject.value;
+    if (current?.id === projectId) prepareAudioWaveform(current);
+    showToast(error instanceof Error ? error.message : String(error), 'error', '后台代理生成失败');
   } finally {
     await refreshTranscodeQueueState();
   }
@@ -601,6 +630,26 @@ async function refreshTranscodeQueueState(): Promise<void> {
   }
 }
 
+async function refreshGpuStatus(): Promise<void> {
+  const result = await window.api.gpu.getStatus();
+  if (result.ok) gpuStatus.value = result.data;
+}
+
+function syncGpuPolling(active: boolean): void {
+  if (active && !gpuPollTimer) {
+    void refreshGpuStatus();
+    gpuPollTimer = setInterval(() => void refreshGpuStatus(), 1000);
+  } else if (!active && gpuPollTimer) {
+    clearInterval(gpuPollTimer);
+    gpuPollTimer = null;
+  }
+}
+
+watch(
+  [transcoding, detecting],
+  ([transferring, detectingNow]) => syncGpuPolling(transferring || detectingNow),
+);
+
 function scheduleTranscodeQueueRefresh(): void {
   if (transcodeQueueRefreshTimer) return;
   transcodeQueueRefreshTimer = setTimeout(() => {
@@ -610,7 +659,7 @@ function scheduleTranscodeQueueRefresh(): void {
 }
 
 async function syncTranscodeConcurrency(): Promise<void> {
-  const concurrency: 1 | 2 = detecting.value || (player.hasFile && !player.paused) ? 1 : 2;
+  const concurrency: 1 | 2 | 4 = detecting.value || (player.hasFile && !player.paused) ? 1 : 4;
   if (concurrency === requestedTranscodeConcurrency) return;
   const previous = requestedTranscodeConcurrency;
   requestedTranscodeConcurrency = concurrency;
@@ -652,6 +701,7 @@ async function closePlayer(): Promise<void> {
     durationMs: 0,
     paused: true,
     ended: false,
+    speed: 1,
     width: 0,
     height: 0,
     fps: 0,
@@ -700,10 +750,16 @@ async function seekTo(timeMs: number): Promise<void> {
   if (state) Object.assign(player, state);
 }
 
-function selectShot(shot: WorkspaceShot): void {
+async function selectShot(shot: WorkspaceShot): Promise<void> {
+  const switched = selectedId.value !== shot.id;
   selectedId.value = shot.id;
   previewTimeMs.value = shot.startMs;
-  if (player.hasFile) void seekTo(shot.startMs);
+  if (player.hasFile) {
+    if (switched) await handleSetSpeed(1);
+    await seekTo(shot.startMs);
+  } else {
+    player.speed = 1;
+  }
 }
 
 function openShotContextMenu(
@@ -1788,6 +1844,36 @@ async function handleSetVolume(volume: number): Promise<void> {
   }
 }
 
+function normalizePlaybackSpeed(rate: number): PlaybackSpeed {
+  if (!Number.isFinite(rate)) return 1;
+  let nearest: PlaybackSpeed = PLAYBACK_SPEEDS[0];
+  for (const candidate of PLAYBACK_SPEEDS) {
+    if (Math.abs(candidate - rate) < Math.abs(nearest - rate)) nearest = candidate;
+  }
+  return nearest;
+}
+
+async function handleSetSpeed(rate: number): Promise<void> {
+  const normalized = normalizePlaybackSpeed(rate);
+  if (!player.hasFile) {
+    player.speed = normalized;
+    return;
+  }
+  const result = await window.api.player.setSpeed({ rate: normalized });
+  if (result.ok) {
+    Object.assign(player, result.data);
+  } else {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
+function cyclePlaybackSpeed(direction: 1 | -1): void {
+  const currentIndex = PLAYBACK_SPEEDS.indexOf(player.speed);
+  const index = currentIndex >= 0 ? currentIndex : PLAYBACK_SPEEDS.indexOf(1);
+  const nextIndex = (index + direction + PLAYBACK_SPEEDS.length) % PLAYBACK_SPEEDS.length;
+  void handleSetSpeed(PLAYBACK_SPEEDS[nextIndex]);
+}
+
 async function handleToggleMute(): Promise<void> {
   if (player.volume === 0) {
     await handleSetVolume(muteBeforeVolume.value > 0 ? muteBeforeVolume.value : 1);
@@ -1973,6 +2059,11 @@ function handleKeydown(event: KeyboardEvent): void {
     void handleToggleMute();
     return;
   }
+  if (event.key === '[' || event.key === ']') {
+    event.preventDefault();
+    cyclePlaybackSpeed(event.key === ']' ? 1 : -1);
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
     event.preventDefault();
     const step = event.shiftKey ? 0.1 : 0.01;
@@ -1998,8 +2089,7 @@ function handleKeydown(event: KeyboardEvent): void {
     const nextIndex = Math.max(0, Math.min(shots.value.length - 1, currentIndex + delta));
     const nextShot = shots.value[nextIndex];
     if (nextShot) {
-      selectedId.value = nextShot.id;
-      previewTimeMs.value = nextShot.startMs;
+      void selectShot(nextShot);
     }
     return;
   }
@@ -2102,10 +2192,12 @@ onMounted(async () => {
       player.width = media.width;
       player.height = media.height;
       player.fps = media.fps;
+      player.speed = 1;
       void syncTranscodeConcurrency();
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
     api.media.onProgress((event) => {
+      if (event.gpu) gpuStatus.value = event.gpu;
       if (event.stage === 'transcode') {
         transcodeProgress.value = event;
         transcoding.value = true;
@@ -2165,6 +2257,7 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
   if (transcodeQueueRefreshTimer) clearTimeout(transcodeQueueRefreshTimer);
+  if (gpuPollTimer) clearInterval(gpuPollTimer);
   stopDetectionPolling();
   audioGeneration += 1;
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
@@ -2290,6 +2383,7 @@ onBeforeUnmount(() => {
         @capture="captureStill"
         @set-layer="setPlayerLayer"
         @set-volume="handleSetVolume"
+        @set-speed="handleSetSpeed"
         @toggle-mute="handleToggleMute"
       />
 
@@ -2341,7 +2435,7 @@ onBeforeUnmount(() => {
     <transition name="toast">
       <div v-if="transcoding" class="transfer-toast">
         <div class="transfer-head">
-          <span>后台转码 {{ transcodeRunningCount }}/2</span>
+          <span>后台转码 {{ transcodeRunningCount }} 运行</span>
           <strong>{{ transcodeProgress?.percent ?? 0 }}%</strong>
         </div>
         <div class="transfer-track">
@@ -2351,6 +2445,7 @@ onBeforeUnmount(() => {
           {{ transcodeProgress?.message ?? '准备转码…' }}
           <template v-if="transcodeQueuedCount > 0"> · 队列中 {{ transcodeQueuedCount }}</template>
         </small>
+        <small class="transfer-gpu">{{ gpuStatusText }}</small>
       </div>
     </transition>
 
@@ -2526,6 +2621,7 @@ onBeforeUnmount(() => {
       :running="detecting"
       :applying="applyingDetection"
       :progress="detectionProgress"
+      :gpu-label="gpuStatusText"
       :result="detectionResult"
       :error="detectionError"
       @close="closeDetection"
