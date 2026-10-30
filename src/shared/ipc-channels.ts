@@ -42,6 +42,8 @@ export const IPC = {
   PLAYER_GET_STATE: 'player:getState',
   PLAYER_GET_FRAME: 'player:getFrame',
   PLAYER_SET_VOLUME: 'player:setVolume',
+  PLAYER_GET_SPEED: 'player:getSpeed',
+  PLAYER_SET_SPEED: 'player:setSpeed',
   PLAYER_SET_BOUNDS: 'player:setBounds',
   PLAYER_SET_LAYER: 'player:setLayer',
 

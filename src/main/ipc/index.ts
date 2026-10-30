@@ -310,6 +310,14 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: { volume: number }): Promise<PlayerState> => requirePlayer().setVolume(args.volume)),
   );
   ipcMain.handle(
+    IPC.PLAYER_GET_SPEED,
+    withEnvelope((): number => requirePlayer().getSpeed()),
+  );
+  ipcMain.handle(
+    IPC.PLAYER_SET_SPEED,
+    withEnvelope((args: { rate: number }): Promise<PlayerState> => requirePlayer().setSpeed(args.rate)),
+  );
+  ipcMain.handle(
     IPC.PLAYER_SET_BOUNDS,
     withEnvelope((bounds: RenderBounds): void => requirePlayer().setBounds(bounds)),
   );

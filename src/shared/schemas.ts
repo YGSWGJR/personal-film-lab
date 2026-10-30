@@ -107,6 +107,11 @@ export const playerSetVolumeArgsSchema = z.object({
   volume: z.number().min(0).max(1),
 });
 
+/** player:setSpeed（业务层归一化到 0.5 / 1 / 1.5 / 2） */
+export const playerSetSpeedArgsSchema = z.object({
+  rate: z.number().finite(),
+});
+
 /** player:setBounds（CSS 像素，相对可视区域） */
 export const playerSetBoundsArgsSchema = z.object({
   x: z.number().finite(),

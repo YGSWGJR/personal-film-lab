@@ -9,6 +9,7 @@ import type {
   PlayerState,
   RenderBounds,
 } from '../../../shared/types';
+import { PLAYBACK_SPEEDS } from '../../../shared/types';
 
 const props = defineProps<{
   player: PlayerState;
@@ -35,6 +36,7 @@ const emit = defineEmits<{
   capture: [];
   setLayer: [level: OverlayLayer];
   setVolume: [volume: number];
+  setSpeed: [rate: number];
   toggleMute: [];
 }>();
 
@@ -68,10 +70,18 @@ const layerNext = computed<OverlayLayer>(() => {
   return 'normal';
 });
 const volumePercent = computed(() => Math.round(props.player.volume * 100));
+const speedLabel = computed(() => `${props.player.speed.toFixed(1)}×`);
 
 function cycleLayer(): void {
   if (!props.player.hasFile) return;
   emit('setLayer', layerNext.value);
+}
+
+function cycleSpeed(direction: 1 | -1): void {
+  const currentIndex = PLAYBACK_SPEEDS.indexOf(props.player.speed);
+  const index = currentIndex >= 0 ? currentIndex : PLAYBACK_SPEEDS.indexOf(1);
+  const nextIndex = (index + direction + PLAYBACK_SPEEDS.length) % PLAYBACK_SPEEDS.length;
+  emit('setSpeed', PLAYBACK_SPEEDS[nextIndex]);
 }
 
 function onVolumeSliderInput(event: Event): void {
@@ -300,6 +310,16 @@ onBeforeUnmount(() => {
             >{{ volumePercent }}%</button>
           </div>
         </div>
+        <button
+          class="speed-button"
+          type="button"
+          :disabled="!player.hasFile"
+          :title="`倍速：${speedLabel}（点击循环，[ / ] 切换）`"
+          aria-label="切换播放速度"
+          @click="cycleSpeed(1)"
+        >
+          {{ speedLabel }}
+        </button>
       </div>
 
       <div class="time-readout">
@@ -811,6 +831,29 @@ onBeforeUnmount(() => {
   font-family: var(--mono);
   font-size: 11px;
   text-align: right;
+}
+
+.speed-button {
+  min-width: 46px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.speed-button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.speed-button:disabled {
+  opacity: 0.45;
 }
 
 .transport-right {

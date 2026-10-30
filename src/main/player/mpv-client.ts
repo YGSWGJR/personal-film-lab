@@ -1,3 +1,4 @@
+import { PLAYBACK_SPEEDS, type PlaybackSpeed } from '../../shared/types';
 import { getMpvLibrary, MPV_END_FILE_REASON, MPV_EVENT, MPV_FORMAT, PlayerError, toPlayerError, type MpvLibrary } from './mpv-lib';
 
 export interface MpvClientOptions {
@@ -15,6 +16,15 @@ export interface FrameSnapshot {
 
 const EVENT_POLL_INTERVAL_MS = 10;
 const PROPERTY_WAIT_TIMEOUT_MS = 3000;
+
+export function normalizePlaybackSpeed(rate: number): PlaybackSpeed {
+  if (!Number.isFinite(rate)) return 1;
+  let nearest: PlaybackSpeed = PLAYBACK_SPEEDS[0];
+  for (const candidate of PLAYBACK_SPEEDS) {
+    if (Math.abs(candidate - rate) < Math.abs(nearest - rate)) nearest = candidate;
+  }
+  return nearest;
+}
 
 type PropertyValue = number | boolean;
 
@@ -81,6 +91,7 @@ export class MpvClient {
       'osd-level': '0',
       'osd-on-seek': 'no',
       'osd-bar': 'no',
+      'audio-pitch-correction': 'yes',
       'hr-seek': 'yes',
       'hr-seek-framedrop': 'no',
       'hwdec': 'auto',
@@ -106,6 +117,7 @@ export class MpvClient {
       ['pause', MPV_FORMAT.FLAG],
       ['eof-reached', MPV_FORMAT.FLAG],
       ['volume', MPV_FORMAT.DOUBLE],
+      ['speed', MPV_FORMAT.DOUBLE],
     ];
     let id = 1n;
     for (const [name, format] of properties) {
@@ -169,6 +181,7 @@ export class MpvClient {
     }
 
     this.loadedPath = filePath;
+    this.lib.fns.setPropertyString(this.ctx, 'speed', '1.0');
     this.fileLoaded = true;
   }
 
@@ -287,6 +300,22 @@ export class MpvClient {
     const rc = this.lib.fns.setPropertyString(this.ctx, 'volume', String(Math.round(clamped * 100)));
     if (rc < 0) {
       throw toPlayerError(rc, '设置音量失败');
+    }
+    await delay(10);
+  }
+
+  getSpeed(): PlaybackSpeed {
+    const value = this.getNumber('speed');
+    if (value !== null) return normalizePlaybackSpeed(value);
+    const cached = this.properties.get('speed');
+    return normalizePlaybackSpeed(typeof cached === 'number' ? cached : 1);
+  }
+
+  async setSpeed(rate: number): Promise<void> {
+    const normalized = normalizePlaybackSpeed(rate);
+    const rc = this.lib.fns.setPropertyString(this.ctx, 'speed', String(normalized));
+    if (rc < 0) {
+      throw toPlayerError(rc, '设置播放速度失败');
     }
     await delay(10);
   }

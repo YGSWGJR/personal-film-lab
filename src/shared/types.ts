@@ -253,6 +253,9 @@ export interface MediaProbeResult extends MediaInfo {
 
 export type OverlayLayer = 'normal' | 'bottom' | 'hidden';
 
+export const PLAYBACK_SPEEDS = [0.5, 1, 1.5, 2] as const;
+export type PlaybackSpeed = (typeof PLAYBACK_SPEEDS)[number];
+
 /** 播放器状态（player:getState / player:event:state） */
 export interface PlayerState {
   hasFile: boolean;
@@ -261,6 +264,7 @@ export interface PlayerState {
   paused: boolean;
   ended: boolean;
   volume: number;
+  speed: PlaybackSpeed;
   width: number;
   height: number;
   fps: number;
@@ -458,6 +462,8 @@ export interface PlayerApi {
   getState(): Promise<IpcResult<PlayerState>>;
   getFrame(): Promise<IpcResult<FrameInfo>>;
   setVolume(args: { volume: number }): Promise<IpcResult<PlayerState>>;
+  getSpeed(): Promise<IpcResult<number>>;
+  setSpeed(args: { rate: number }): Promise<IpcResult<PlayerState>>;
   setBounds(bounds: RenderBounds): Promise<IpcResult<void>>;
   setLayer(args: { level: OverlayLayer }): Promise<IpcResult<PlayerState>>;
   onState(listener: (state: PlayerState) => void): () => void;

@@ -44,6 +44,7 @@ import type {
   MediaProgressEvent,
   Note,
   OverlayLayer,
+  PlaybackSpeed,
   PlayerErrorEvent,
   PlayerState,
   Project,
@@ -58,6 +59,7 @@ import type {
   Term,
   WorkspaceState,
 } from '../../shared/types';
+import { PLAYBACK_SPEEDS } from '../../shared/types';
 
 const info = ref<AppInfo | null>(null);
 const bridgeReady = ref(false);
@@ -153,6 +155,7 @@ const player = reactive<PlayerState>({
   paused: true,
   ended: false,
   volume: 1,
+  speed: 1,
   width: 0,
   height: 0,
   fps: 0,
@@ -664,6 +667,7 @@ async function closePlayer(): Promise<void> {
     durationMs: 0,
     paused: true,
     ended: false,
+    speed: 1,
     width: 0,
     height: 0,
     fps: 0,
@@ -712,10 +716,16 @@ async function seekTo(timeMs: number): Promise<void> {
   if (state) Object.assign(player, state);
 }
 
-function selectShot(shot: WorkspaceShot): void {
+async function selectShot(shot: WorkspaceShot): Promise<void> {
+  const switched = selectedId.value !== shot.id;
   selectedId.value = shot.id;
   previewTimeMs.value = shot.startMs;
-  if (player.hasFile) void seekTo(shot.startMs);
+  if (player.hasFile) {
+    if (switched) await handleSetSpeed(1);
+    await seekTo(shot.startMs);
+  } else {
+    player.speed = 1;
+  }
 }
 
 function openShotContextMenu(
@@ -1800,6 +1810,36 @@ async function handleSetVolume(volume: number): Promise<void> {
   }
 }
 
+function normalizePlaybackSpeed(rate: number): PlaybackSpeed {
+  if (!Number.isFinite(rate)) return 1;
+  let nearest: PlaybackSpeed = PLAYBACK_SPEEDS[0];
+  for (const candidate of PLAYBACK_SPEEDS) {
+    if (Math.abs(candidate - rate) < Math.abs(nearest - rate)) nearest = candidate;
+  }
+  return nearest;
+}
+
+async function handleSetSpeed(rate: number): Promise<void> {
+  const normalized = normalizePlaybackSpeed(rate);
+  if (!player.hasFile) {
+    player.speed = normalized;
+    return;
+  }
+  const result = await window.api.player.setSpeed({ rate: normalized });
+  if (result.ok) {
+    Object.assign(player, result.data);
+  } else {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
+function cyclePlaybackSpeed(direction: 1 | -1): void {
+  const currentIndex = PLAYBACK_SPEEDS.indexOf(player.speed);
+  const index = currentIndex >= 0 ? currentIndex : PLAYBACK_SPEEDS.indexOf(1);
+  const nextIndex = (index + direction + PLAYBACK_SPEEDS.length) % PLAYBACK_SPEEDS.length;
+  void handleSetSpeed(PLAYBACK_SPEEDS[nextIndex]);
+}
+
 async function handleToggleMute(): Promise<void> {
   if (player.volume === 0) {
     await handleSetVolume(muteBeforeVolume.value > 0 ? muteBeforeVolume.value : 1);
@@ -1985,6 +2025,11 @@ function handleKeydown(event: KeyboardEvent): void {
     void handleToggleMute();
     return;
   }
+  if (event.key === '[' || event.key === ']') {
+    event.preventDefault();
+    cyclePlaybackSpeed(event.key === ']' ? 1 : -1);
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
     event.preventDefault();
     const step = event.shiftKey ? 0.1 : 0.01;
@@ -2010,8 +2055,7 @@ function handleKeydown(event: KeyboardEvent): void {
     const nextIndex = Math.max(0, Math.min(shots.value.length - 1, currentIndex + delta));
     const nextShot = shots.value[nextIndex];
     if (nextShot) {
-      selectedId.value = nextShot.id;
-      previewTimeMs.value = nextShot.startMs;
+      void selectShot(nextShot);
     }
     return;
   }
@@ -2114,6 +2158,7 @@ onMounted(async () => {
       player.width = media.width;
       player.height = media.height;
       player.fps = media.fps;
+      player.speed = 1;
       void syncTranscodeConcurrency();
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
@@ -2302,6 +2347,7 @@ onBeforeUnmount(() => {
         @capture="captureStill"
         @set-layer="setPlayerLayer"
         @set-volume="handleSetVolume"
+        @set-speed="handleSetSpeed"
         @toggle-mute="handleToggleMute"
       />
 
