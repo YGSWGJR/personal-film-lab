@@ -327,6 +327,7 @@ export interface MediaProgressEvent {
   percent: number;
   message: string;
   queueState?: TranscodeQueueState;
+  gpu?: GpuStatus;
 }
 
 export interface MediaProbeArgs {
@@ -479,8 +480,21 @@ export interface MediaApi {
   transcodeProxy(args: TranscodeProxyArgs): Promise<IpcResult<TranscodeProxyResult>>;
   cancelJob(args: CancelJobArgs): Promise<IpcResult<CancelJobResult>>;
   queueList(): Promise<IpcResult<TranscodeQueueItem[]>>;
-  setTranscodeConcurrency(args: { concurrency: 1 | 2 }): Promise<IpcResult<{ concurrency: number }>>;
+  setTranscodeConcurrency(args: { concurrency: 1 | 2 | 4 }): Promise<IpcResult<{ concurrency: number }>>;
   onProgress(listener: (event: MediaProgressEvent) => void): () => void;
+}
+
+export interface GpuStatus {
+  available: boolean;
+  utilizationPercent: number | null;
+  encoderPercent: number | null;
+  memoryUsedMiB: number | null;
+  memoryTotalMiB: number | null;
+  updatedAt: string;
+}
+
+export interface GpuApi {
+  getStatus(): Promise<IpcResult<GpuStatus>>;
 }
 
 export interface AudioWaveformBucket {
@@ -508,6 +522,7 @@ export interface WindowApi {
   session: SessionApi;
   player: PlayerApi;
   media: MediaApi;
+  gpu: GpuApi;
   scope: ScopeApi;
   project: ProjectApi;
   shot: ShotApi;

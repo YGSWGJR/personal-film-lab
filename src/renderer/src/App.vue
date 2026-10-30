@@ -39,6 +39,7 @@ import type {
   DetectProgressEvent,
   DetectResult,
   ExportProgressEvent,
+  GpuStatus,
   IpcResult,
   MediaInfo,
   MediaProgressEvent,
@@ -86,6 +87,7 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let noteTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingNoteShotId: string | null = null;
 let transcodeQueueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let gpuPollTimer: ReturnType<typeof setInterval> | null = null;
 const termEditorOpen = ref(false);
 const editingTerm = ref<Term | null>(null);
 const termSaving = ref(false);
@@ -96,6 +98,7 @@ const transcoding = ref(false);
 const transcodeProgress = ref<MediaProgressEvent | null>(null);
 const transcodeRunningCount = ref(0);
 const transcodeQueuedCount = ref(0);
+const gpuStatus = ref<GpuStatus | null>(null);
 const detectionOpen = ref(false);
 const detecting = ref(false);
 const applyingDetection = ref(false);
@@ -142,7 +145,7 @@ let detectionPollTimer: ReturnType<typeof setInterval> | null = null;
 let audioGeneration = 0;
 let lastPlayerBounds: RenderBounds | null = null;
 let overlayPlayerHidden = false;
-let requestedTranscodeConcurrency: 1 | 2 = 2;
+let requestedTranscodeConcurrency: 1 | 2 | 4 = 4;
 const pendingPlayerLayer = ref<OverlayLayer | null>(null);
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let restoringSession = true;
@@ -222,6 +225,17 @@ const overlayOpen = computed(
     aiMenuOpen.value ||
     aiAuthRequest.value !== null,
 );
+const gpuStatusText = computed(() => {
+  const status = gpuStatus.value;
+  if (!status?.available) return 'GPU n/a';
+  const utilization = status.utilizationPercent === null ? 'n/a' : `${Math.round(status.utilizationPercent)}%`;
+  const encoder = status.encoderPercent === null ? 'n/a' : `${Math.round(status.encoderPercent)}%`;
+  const memory =
+    status.memoryUsedMiB !== null && status.memoryTotalMiB !== null
+      ? `${(status.memoryUsedMiB / 1024).toFixed(1)}/${(status.memoryTotalMiB / 1024).toFixed(1)} GB`
+      : 'n/a';
+  return `GPU ${utilization} · 编码器 ${encoder} · 显存 ${memory}`;
+});
 
 function hidePlayerForOverlay(): void {
   if (overlayPlayerHidden) return;
@@ -616,6 +630,26 @@ async function refreshTranscodeQueueState(): Promise<void> {
   }
 }
 
+async function refreshGpuStatus(): Promise<void> {
+  const result = await window.api.gpu.getStatus();
+  if (result.ok) gpuStatus.value = result.data;
+}
+
+function syncGpuPolling(active: boolean): void {
+  if (active && !gpuPollTimer) {
+    void refreshGpuStatus();
+    gpuPollTimer = setInterval(() => void refreshGpuStatus(), 1000);
+  } else if (!active && gpuPollTimer) {
+    clearInterval(gpuPollTimer);
+    gpuPollTimer = null;
+  }
+}
+
+watch(
+  [transcoding, detecting],
+  ([transferring, detectingNow]) => syncGpuPolling(transferring || detectingNow),
+);
+
 function scheduleTranscodeQueueRefresh(): void {
   if (transcodeQueueRefreshTimer) return;
   transcodeQueueRefreshTimer = setTimeout(() => {
@@ -625,7 +659,7 @@ function scheduleTranscodeQueueRefresh(): void {
 }
 
 async function syncTranscodeConcurrency(): Promise<void> {
-  const concurrency: 1 | 2 = detecting.value || (player.hasFile && !player.paused) ? 1 : 2;
+  const concurrency: 1 | 2 | 4 = detecting.value || (player.hasFile && !player.paused) ? 1 : 4;
   if (concurrency === requestedTranscodeConcurrency) return;
   const previous = requestedTranscodeConcurrency;
   requestedTranscodeConcurrency = concurrency;
@@ -2163,6 +2197,7 @@ onMounted(async () => {
     }),
     api.player.onError((event: PlayerErrorEvent) => showToast(event.message, 'error', event.code)),
     api.media.onProgress((event) => {
+      if (event.gpu) gpuStatus.value = event.gpu;
       if (event.stage === 'transcode') {
         transcodeProgress.value = event;
         transcoding.value = true;
@@ -2222,6 +2257,7 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
   if (transcodeQueueRefreshTimer) clearTimeout(transcodeQueueRefreshTimer);
+  if (gpuPollTimer) clearInterval(gpuPollTimer);
   stopDetectionPolling();
   audioGeneration += 1;
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
@@ -2399,7 +2435,7 @@ onBeforeUnmount(() => {
     <transition name="toast">
       <div v-if="transcoding" class="transfer-toast">
         <div class="transfer-head">
-          <span>后台转码 {{ transcodeRunningCount }}/2</span>
+          <span>后台转码 {{ transcodeRunningCount }} 运行</span>
           <strong>{{ transcodeProgress?.percent ?? 0 }}%</strong>
         </div>
         <div class="transfer-track">
@@ -2409,6 +2445,7 @@ onBeforeUnmount(() => {
           {{ transcodeProgress?.message ?? '准备转码…' }}
           <template v-if="transcodeQueuedCount > 0"> · 队列中 {{ transcodeQueuedCount }}</template>
         </small>
+        <small class="transfer-gpu">{{ gpuStatusText }}</small>
       </div>
     </transition>
 
@@ -2584,6 +2621,7 @@ onBeforeUnmount(() => {
       :running="detecting"
       :applying="applyingDetection"
       :progress="detectionProgress"
+      :gpu-label="gpuStatusText"
       :result="detectionResult"
       :error="detectionError"
       @close="closeDetection"

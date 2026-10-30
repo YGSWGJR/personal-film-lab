@@ -21,6 +21,7 @@ import type {
   ExtractFramesResult,
   ExtractFrameResult,
   ImportResult,
+  GpuStatus,
   MediaInfo,
   MediaProbeArgs,
   MediaProbeResult,
@@ -354,8 +355,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((): TranscodeQueueItem[] => requireMedia().queueList()),
   );
   ipcMain.handle(
+    IPC.GPU_GET_STATUS,
+    withEnvelope((): Promise<GpuStatus> => requireMedia().getGpuStatus()),
+  );
+  ipcMain.handle(
     IPC.MEDIA_SET_TRANSCODE_CONCURRENCY,
-    withEnvelope((args: { concurrency: 1 | 2 }): { concurrency: number } => {
+    withEnvelope((args: { concurrency: 1 | 2 | 4 }): { concurrency: number } => {
       requireMedia().setTranscodeConcurrency(args.concurrency);
       return { concurrency: args.concurrency };
     }),

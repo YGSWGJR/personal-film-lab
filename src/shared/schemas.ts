@@ -170,7 +170,7 @@ export const mediaTranscodeProxyArgsSchema = z.object({
 });
 
 export const mediaSetConcurrencyArgsSchema = z.object({
-  concurrency: z.union([z.literal(1), z.literal(2)]),
+  concurrency: z.union([z.literal(1), z.literal(2), z.literal(4)]),
 });
 
 /** media:cancelJob */

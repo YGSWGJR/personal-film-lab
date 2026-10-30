@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdirSync, readdirSync, statSync, unlinkSync, existsSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import type {
@@ -11,6 +13,7 @@ import type {
   ExtractFramesResult,
   ExtractFrameResult,
   FrameFormat,
+  GpuStatus,
   MediaProbeArgs,
   MediaProbeResult,
   MediaProgressEvent,
@@ -73,6 +76,10 @@ const DEFAULT_TRANSCODE_TIMEOUT_MS = 60 * 60_000;
 const MAX_STDERR_FOR_DIAGNOSTICS = 4000;
 const HARDWARE_ENCODER_FAILURE_RE = /encoder|not supported|Cannot load|No capable|initialization failed/i;
 const AUDIO_COPY_CODECS = new Set(['aac', 'mp3', 'ac3', 'eac3', 'opus', 'flac']);
+const GPU_STATUS_CACHE_MS = 900;
+const GPU_MEMORY_PER_JOB_MIB = 3200;
+const GPU_MEMORY_RESERVE_MIB = 1024;
+const execFileAsync = promisify(execFile);
 
 type ProxyMode = 'fast' | 'balanced' | 'quality';
 type ProxyResolution = 'auto' | 'p240' | 'p360' | 'p540' | 'p720' | 'p1080';
@@ -105,8 +112,12 @@ export class MediaService {
   private readonly jobs = new Map<string, ActiveJob>();
   private readonly transcodeQueue: TranscodeQueueEntry[] = [];
   private transcodeActive: TranscodeQueueEntry[] = [];
-  private transcodeConcurrency = 2;
+  private transcodeConcurrency: 1 | 2 | 4 = 4;
   private readonly transcodeRecent: TranscodeQueueEntry[] = [];
+  private pumpScheduled = false;
+  private gpuStatus: GpuStatus = unavailableGpuStatus();
+  private gpuStatusPromise: Promise<GpuStatus> | null = null;
+  private gpuStatusAt = 0;
 
   constructor(private readonly getWindow: () => BrowserWindow | null) {}
 
@@ -142,7 +153,7 @@ export class MediaService {
       '-filter_complex_threads',
       '1',
       ...(accel === 'cuda'
-        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '8']
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '16']
         : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
       '-threads',
@@ -327,7 +338,7 @@ export class MediaService {
       '-progress',
       'pipe:1',
       ...(accel === 'cuda'
-        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '8']
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '16']
         : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
       '-threads',
@@ -572,9 +583,62 @@ export class MediaService {
     }));
   }
 
-  setTranscodeConcurrency(concurrency: 1 | 2): void {
+  async getGpuStatus(): Promise<GpuStatus> {
+    const now = Date.now();
+    if (now - this.gpuStatusAt < GPU_STATUS_CACHE_MS) return this.gpuStatus;
+    if (this.gpuStatusPromise) return this.gpuStatusPromise;
+
+    this.gpuStatusPromise = (async () => {
+      try {
+        const { stdout } = await execFileAsync(
+          'nvidia-smi',
+          [
+            '--query-gpu=utilization.gpu,utilization.encoder,memory.used,memory.total',
+            '--format=csv,noheader,nounits',
+          ],
+          { encoding: 'utf8', timeout: 2500, windowsHide: true, maxBuffer: 1024 * 1024 },
+        );
+        this.gpuStatus = parseGpuStatus(stdout);
+      } catch {
+        this.gpuStatus = unavailableGpuStatus();
+      } finally {
+        this.gpuStatusAt = Date.now();
+        this.gpuStatusPromise = null;
+      }
+      return this.gpuStatus;
+    })();
+    return this.gpuStatusPromise;
+  }
+
+  async queryGpuMemoryUsedMiB(): Promise<number | null> {
+    return (await this.getGpuStatus()).memoryUsedMiB;
+  }
+
+  setTranscodeConcurrency(concurrency: 1 | 2 | 4): void {
     this.transcodeConcurrency = concurrency;
     if (this.transcodeActive.length < this.transcodeConcurrency) this.pump();
+  }
+
+  findProxyForSource(sourcePath: string): string | null {
+    let sourceStat: ReturnType<typeof statSync>;
+    try {
+      sourceStat = statSync(sourcePath);
+    } catch {
+      return null;
+    }
+    for (const tier of ['540p', '720p', '360p'] as const) {
+      const candidate = join(
+        resolveProxyCacheDir(),
+        `${proxyKey(sourcePath, sourceStat.size, sourceStat.mtimeMs, tier)}-proxy.mp4`,
+      );
+      try {
+        const proxyStat = statSync(candidate);
+        if (proxyStat.isFile() && proxyStat.size > 0) return candidate;
+      } catch {
+        // Try the next tier.
+      }
+    }
+    return null;
   }
 
   private async getCachedTranscodeResult(
@@ -629,24 +693,52 @@ export class MediaService {
   }
 
   private pump(): void {
-    while (this.transcodeActive.length < this.transcodeConcurrency && this.transcodeQueue.length > 0) {
-      const item = this.transcodeQueue.shift();
-      if (!item) break;
-      this.transcodeActive.push(item);
-      item.state = 'running';
-      item.percent = 0;
-      item.message = '开始转码代理';
-      item.startedAt = Date.now();
-      this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
-      this.emitProgress({
-        jobId: item.jobId,
-        stage: 'transcode',
-        percent: 0,
-        message: item.message,
-        queueState: 'running',
-      });
-      void this.processQueuedTranscode(item);
+    if (this.pumpScheduled) return;
+    this.pumpScheduled = true;
+    void (async () => {
+      let capacity = 1;
+      try {
+        capacity = await this.resolveTranscodeCapacity();
+        while (this.transcodeActive.length < capacity && this.transcodeQueue.length > 0) {
+          const item = this.transcodeQueue.shift();
+          if (!item) break;
+          this.transcodeActive.push(item);
+          item.state = 'running';
+          item.percent = 0;
+          item.message = '开始转码代理';
+          item.startedAt = Date.now();
+          this.jobs.set(item.jobId, { controller: item.controller, stage: 'transcode', startedAt: item.startedAt });
+          this.emitProgress({
+            jobId: item.jobId,
+            stage: 'transcode',
+            percent: 0,
+            message: item.message,
+            queueState: 'running',
+          });
+          void this.processQueuedTranscode(item);
+        }
+      } finally {
+        this.pumpScheduled = false;
+        if (this.transcodeQueue.length > 0 && this.transcodeActive.length < capacity) {
+          setTimeout(() => this.pump(), 0);
+        }
+      }
+    })();
+  }
+
+  private async resolveTranscodeCapacity(): Promise<number> {
+    const gpu = await this.getGpuStatus();
+    if (
+      !gpu.available ||
+      gpu.memoryUsedMiB === null ||
+      gpu.memoryTotalMiB === null ||
+      gpu.memoryTotalMiB <= 0
+    ) {
+      return Math.min(this.transcodeConcurrency, 2);
     }
+    const availableMiB = gpu.memoryTotalMiB - gpu.memoryUsedMiB - GPU_MEMORY_RESERVE_MIB;
+    const byMemory = Math.floor(availableMiB / GPU_MEMORY_PER_JOB_MIB);
+    return Math.max(1, Math.min(this.transcodeConcurrency, byMemory));
   }
 
   private async processQueuedTranscode(item: TranscodeQueueEntry): Promise<void> {
@@ -745,7 +837,7 @@ export class MediaService {
       'pipe:1',
       '-y',
       ...(accel === 'cuda'
-        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '8']
+        ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-extra_hw_frames', '16']
         : []),
       ...(accel === 'd3d11va' ? ['-hwaccel', 'd3d11va'] : []),
       '-threads',
@@ -1145,8 +1237,41 @@ export class MediaService {
   private emitProgress(event: MediaProgressEvent): void {
     const win = this.getWindow();
     if (!win || win.isDestroyed()) return;
-    win.webContents.send(IPC.MEDIA_EVENT_PROGRESS, event);
+    win.webContents.send(IPC.MEDIA_EVENT_PROGRESS, { ...event, gpu: this.gpuStatus });
   }
+}
+
+function unavailableGpuStatus(): GpuStatus {
+  return {
+    available: false,
+    utilizationPercent: null,
+    encoderPercent: null,
+    memoryUsedMiB: null,
+    memoryTotalMiB: null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function parseGpuStatus(output: string): GpuStatus {
+  const line = output
+    .split(/\r?\n/u)
+    .map((item) => item.trim())
+    .find(Boolean);
+  if (!line) return unavailableGpuStatus();
+  const fields = line.split(',').map((item) => item.trim());
+  const numberOrNull = (value: string | undefined): number | null => {
+    if (value === undefined || value.length === 0 || /n\/a/iu.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    available: true,
+    utilizationPercent: numberOrNull(fields[0]),
+    encoderPercent: numberOrNull(fields[1]),
+    memoryUsedMiB: numberOrNull(fields[2]),
+    memoryTotalMiB: numberOrNull(fields[3]),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function normalizeFormat(format: FrameFormat | undefined): FrameFormat {
