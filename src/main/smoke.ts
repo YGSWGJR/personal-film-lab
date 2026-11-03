@@ -1,12 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { app, type BrowserWindow } from 'electron';
+import { app, ipcMain, type BrowserWindow } from 'electron';
 import { unzipSync } from 'fflate';
 import { DataError } from '../data/errors';
 import { removeProjectDir, removeProjectFiles } from '../data/paths';
+import { IPC } from '../shared/ipc-channels';
+import { withEnvelope } from '../shared/ipc-result';
+import type { WorkspaceState } from '../shared/types';
 import { resolveDetectFramesDir } from './paths';
 import type { PlayerService } from './player/player-service';
+import { SessionService } from './session/session-service';
 
 interface SmokeDeps {
   getPlayer(): PlayerService | null;
@@ -611,10 +615,24 @@ async function runDeleteUiChecks(
     `)) as Record<string, any>;
     if (!setup.ok) return setup;
 
-    await new Promise<void>((resolve) => {
-      win.webContents.once('did-finish-load', () => resolve());
-      win.webContents.reload();
-    });
+    // S36-1 QA 修复：reload 触发渲染层 beforeunload → scheduleWorkspaceSave(true)，
+    // 会以当前 UI 状态（demo 态，projectId=null）覆盖 fixture 刚保存的会话，
+    // 导致重启后恢复进示例模式（loaded=false）。这里临时摘除 session:save handler
+    // 让覆盖保存失败（渲染层 catch 后仅告警），did-finish-load 后恢复等价 handler。
+    const smokeSession = new SessionService();
+    ipcMain.removeHandler(IPC.SESSION_SAVE);
+    try {
+      await new Promise<void>((resolve) => {
+        win.webContents.once('did-finish-load', () => resolve());
+        win.webContents.reload();
+      });
+    } finally {
+      ipcMain.removeHandler(IPC.SESSION_SAVE);
+      ipcMain.handle(
+        IPC.SESSION_SAVE,
+        withEnvelope((state: WorkspaceState): WorkspaceState => smokeSession.save(state)),
+      );
+    }
   }
 
   const result = (await win.webContents.executeJavaScript(`
@@ -792,6 +810,51 @@ async function runDeleteUiChecks(
       }
     })()
   `)) as Record<string, any>;
+
+  // S36-1 QA 收尾：避免 fixture 污染用户真实数据根——
+  // 1) 切回示例模式（退出时 captureWorkspaceSession 快照 projectId=null，下次启动干净）；
+  // 2) 删除本次自建的 fixture 项目（SMOKE_DELETE_PROJECT_ID 外部传入的项目不清理）；
+  // 3) 清空会话，防止下次启动弹「上次打开的项目未找到」向导。
+  if (!fixtureProjectId && setup.projectId) {
+    try {
+      await win.webContents.executeJavaScript(`
+        (() => {
+          const toggle = Array.from(document.querySelectorAll('.main-nav .nav-item'))
+            .find((button) => ['示例模式', '最近项目'].includes(String(button.textContent || '').trim()));
+          toggle?.click();
+        })()
+      `);
+    } catch {
+      // 切换失败不阻断清理
+    }
+    try {
+      const cleanup = (await win.webContents.executeJavaScript(
+        `window.api.project.delete({ id: ${JSON.stringify(setup.projectId)} })`,
+      )) as { ok?: boolean; error?: { code?: string; message?: string } };
+      out.fixtureCleaned = cleanup.ok === true;
+      if (cleanup.ok !== true) {
+        out.fixtureCleanError = cleanup.error ?? null;
+      }
+      // 项目删除不级联删全局标签：fixture 自建标签（分类「删除测试」）一并清理
+      const tagCleanup = (await win.webContents.executeJavaScript(`
+        (async () => {
+          const list = await window.api.tag.list({ category: '删除测试' });
+          if (!list.ok) return { ok: false, error: list.error };
+          let removed = 0;
+          for (const tag of list.data.filter((item) => !item.builtin)) {
+            const removedTag = await window.api.tag.delete({ id: tag.id });
+            if (removedTag.ok) removed += 1;
+          }
+          return { ok: true, removed };
+        })()
+      `)) as { ok?: boolean; removed?: number; error?: unknown };
+      out.fixtureTagCleaned = tagCleanup.ok === true;
+      await win.webContents.executeJavaScript('window.api.session.clear()');
+    } catch (error) {
+      out.fixtureCleanError = String(error);
+    }
+  }
+
   // 合并：out 承载主进程侧永久删除断言，result 承载渲染层 UI 交互断言
   return { ...out, ...result };
 }
