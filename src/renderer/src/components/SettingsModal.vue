@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { AiMcpStatus, ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
 
-type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier'>;
+type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier' | 'confirmUserContent'>;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 type SettingsDraft = Record<PathKey, string>;
 
@@ -37,6 +37,8 @@ const draft = reactive<SettingsDraft>({
 const browseError = ref<string | null>(null);
 const liveSettings = ref<Settings | null>(null);
 const proxyTier = ref<ProxyTier>('540p');
+/** S36-1b：删除用户内容前二次确认，默认开启（与主进程 defaultSettings 对齐） */
+const confirmUserContent = ref(true);
 const proxyTierOptions = [
   { value: '360p', label: '360p', hint: '最快' },
   { value: '540p', label: '540p', hint: '均衡' },
@@ -139,6 +141,7 @@ function fillDraft(settings: Settings): void {
   draft.exportSubDir = settings.exportSubDir ?? '';
   draft.stillSubDir = settings.stillSubDir ?? '';
   proxyTier.value = settings.proxyTier ?? '540p';
+  confirmUserContent.value = settings.confirmUserContent ?? true;
 }
 
 function joinDisplayPath(base: string, ...parts: string[]): string {
@@ -197,6 +200,7 @@ async function resetDefaults(): Promise<void> {
     draft.exportSubDir = '';
     draft.stillSubDir = '';
     proxyTier.value = '540p';
+    confirmUserContent.value = true;
     environmentCheck.value = null;
   } finally {
     resettingDefaults.value = false;
@@ -287,6 +291,7 @@ function submit(): void {
   if (Object.values(rootPaths).some((path) => !path)) return;
   const value: SettingsSetArgs = { ...rootPaths };
   value.proxyTier = proxyTier.value;
+  value.confirmUserContent = confirmUserContent.value;
   for (const key of [
     'proxyCacheDir',
     'frameCacheDir',
@@ -398,6 +403,28 @@ function submit(): void {
             @click="emit('toggleMcp')"
           >
             {{ mcpBusy ? '处理中…' : mcpStatus?.running ? '已开启 · 点击关闭' : '已关闭 · 点击开启' }}
+          </button>
+        </section>
+
+        <section class="mcp-setting delete-behavior">
+          <div class="mcp-copy">
+            <strong>删除行为</strong>
+            <small>
+              删除镜头、静帧、标签或术语前弹出二次确认（删除不可恢复，文件将永久删除，不进回收站）。
+              关闭后删除将立即执行。
+            </small>
+          </div>
+          <button
+            type="button"
+            :class="{ active: confirmUserContent }"
+            :disabled="saving || resettingDefaults"
+            @click="confirmUserContent = !confirmUserContent"
+          >
+            {{
+              confirmUserContent
+                ? '二次确认 · 已开启 · 点击关闭'
+                : '二次确认 · 已关闭 · 点击开启'
+            }}
           </button>
         </section>
 
