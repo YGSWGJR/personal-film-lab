@@ -1192,8 +1192,11 @@ export class MediaService {
   private removeQuietly(filePath: string): void {
     try {
       if (existsSync(filePath)) unlinkSync(filePath);
-    } catch {
-      // ignore cleanup failures
+    } catch (error) {
+      // 尽力而为的缓存清理：失败只记录路径与原因，不中断主流程（S36-1a）
+      console.warn(
+        `[media] 临时文件清理失败: ${filePath}: ${(error as Error).message}`,
+      );
     }
   }
 

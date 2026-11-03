@@ -28,6 +28,8 @@ export interface Settings {
   /** DSH_DATA_ROOT 环境变量生效时，路径设置被环境覆盖 */
   environmentOverride: boolean;
   proxyTier?: ProxyTier;
+  /** 删除用户内容（镜头/静帧/标签/术语）前是否二次确认，默认 true（S36-1） */
+  confirmUserContent?: boolean;
 }
 
 export interface SettingsSetArgs {
@@ -42,6 +44,8 @@ export interface SettingsSetArgs {
   exportSubDir?: string;
   stillSubDir?: string;
   proxyTier?: ProxyTier;
+  /** 删除用户内容前是否二次确认，缺省 true（S36-1） */
+  confirmUserContent?: boolean;
 }
 
 export interface SettingsChooseDirectoryArgs {

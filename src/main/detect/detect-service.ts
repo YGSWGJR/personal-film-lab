@@ -328,15 +328,21 @@ export class DetectService {
         console.warn(`[detect] shot ${project.id}#${shot.index} thumbnail failed: ${(error as Error).message}`);
         try {
           rmSync(thumbnailPath, { force: true });
-        } catch {
+        } catch (cleanupError) {
           // A partial thumbnail must not fail the detection job.
+          console.warn(
+            `[detect] 临时缩略图清理失败: ${thumbnailPath}: ${(cleanupError as Error).message}`,
+          );
         }
       } finally {
         if (removeInputFrame) {
           try {
             rmSync(sourceFramePath, { force: true });
-          } catch {
+          } catch (cleanupError) {
             // A stale source frame must not fail the detection job.
+            console.warn(
+              `[detect] 临时抽帧清理失败: ${sourceFramePath}: ${(cleanupError as Error).message}`,
+            );
           }
         }
       }

@@ -24,6 +24,7 @@ export const settingsSchema = z.object({
   exportSubDir: settingsDirectorySchema.optional(),
   stillSubDir: settingsDirectorySchema.optional(),
   proxyTier: z.enum(['360p', '540p', '720p']).optional(),
+  confirmUserContent: z.boolean().optional(),
 });
 
 export const settingsSetArgsSchema = settingsSchema;
