@@ -56,6 +56,7 @@ export class SettingsService {
         exportDir: join(envRoot, 'projects'),
         stillDir: join(envRoot, 'projects'),
         proxyTier: '540p',
+        confirmUserContent: this.stored?.confirmUserContent ?? true,
         settingsPath: this.settingsPath,
         environmentOverride: true,
       };
@@ -169,7 +170,8 @@ export function verifyStoredSettings(
     const stored = normalizeSettings(parsed.data);
     return (
       SETTINGS_PATH_FIELDS.every((key) => stored[key] === expected[key]) &&
-      stored.proxyTier === expected.proxyTier
+      stored.proxyTier === expected.proxyTier &&
+      stored.confirmUserContent === expected.confirmUserContent
     );
   } catch {
     return false;
@@ -189,6 +191,7 @@ function normalizeSettings(args: SettingsSetArgs): SettingsSetArgs {
     exportSubDir: normalizeOptionalPath(args.exportSubDir),
     stillSubDir: normalizeOptionalPath(args.stillSubDir),
     proxyTier: args.proxyTier ?? '540p',
+    confirmUserContent: args.confirmUserContent ?? true,
   };
 }
 

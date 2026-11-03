@@ -6,6 +6,7 @@ import emptyStillsImage from '../../../assets/design/design_empty_stills_1024x76
 import cutIcon from '../../../assets/design/design_icon_cut_48.png';
 import AiAssistantMenu from './components/AiAssistantMenu.vue';
 import AppIcon from './components/AppIcon.vue';
+import ConfirmDialog from './components/ConfirmDialog.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
 import ExportModal from './components/ExportModal.vue';
@@ -134,6 +135,35 @@ const settingsOpen = ref(false);
 const settings = ref<Settings | null>(null);
 const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
+/** S36-1b：统一危险删除确认弹窗状态（Promise 风格，await 确认结果） */
+const confirmState = reactive({
+  open: false,
+  title: '',
+  message: '',
+  resolve: (_confirmed: boolean): void => {},
+});
+/** 删除用户内容前是否二次确认，由设置 confirmUserContent 驱动，缺省开启 */
+const needDeleteConfirm = computed(() => settings.value?.confirmUserContent ?? true);
+
+/**
+ * 弹出删除确认弹窗并等待用户选择。
+ * @returns 用户点击「删除」返回 true；点击取消 / Esc / 点击遮罩返回 false。
+ */
+function confirmUserDelete(title: string, message: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    confirmState.title = title;
+    confirmState.message = message;
+    confirmState.resolve = resolve;
+    confirmState.open = true;
+  });
+}
+
+/** 结束确认弹窗并回传用户选择；重复调用（弹窗已关闭）忽略 */
+function resolveConfirm(confirmed: boolean): void {
+  if (!confirmState.open) return;
+  confirmState.open = false;
+  confirmState.resolve(confirmed);
+}
 const statsOpen = ref(false);
 const aiMenuOpen = ref(false);
 const aiCopying = ref(false);
@@ -818,10 +848,13 @@ async function deleteShot(shot: WorkspaceShot): Promise<void> {
     shotStills.length > 0 ? `${shotStills.length} 张静帧` : '',
     hasNote ? '笔记' : '',
   ].filter(Boolean).join('与');
-  const confirmed = window.confirm(
-    `确定删除镜头「${shot.title}」吗？${detail ? `将同时删除其 ${detail}，` : ''}图片文件也会被移除。`,
-  );
-  if (!confirmed) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '删除镜头',
+      `确定删除镜头「${shot.title}」吗？${detail ? `将同时删除其 ${detail}，` : ''}图片文件也会被移除。`,
+    );
+    if (!confirmed) return;
+  }
 
   const index = shots.value.findIndex((item) => item.id === shot.id);
   const neighborId = shots.value[index + 1]?.id ?? shots.value[index - 1]?.id ?? null;
@@ -840,7 +873,13 @@ async function deleteShot(shot: WorkspaceShot): Promise<void> {
 }
 
 async function deleteStill(still: Still): Promise<void> {
-  if (!window.confirm('确定删除这张静帧吗？图片文件也会被移除。')) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '删除静帧',
+      '确定删除这张静帧吗？图片文件也会被移除。',
+    );
+    if (!confirmed) return;
+  }
   const projectId = still.projectId;
   const shotId = still.shotId ?? selectedId.value;
   busy.value = true;
@@ -1036,8 +1075,13 @@ async function createCustomTag(value: { category: string; name: string }): Promi
 async function handleDeleteTag(tag: Tag): Promise<void> {
   if (tag.builtin) return;
   const usedBy = shots.value.filter((shot) => shot.tagIds.includes(tag.id)).length;
-  const ok = window.confirm(`删除标签「${tag.name}」？将同时从 ${usedBy} 个镜头移除。`);
-  if (!ok) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '删除标签',
+      `删除标签「${tag.name}」？将同时从 ${usedBy} 个镜头移除。`,
+    );
+    if (!confirmed) return;
+  }
 
   if (!demoMode.value) {
     const result = await window.api.tag.delete({ id: tag.id });
@@ -1066,10 +1110,13 @@ async function handleDeleteCategory(category: string): Promise<void> {
       .filter((shot) => shot.tagIds.some((id) => memberIds.has(id)))
       .map((shot) => shot.id),
   );
-  const ok = window.confirm(
-    `删除分类「${category}」？将删除其下 ${members.length} 个标签，并从 ${usedBy.size} 个镜头移除。`,
-  );
-  if (!ok) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '删除分类',
+      `删除分类「${category}」？将删除其下 ${members.length} 个标签，并从 ${usedBy.size} 个镜头移除。`,
+    );
+    if (!confirmed) return;
+  }
 
   if (!demoMode.value) {
     for (const tag of members) {
@@ -1124,7 +1171,10 @@ async function saveTerm(value: { term: string; definition: string; category: str
 }
 
 async function deleteTerm(id: string): Promise<void> {
-  if (!window.confirm('确定删除这条术语吗？')) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete('删除术语', '确定删除这条术语吗？');
+    if (!confirmed) return;
+  }
   termSaving.value = true;
   try {
     const result = await window.api.term.delete({ id });
@@ -2029,6 +2079,9 @@ async function applyPlayerLayer(level: OverlayLayer): Promise<void> {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
+  // S36-1b：删除确认弹窗打开时，全部按键交给 ConfirmDialog（Esc 取消 / Enter 确认），
+  // 避免空格播放、Delete 删除等全局快捷键与弹窗互相干扰。
+  if (confirmState.open) return;
   const target = event.target as HTMLElement | null;
   const tagName = target?.tagName;
   if (
@@ -2594,6 +2647,14 @@ onBeforeUnmount(() => {
       @close="termEditorOpen = false"
       @save="saveTerm"
       @delete="deleteTerm"
+    />
+
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      @confirm="resolveConfirm(true)"
+      @cancel="resolveConfirm(false)"
     />
 
     <SettingsModal

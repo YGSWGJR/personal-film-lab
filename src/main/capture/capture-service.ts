@@ -137,8 +137,11 @@ export class CaptureService {
   private removeFile(filePath: string): void {
     try {
       if (existsSync(filePath)) unlinkSync(filePath);
-    } catch {
-      // 清理失败不覆盖原始领域错误
+    } catch (error) {
+      // 清理失败不覆盖原始领域错误，但要留下路径与原因便于排查（S36-1a）
+      console.warn(
+        `[capture] 临时文件清理失败: ${filePath}: ${(error as Error).message}`,
+      );
     }
   }
 

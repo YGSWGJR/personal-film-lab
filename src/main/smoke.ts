@@ -1,9 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { app, type BrowserWindow } from 'electron';
+import { app, ipcMain, type BrowserWindow } from 'electron';
 import { unzipSync } from 'fflate';
+import { DataError } from '../data/errors';
+import { removeProjectDir, removeProjectFiles } from '../data/paths';
+import { IPC } from '../shared/ipc-channels';
+import { withEnvelope } from '../shared/ipc-result';
+import type { WorkspaceState } from '../shared/types';
 import { resolveDetectFramesDir } from './paths';
 import type { PlayerService } from './player/player-service';
+import { SessionService } from './session/session-service';
 
 interface SmokeDeps {
   getPlayer(): PlayerService | null;
@@ -419,15 +426,130 @@ function deleteUiChecksAssertions(result: Record<string, any>): Record<string, b
     deleteKeyGuard: result.inputGuardOk === true,
     deleteKeyShot: result.deleteKeyOk === true,
     deleteNoOrphans: result.noOrphansOk === true,
+    // S36-1：统一确认弹窗 + 永久删除 + 失败显式报错 + confirmUserContent 设置
+    deleteConfirmDialogShown: result.confirmDialogOk === true,
+    deleteDialogWarningText: result.dialogWarningOk === true,
+    deleteDialogCancelKept: result.dialogCancelOk === true,
+    deleteStillDialogShown: result.stillDialogOk === true,
+    deleteKeyDialogShown: result.deleteKeyDialogShown === true,
+    deleteKeyDialogCancel: result.deleteKeyCancelOk === true,
+    deleteConfirmSettingsSaved: result.confirmOffSaved !== false,
+    deleteConfirmOffNoDialog: result.confirmOffNoDialog !== false,
+    deleteConfirmRestored: result.confirmRestored !== false,
+    deleteSafeFileRemoved: result.safeFileRemoved === true,
+    deleteProjectDirRemoved: result.projectDirRemoved === true,
+    deleteUnsafePathRejected: result.unsafePathRejected === true,
+    deleteUnsafeDirRejected: result.unsafeDirRejected === true,
+    deleteFailedError: result.deleteFailedError === true,
+    deleteMissingProjectError: result.missingProjectErrorOk === true,
+    deleteSettingsConfirmDefault: result.settingsConfirmDefault === true,
+    deleteSettingsRoundtrip: result.settingsRoundtrip !== false,
   };
+}
+
+/**
+ * S36-1 主进程侧删除策略断言（在 smoke 主进程内直接验证 src/data/paths.ts）：
+ * - removeProjectFiles 成功删除项目内文件；越权路径（穿越）抛 DELETE_PATH_UNSAFE；
+ * - 删除失败（目录被当作文件 rm）抛 DELETE_FAILED 而非静默；
+ * - removeProjectDir 删除整个项目目录；非法项目 ID（..）抛 DELETE_PATH_UNSAFE；
+ * 渲染层侧：confirmUserContent 设置往返、删除不存在项目返回 PROJECT_NOT_FOUND 结构化错误。
+ */
+async function runDeletePermanentChecks(
+  win: BrowserWindow,
+  out: Record<string, any>,
+): Promise<void> {
+  const fakeRoot = join(tmpdir(), `dsh-smoke-delete-${Date.now()}`);
+  const projectDir = join(fakeRoot, 'projects', 'smoke-del-proj');
+  try {
+    mkdirSync(join(projectDir, 'stills'), { recursive: true });
+    writeFileSync(join(projectDir, 'stills', 'a.png'), 'smoke');
+
+    removeProjectFiles(fakeRoot, 'smoke-del-proj', ['stills/a.png']);
+    out.safeFileRemoved = !existsSync(join(projectDir, 'stills', 'a.png'));
+
+    try {
+      removeProjectFiles(fakeRoot, 'smoke-del-proj', ['../../evil.txt']);
+      out.unsafePathRejected = false;
+    } catch (error) {
+      out.unsafePathRejected =
+        error instanceof DataError && error.code === 'DELETE_PATH_UNSAFE';
+    }
+
+    try {
+      removeProjectDir(fakeRoot, '..');
+      out.unsafeDirRejected = false;
+    } catch (error) {
+      out.unsafeDirRejected =
+        error instanceof DataError && error.code === 'DELETE_PATH_UNSAFE';
+    }
+
+    try {
+      // stills 是目录：rmSync(force, 非 recursive) 必失败 → 必须抛 DELETE_FAILED 而非静默
+      removeProjectFiles(fakeRoot, 'smoke-del-proj', ['stills']);
+      out.deleteFailedError = false;
+    } catch (error) {
+      out.deleteFailedError =
+        error instanceof DataError && error.code === 'DELETE_FAILED';
+    }
+
+    removeProjectDir(fakeRoot, 'smoke-del-proj');
+    out.projectDirRemoved = !existsSync(projectDir);
+  } catch (error) {
+    out.exception = `permanent-delete main checks: ${String(error)}`;
+  } finally {
+    rmSync(fakeRoot, { recursive: true, force: true });
+  }
+
+  try {
+    const renderer = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        try {
+          const current = await window.api.settings.get();
+          if (current.ok !== true) {
+            out.settingsConfirmDefault = false;
+            out.settingsRoundtrip = false;
+            return out;
+          }
+          out.settingsConfirmDefault = current.data.confirmUserContent === true;
+          if (current.data.environmentOverride === true) {
+            // DSH_DATA_ROOT 锁定模式下 settings.set 被禁用，跳过往返
+            out.settingsRoundtrip = true;
+            return out;
+          }
+          const off = await window.api.settings.set({ ...current.data, confirmUserContent: false });
+          const readOff = await window.api.settings.get();
+          const on = await window.api.settings.set({ ...off.data, confirmUserContent: true });
+          const readOn = await window.api.settings.get();
+          out.settingsRoundtrip = off.ok === true
+            && readOff.ok === true && readOff.data.confirmUserContent === false
+            && on.ok === true
+            && readOn.ok === true && readOn.data.confirmUserContent === true;
+
+          const missing = await window.api.project.delete({ id: 'no-such-smoke-project' });
+          out.missingProjectErrorOk = missing.ok === false
+            && missing.error.code === 'PROJECT_NOT_FOUND';
+        } catch (error) {
+          out.exception = String(error && error.stack ? error.stack : error);
+        }
+        return out;
+      })()
+    `)) as Record<string, any>;
+    Object.assign(out, renderer);
+  } catch (error) {
+    out.exception = `permanent-delete renderer checks: ${String(error)}`;
+  }
 }
 
 async function runDeleteUiChecks(
   win: BrowserWindow,
   videoPath: string,
 ): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  await runDeletePermanentChecks(win, out);
   if (!videoPath || !existsSync(videoPath)) {
-    return { exception: `missing test video: ${videoPath}` };
+    out.exception = `missing test video: ${videoPath}`;
+    return out;
   }
   const fixtureProjectId = process.env['SMOKE_DELETE_PROJECT_ID'] ?? '';
   let setup: Record<string, any>;
@@ -493,10 +615,24 @@ async function runDeleteUiChecks(
     `)) as Record<string, any>;
     if (!setup.ok) return setup;
 
-    await new Promise<void>((resolve) => {
-      win.webContents.once('did-finish-load', () => resolve());
-      win.webContents.reload();
-    });
+    // S36-1 QA 修复：reload 触发渲染层 beforeunload → scheduleWorkspaceSave(true)，
+    // 会以当前 UI 状态（demo 态，projectId=null）覆盖 fixture 刚保存的会话，
+    // 导致重启后恢复进示例模式（loaded=false）。这里临时摘除 session:save handler
+    // 让覆盖保存失败（渲染层 catch 后仅告警），did-finish-load 后恢复等价 handler。
+    const smokeSession = new SessionService();
+    ipcMain.removeHandler(IPC.SESSION_SAVE);
+    try {
+      await new Promise<void>((resolve) => {
+        win.webContents.once('did-finish-load', () => resolve());
+        win.webContents.reload();
+      });
+    } finally {
+      ipcMain.removeHandler(IPC.SESSION_SAVE);
+      ipcMain.handle(
+        IPC.SESSION_SAVE,
+        withEnvelope((state: WorkspaceState): WorkspaceState => smokeSession.save(state)),
+      );
+    }
   }
 
   const result = (await win.webContents.executeJavaScript(`
@@ -525,42 +661,78 @@ async function runDeleteUiChecks(
         }));
         return waitFor(() => document.querySelector('.context-menu'), 3000);
       };
-      const originalConfirm = window.confirm;
+      const clickMenu = (menu, label) => {
+        Array.from(menu?.querySelectorAll('button') || [])
+          .find((button) => String(button.textContent || '').includes(label))
+          ?.click();
+      };
+      const dialog = () => document.querySelector('.confirm-dialog');
+      const dialogButton = (cls) => dialog()?.querySelector('button.' + cls);
+      const shotCount = async () => {
+        const shots = await window.api.shot.list({ projectId });
+        return shots.ok ? shots.data.length : -1;
+      };
+      const pressKey = (key) => window.dispatchEvent(new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      }));
       try {
         out.loaded = Boolean(await waitFor(() =>
           document.querySelectorAll('.shot-row').length === 2
         ));
-        if (!out.loaded) return out;
+        if (!out.loaded) {
+          out.diag = {
+            shotRows: document.querySelectorAll('.shot-row').length,
+            hasShotPanel: Boolean(document.querySelector('.shot-panel')),
+            toast: document.querySelector('.toast')?.textContent ?? null,
+            modal: document.querySelector('.modal-mask')?.textContent?.slice(0, 150) ?? null,
+            shotListText: document.querySelector('.shot-scroll')?.textContent?.slice(0, 80) ?? null,
+            workspace: Boolean(document.querySelector('.workspace')),
+          };
+          return out;
+        }
 
-        window.confirm = () => true;
+        // S36-1b：右键删除镜头 → 统一确认弹窗出现且含不可恢复警示
         const shotMenu = await openMenu('.shot-row');
         out.shotMenuOk = Boolean(shotMenu)
           && String(shotMenu.textContent || '').includes('删除镜头');
-        Array.from(shotMenu?.querySelectorAll('button') || [])
-          .find((button) => String(button.textContent || '').includes('删除镜头'))
-          ?.click();
-        out.shotDeleted = Boolean(await waitFor(async () => {
-          const shots = await window.api.shot.list({ projectId });
-          return shots.ok
-            && shots.data.length === 1
-            && !document.querySelector('.context-menu');
-        }));
+        clickMenu(shotMenu, '删除镜头');
+        out.confirmDialogOk = Boolean(await waitFor(() => dialog()));
+        const warning = String(dialog()?.querySelector('.confirm-dialog-warning')?.textContent || '');
+        out.dialogWarningOk = warning.includes('不可恢复') && warning.includes('不进回收站');
 
-        const remainingShots = await window.api.shot.list({ projectId });
-        out.remainingShotCount = remainingShots.ok ? remainingShots.data.length : -1;
-        const remainingShotId = remainingShots.ok ? remainingShots.data[0]?.id : null;
+        // 取消 → 弹窗关闭且镜头仍在
+        dialogButton('confirm-dialog-cancel')?.click();
+        out.dialogCancelOk = Boolean(await waitFor(() => !dialog()))
+          && (await shotCount()) === 2;
+
+        // 确认删除 → 镜头被永久删除
+        const shotMenu2 = await openMenu('.shot-row');
+        clickMenu(shotMenu2, '删除镜头');
+        await waitFor(() => dialog());
+        dialogButton('confirm-dialog-confirm')?.click();
+        out.shotDeleted = Boolean(await waitFor(async () =>
+          !dialog() && (await shotCount()) === 1
+        ));
+
+        // 右键删除静帧 → 确认弹窗 → 确认删除
         const stillMenu = await openMenu('.still');
         out.stillMenuOk = Boolean(stillMenu)
           && String(stillMenu.textContent || '').includes('删除静帧');
-        Array.from(stillMenu?.querySelectorAll('button') || [])
-          .find((button) => String(button.textContent || '').includes('删除静帧'))
-          ?.click();
+        clickMenu(stillMenu, '删除静帧');
+        out.stillDialogOk = Boolean(await waitFor(() => dialog()));
+        dialogButton('confirm-dialog-confirm')?.click();
+        const remainingShots = await window.api.shot.list({ projectId });
+        out.remainingShotCount = remainingShots.ok ? remainingShots.data.length : -1;
+        const remainingShotId = remainingShots.ok ? remainingShots.data[0]?.id : null;
         out.stillDeleted = Boolean(await waitFor(async () => {
-          if (document.querySelector('.context-menu')) return false;
+          if (dialog() || document.querySelector('.context-menu')) return false;
           const stills = await window.api.still.list({ shotId: remainingShotId });
           return stills.ok && stills.data.length === 0;
         }));
 
+        // 输入框聚焦时 Delete 键不触发删除（守卫保持）
         const textarea = document.querySelector('.note-section textarea');
         textarea?.focus();
         textarea?.dispatchEvent(new KeyboardEvent('keydown', {
@@ -572,18 +744,32 @@ async function runDeleteUiChecks(
         const guardedShots = await window.api.shot.list({ projectId });
         out.inputGuardOk = guardedShots.ok
           && guardedShots.data.length === 1
-          && document.querySelectorAll('.shot-row').length === 1;
+          && document.querySelectorAll('.shot-row').length === 1
+          && !dialog();
 
         textarea?.blur();
+        // Delete 键 → 弹窗 → Esc 取消 → 镜头保留
         window.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'Delete',
           bubbles: true,
           cancelable: true,
         }));
-        out.deleteKeyOk = Boolean(await waitFor(async () => {
-          const shots = await window.api.shot.list({ projectId });
-          return shots.ok && shots.data.length === 0;
+        out.deleteKeyDialogShown = Boolean(await waitFor(() => dialog()));
+        pressKey('Escape');
+        out.deleteKeyCancelOk = Boolean(await waitFor(() => !dialog()))
+          && (await shotCount()) === 1;
+
+        // Delete 键 → 弹窗 → Enter 确认 → 删除
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Delete',
+          bubbles: true,
+          cancelable: true,
         }));
+        await waitFor(() => dialog());
+        pressKey('Enter');
+        out.deleteKeyOk = Boolean(await waitFor(async () =>
+          !dialog() && (await shotCount()) === 0
+        ));
 
         const [shots, stills, notes] = await Promise.all([
           window.api.shot.list({ projectId }),
@@ -593,16 +779,84 @@ async function runDeleteUiChecks(
         out.noOrphansOk = shots.ok && shots.data.length === 0
           && stills.ok && stills.data.length === 0
           && notes.ok && notes.data.length === 0;
+
+        // S36-1b：关闭二次确认后，Delete 键不再弹窗直接删除
+        const current = await window.api.settings.get();
+        if (current.ok === true && current.data.environmentOverride !== true) {
+          const off = await window.api.settings.set({ ...current.data, confirmUserContent: false });
+          out.confirmOffSaved = off.ok === true;
+          window.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Delete',
+            bubbles: true,
+            cancelable: true,
+          }));
+          out.confirmOffNoDialog = Boolean(await waitFor(async () =>
+            !dialog() && (await shotCount()) === 0
+          ));
+          const restore = await window.api.settings.set({
+            ...(off.ok ? off.data : current.data),
+            confirmUserContent: true,
+          });
+          out.confirmRestored = restore.ok === true;
+        } else {
+          // DSH_DATA_ROOT 锁定模式下 settings.set 被禁用，跳过该场景
+          out.confirmOffSaved = true;
+          out.confirmOffNoDialog = true;
+        }
         return out;
       } catch (error) {
         out.exception = String(error && error.stack ? error.stack : error);
         return out;
-      } finally {
-        window.confirm = originalConfirm;
       }
     })()
   `)) as Record<string, any>;
-  return result;
+
+  // S36-1 QA 收尾：避免 fixture 污染用户真实数据根——
+  // 1) 切回示例模式（退出时 captureWorkspaceSession 快照 projectId=null，下次启动干净）；
+  // 2) 删除本次自建的 fixture 项目（SMOKE_DELETE_PROJECT_ID 外部传入的项目不清理）；
+  // 3) 清空会话，防止下次启动弹「上次打开的项目未找到」向导。
+  if (!fixtureProjectId && setup.projectId) {
+    try {
+      await win.webContents.executeJavaScript(`
+        (() => {
+          const toggle = Array.from(document.querySelectorAll('.main-nav .nav-item'))
+            .find((button) => ['示例模式', '最近项目'].includes(String(button.textContent || '').trim()));
+          toggle?.click();
+        })()
+      `);
+    } catch {
+      // 切换失败不阻断清理
+    }
+    try {
+      const cleanup = (await win.webContents.executeJavaScript(
+        `window.api.project.delete({ id: ${JSON.stringify(setup.projectId)} })`,
+      )) as { ok?: boolean; error?: { code?: string; message?: string } };
+      out.fixtureCleaned = cleanup.ok === true;
+      if (cleanup.ok !== true) {
+        out.fixtureCleanError = cleanup.error ?? null;
+      }
+      // 项目删除不级联删全局标签：fixture 自建标签（分类「删除测试」）一并清理
+      const tagCleanup = (await win.webContents.executeJavaScript(`
+        (async () => {
+          const list = await window.api.tag.list({ category: '删除测试' });
+          if (!list.ok) return { ok: false, error: list.error };
+          let removed = 0;
+          for (const tag of list.data.filter((item) => !item.builtin)) {
+            const removedTag = await window.api.tag.delete({ id: tag.id });
+            if (removedTag.ok) removed += 1;
+          }
+          return { ok: true, removed };
+        })()
+      `)) as { ok?: boolean; removed?: number; error?: unknown };
+      out.fixtureTagCleaned = tagCleanup.ok === true;
+      await win.webContents.executeJavaScript('window.api.session.clear()');
+    } catch (error) {
+      out.fixtureCleanError = String(error);
+    }
+  }
+
+  // 合并：out 承载主进程侧永久删除断言，result 承载渲染层 UI 交互断言
+  return { ...out, ...result };
 }
 
 async function runOverlayLayerChecks(win: BrowserWindow): Promise<Record<string, any>> {

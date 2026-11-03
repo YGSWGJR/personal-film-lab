@@ -280,8 +280,11 @@ export class ExportService {
       if (printWindow && !printWindow.isDestroyed()) printWindow.destroy();
       try {
         if (existsSync(tempHtml)) unlinkSync(tempHtml);
-      } catch {
-        // 临时 HTML 清理失败不影响已导出的文件
+      } catch (error) {
+        // 临时 HTML 清理失败不影响已导出的文件，记录路径与原因便于排查（S36-1a）
+        console.warn(
+          `[export] 临时文件清理失败: ${tempHtml}: ${(error as Error).message}`,
+        );
       }
     }
   }

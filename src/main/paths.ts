@@ -22,6 +22,7 @@ export function defaultSettings(): SettingsSetArgs {
     exportSubDir: undefined,
     stillSubDir: undefined,
     proxyTier: '540p',
+    confirmUserContent: true,
   };
 }
 
