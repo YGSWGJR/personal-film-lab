@@ -663,7 +663,17 @@ async function runDeleteUiChecks(
         out.loaded = Boolean(await waitFor(() =>
           document.querySelectorAll('.shot-row').length === 2
         ));
-        if (!out.loaded) return out;
+        if (!out.loaded) {
+          out.diag = {
+            shotRows: document.querySelectorAll('.shot-row').length,
+            hasShotPanel: Boolean(document.querySelector('.shot-panel')),
+            toast: document.querySelector('.toast')?.textContent ?? null,
+            modal: document.querySelector('.modal-mask')?.textContent?.slice(0, 150) ?? null,
+            shotListText: document.querySelector('.shot-scroll')?.textContent?.slice(0, 80) ?? null,
+            workspace: Boolean(document.querySelector('.workspace')),
+          };
+          return out;
+        }
 
         // S36-1b：右键删除镜头 → 统一确认弹窗出现且含不可恢复警示
         const shotMenu = await openMenu('.shot-row');
@@ -782,7 +792,8 @@ async function runDeleteUiChecks(
       }
     })()
   `)) as Record<string, any>;
-  return result;
+  // 合并：out 承载主进程侧永久删除断言，result 承载渲染层 UI 交互断言
+  return { ...out, ...result };
 }
 
 async function runOverlayLayerChecks(win: BrowserWindow): Promise<Record<string, any>> {
