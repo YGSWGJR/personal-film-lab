@@ -12,6 +12,7 @@ import { withEnvelope } from '../shared/ipc-result';
 import type { WorkspaceState } from '../shared/types';
 import { formatTimecodeFF, frameFromMs, frameToMs, parseTimecodeFF } from '../shared/time';
 import type { DetectOptions } from '../shared/types';
+import { PX_PER_SEC_LEVELS, TRACK_HEIGHT_LEVELS, snapToLevel } from '../shared/types';
 import { AiDetectRunner, buildSegments, dedupeSegmentShots } from './ai/ai-detect-runner';
 import { decryptApiKey, encryptApiKey, isEncryptedApiKey } from './ai/credential-store';
 import { MCP_TOOL_NAMES } from './ai/mcp-server';
@@ -81,12 +82,13 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let mcpToolChecks: Record<string, unknown> = {};
   let detectBgChecks: Record<string, unknown> = {};
   let aiProviderChecks: Record<string, unknown> = {};
+  let timelineZoomChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -285,6 +287,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, timelineChecksAssertions(timelineChecks));
     }
 
+    if (process.env['SMOKE_TIMELINE_ZOOM'] === '1') {
+      timelineZoomChecks = await runTimelineZoomChecks(win);
+      Object.assign(checks, timelineZoomChecksAssertions(timelineZoomChecks));
+    }
+
     if (process.env['SMOKE_FRAME'] === '1') {
       frameChecks = await runFrameChecks(win, process.env['SMOKE_VIDEO'] ?? '');
       Object.assign(checks, frameChecksAssertions(frameChecks));
@@ -323,7 +330,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -3422,4 +3429,144 @@ async function runAiProvidersChecks(win: BrowserWindow): Promise<Record<string, 
     out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
   }
   return out;
+}
+
+function timelineZoomChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    zoomSnapPure: result.snap === true,
+    zoomCapsule: result.capsule === true,
+    zoomPopover: result.popover === true,
+    zoomHeightSlider: result.heightSlider === true,
+    zoomDensitySlider: result.densitySlider === true,
+    zoomDirectInput: result.directInput === true,
+    zoomWheel: result.wheel === true,
+    zoomReset: result.reset === true,
+    zoomOutsideClose: result.outsideClose === true,
+    zoomPersist: result.persist === true,
+  };
+}
+
+async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  const out: Record<string, any> = {
+    snap:
+      snapToLevel(50, TRACK_HEIGHT_LEVELS) === 48 &&
+      snapToLevel(200, TRACK_HEIGHT_LEVELS) === 192 &&
+      snapToLevel(120, PX_PER_SEC_LEVELS) === 96 &&
+      snapToLevel(500, PX_PER_SEC_LEVELS) === 384,
+  };
+  const ui = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 5000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const settings = await window.api.settings.get();
+      if (!settings.ok) return { exception: 'settings.get failed' };
+      const originalTimeline = settings.data.timeline ?? { trackHeight: 96, pxPerSecond: 96 };
+      out.originalTimeline = originalTimeline;
+      const setValue = (input, value) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(input, String(value));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const readTimeline = async () => {
+        const current = await window.api.settings.get();
+        return current.ok ? current.data.timeline : null;
+      };
+      try {
+        await sleep(2500);
+        const button = await waitFor(() => document.querySelector('.zoom-btn'), 15000);
+        out.capsule = Boolean(button);
+        if (!button) return out;
+        button.click();
+        const pop = await waitFor(() => document.querySelector('.zoom-pop'), 5000);
+        out.popover = Boolean(pop) && getComputedStyle(pop).display !== 'none';
+        if (!pop) return out;
+        const ranges = pop.querySelectorAll('.zoom-row input[type="range"]');
+        const numbers = pop.querySelectorAll('.zoom-num');
+        out.rangeCount = ranges.length;
+        if (ranges.length < 2 || numbers.length < 2) return out;
+
+        setValue(ranges[0], 200);
+        await sleep(250);
+        out.heightButtonText1 = document.querySelector('.zoom-btn')?.textContent?.trim() ?? null;
+        out.heightRange1 = ranges[0].value;
+        out.timeline1 = await readTimeline();
+        out.uiState1 = window.__S36_TIMELINE_UI_STATE__?.() ?? null;
+        out.toast1 = document.querySelector('.toast')?.textContent?.trim() ?? null;
+        await waitFor(async () => (await readTimeline())?.trackHeight === 192, 4000);
+        out.heightSlider = (await readTimeline())?.trackHeight === 192;
+        out.heightButtonText2 = document.querySelector('.zoom-btn')?.textContent?.trim() ?? null;
+        out.timeline2 = await readTimeline();
+
+        setValue(ranges[1], 500);
+        await sleep(250);
+        out.densityButtonText1 = document.querySelector('.zoom-btn')?.textContent?.trim() ?? null;
+        out.densityRange1 = ranges[1].value;
+        out.timeline3 = await readTimeline();
+        out.uiState3 = window.__S36_TIMELINE_UI_STATE__?.() ?? null;
+        out.toast3 = document.querySelector('.toast')?.textContent?.trim() ?? null;
+        await waitFor(async () => (await readTimeline())?.pxPerSecond === 384, 4000);
+        out.densitySlider = (await readTimeline())?.pxPerSecond === 384;
+        out.densityButtonText2 = document.querySelector('.zoom-btn')?.textContent?.trim() ?? null;
+        out.timeline4 = await readTimeline();
+        out.persist = out.heightSlider === true && out.densitySlider === true;
+
+        const heightNumber = numbers[0];
+        heightNumber.focus();
+        setValue(heightNumber, 50);
+        heightNumber.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await waitFor(async () => (await readTimeline())?.trackHeight === 48, 4000);
+        out.directInput = (await readTimeline())?.trackHeight === 48;
+
+        const heightRow = pop.querySelectorAll('.zoom-row')[0];
+        heightRow?.dispatchEvent(
+          new WheelEvent('wheel', { deltaY: -100, bubbles: true, cancelable: true }),
+        );
+        await waitFor(async () => (await readTimeline())?.trackHeight === 96, 4000);
+        const wheelUp = (await readTimeline())?.trackHeight === 96;
+        heightRow?.dispatchEvent(
+          new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }),
+        );
+        await waitFor(async () => (await readTimeline())?.trackHeight === 48, 4000);
+        const wheelDown = (await readTimeline())?.trackHeight === 48;
+        out.wheel = wheelUp === true && wheelDown === true;
+
+        document.querySelector('.zoom-reset')?.click();
+        await waitFor(async () => {
+          const timeline = await readTimeline();
+          return timeline?.trackHeight === 96 && timeline?.pxPerSecond === 96;
+        }, 4000);
+        const resetTimeline = await readTimeline();
+        out.reset = resetTimeline?.trackHeight === 96 && resetTimeline?.pxPerSecond === 96;
+
+        document.querySelector('.tracks')?.dispatchEvent(
+          new PointerEvent('pointerdown', { bubbles: true }),
+        );
+        await sleep(150);
+        out.outsideClose = getComputedStyle(pop).display === 'none';
+        return out;
+      } finally {
+        try {
+          // 等 App 的 400ms 防抖写入落定，再做恢复，避免恢复被迟到的写入覆盖。
+          await sleep(700);
+          const current = await window.api.settings.get();
+          if (current.ok) {
+            await window.api.settings.set({ ...current.data, timeline: originalTimeline });
+          }
+        } catch {
+          // restore best effort
+        }
+      }
+    })()
+  `)) as Record<string, any>;
+  return { ...out, ...ui };
 }

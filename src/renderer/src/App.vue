@@ -801,10 +801,17 @@ function applyTimelineSettings(next: TimelineSettings): void {
   timelinePersistTimer = setTimeout(() => void persistTimelineSettings(), 400);
 }
 
+/** IPC 结构化克隆不接受 Vue 响应式 Proxy，设置落盘前统一转普通对象。 */
+function plainSettings<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 async function persistTimelineSettings(): Promise<void> {
   const current = settings.value;
   if (!current || current.environmentOverride) return;
-  const result = await window.api.settings.set({ ...current, timeline: timelineSettings.value });
+  const result = await window.api.settings.set(
+    plainSettings({ ...current, timeline: timelineSettings.value }),
+  );
   if (result.ok) {
     settings.value = result.data;
   } else {
@@ -2052,7 +2059,7 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
   settingsError.value = null;
   try {
     if (willChangeDataRoot && detecting.value) await cancelDetection();
-    const result = await window.api.settings.set(value);
+    const result = await window.api.settings.set(plainSettings(value));
     if (!result.ok) {
       settingsError.value = result.error.message;
       showToast(result.error.message, 'error', result.error.code);
@@ -2084,10 +2091,12 @@ async function switchAiProvider(id: string): Promise<void> {
   if (!current?.ai) return;
   const providers = current.ai.providers ?? [];
   if (id && !providers.some((provider) => provider.id === id)) return;
-  const result = await window.api.settings.set({
-    ...current,
-    ai: { ...current.ai, activeProviderId: id },
-  });
+  const result = await window.api.settings.set(
+    plainSettings({
+      ...current,
+      ai: { ...current.ai, activeProviderId: id },
+    }),
+  );
   if (!result.ok) {
     showToast(result.error.message, 'error', result.error.code);
     return;
@@ -2228,6 +2237,13 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
   openResult: () => viewDetectionResult(),
   cancel: () => cancelDetection(),
 };
+
+(window as unknown as Record<string, unknown>).__S36_TIMELINE_UI_STATE__ = () => ({
+  settingsLoaded: Boolean(settings.value),
+  environmentOverride: settings.value?.environmentOverride ?? null,
+  timeline: { ...timelineSettings.value },
+  settingsTimeline: settings.value?.timeline ? { ...settings.value.timeline } : null,
+});
 
 watch(
   [
