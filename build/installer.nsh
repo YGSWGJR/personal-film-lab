@@ -11,7 +11,7 @@
     SetOutPath "$PLUGINSDIR"
     File "${BUILD_RESOURCES_DIR}\7zr.exe"
     DetailPrint "正在安装本地 AI 运行环境与 Qwen3-VL 模型..."
-    nsExec::ExecToLog '"$PLUGINSDIR\7zr.exe" x "$EXEDIR\个人拉片工作台-0.1.9-local-ai.7z" -o"$INSTDIR\resources" -y -aoa'
+    nsExec::ExecToLog '"$PLUGINSDIR\7zr.exe" x "$EXEDIR\个人拉片工作台-0.1.9-local-ai.7z" -o"$INSTDIR\resources" -y -aoa -bd -bb0'
     Pop $0
     StrCmp $0 "0" local_ai_installed
     MessageBox MB_ICONSTOP|MB_OK "本地 AI 资源包解压失败（退出码：$0）。$\r$\n请确认安装目录有足够空间，并重新运行安装程序。"
