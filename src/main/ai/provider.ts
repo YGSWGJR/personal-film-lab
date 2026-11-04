@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
+import { net } from 'electron';
 import type {
   AiListModelsResult,
   AiProviderProbeResult,
@@ -26,6 +27,8 @@ export class ProviderError extends Error {
 
 export interface ShotDetectionProvider {
   readonly id: string;
+  /** 为 true 时 runner 会先把本地视频切成低码率时间片。 */
+  readonly requiresVideoBytes?: boolean;
   probeCapability(): Promise<AiProviderProbeResult>;
   listModels(): Promise<AiListModelsResult>;
   analyzeSegment(input: ShotDetectionSegment, signal: AbortSignal): Promise<ShotDetectionResult>;
@@ -42,6 +45,7 @@ interface OpenAiCompatOptions {
 
 const VIDEO_MODEL_PATTERN =
   /(video|omni|gpt-4o|gpt-4\.1|gemini|qwen[-_.]?vl|qwen[-_.]?omni|claude-3|claude-4|vision|doubao[-_.]?seed|doubao)/iu;
+const MAX_INLINE_VIDEO_BYTES = 64 * 1024 * 1024;
 
 /** S36-7：显式模型/探测共用原生视频能力判定（含豆包）。 */
 export function isNativeVideoModel(model: string): boolean {
@@ -62,6 +66,7 @@ const CONTRACT_PROMPT = [
 
 export class OpenAiCompatProvider implements ShotDetectionProvider {
   readonly id = 'openai-compatible';
+  readonly requiresVideoBytes = true;
   private usage: ShotDetectionUsage = { seconds: 0, tokens: 0, cost: 0 };
   private aborted = false;
   private readonly baseUrl: string;
@@ -96,7 +101,7 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
       };
     }
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
+      const response = await net.fetch(`${this.baseUrl}/models`, {
         method: 'GET',
         headers: { authorization: `Bearer ${this.apiKey}` },
         signal: AbortSignal.timeout(Math.min(this.timeoutMs, 20_000)),
@@ -143,7 +148,7 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
         model: this.model,
         error: {
           code: 'PROVIDER_PROBE_FAILED',
-          message: error instanceof Error ? error.message : String(error),
+          message: describeFetchError(error),
         },
       };
     }
@@ -163,7 +168,7 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
       };
     }
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
+      const response = await net.fetch(`${this.baseUrl}/models`, {
         method: 'GET',
         headers: { authorization: `Bearer ${this.apiKey}` },
         signal: AbortSignal.timeout(Math.min(this.timeoutMs, 20_000)),
@@ -193,7 +198,7 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
         ok: false,
         error: {
           code: 'PROVIDER_MODELS_FAILED',
-          message: error instanceof Error ? error.message : String(error),
+          message: describeFetchError(error),
         },
       };
     }
@@ -222,15 +227,29 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
         },
       ],
     };
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${this.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: combinedSignal(signal, this.timeoutMs),
-    });
+    let response: Response;
+    try {
+      response = await net.fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: combinedSignal(signal, this.timeoutMs),
+      });
+    } catch (error) {
+      if (this.aborted || signal.aborted) {
+        throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
+      }
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        throw new ProviderError(
+          'PROVIDER_REQUEST_TIMEOUT',
+          `模型请求超时（${Math.round(this.timeoutMs / 1000)} 秒）`,
+        );
+      }
+      throw new ProviderError('PROVIDER_REQUEST_FAILED', `模型请求失败：${describeFetchError(error)}`);
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       throw new ProviderError('PROVIDER_HTTP', `识别请求失败：HTTP ${response.status} ${text.slice(0, 300)}`);
@@ -247,7 +266,8 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
     } catch (error) {
       throw new ProviderError('CONTRACT_JSON_INVALID', `模型返回不是合法 JSON：${(error as Error).message}`);
     }
-    const result = shotDetectionResultSchema.safeParse(parsed);
+    const normalized = normalizeRelativeSegmentTimes(parsed, input.startMs);
+    const result = shotDetectionResultSchema.safeParse(normalized);
     if (!result.success) {
       throw new ProviderError('CONTRACT_INVALID', '模型返回未通过 shot-detection 契约校验', {
         issues: result.error.issues.slice(0, 10),
@@ -286,6 +306,7 @@ interface MockProviderOptions {
 /** 确定性 mock provider：供 SMOKE_AI 与无网络自测使用。 */
 export class MockProvider implements ShotDetectionProvider {
   readonly id = 'mock-video';
+  readonly requiresVideoBytes = false;
   private usage: ShotDetectionUsage = { seconds: 0, tokens: 0, cost: 0 };
   private aborted = false;
   private failedOnce = false;
@@ -401,11 +422,54 @@ export function resolveActiveProvider(settings: AiSettings | undefined): AiProvi
 
 function buildVideoDataUrl(videoPath: string): string {
   if (/^https?:\/\//iu.test(videoPath)) return videoPath;
+  if (!existsSync(videoPath)) {
+    throw new ProviderError('PROVIDER_VIDEO_NOT_FOUND', `AI 视频时间片不存在：${videoPath}`);
+  }
+  const size = statSync(videoPath).size;
+  if (size > MAX_INLINE_VIDEO_BYTES) {
+    throw new ProviderError(
+      'PROVIDER_VIDEO_TOO_LARGE',
+      `AI 视频时间片过大（${(size / 1024 / 1024).toFixed(1)} MB），上限 ${MAX_INLINE_VIDEO_BYTES / 1024 / 1024} MB`,
+    );
+  }
   const buffer = readFileSync(videoPath);
   const ext = extname(videoPath).toLowerCase();
   const mime =
     ext === '.mov' ? 'video/quicktime' : ext === '.webm' ? 'video/webm' : ext === '.mkv' ? 'video/x-matroska' : 'video/mp4';
   return `data:${mime};base64,${buffer.toString('base64')}`;
+}
+
+/**
+ * 多数兼容接口会对“仅包含当前分段的视频”返回从 0 开始的相对时间。
+ * 若检测到相对时间，统一平移到整部影片的绝对时间轴。
+ */
+function normalizeRelativeSegmentTimes(value: unknown, segmentStartMs: number): unknown {
+  if (!value || typeof value !== 'object') return value;
+  const result = value as {
+    segment?: { startMs?: unknown; endMs?: unknown };
+    shots?: Array<{ startMs?: unknown; endMs?: unknown; representativeTimeMs?: unknown }>;
+  };
+  if (!Array.isArray(result.shots) || result.shots.length === 0 || segmentStartMs <= 0) return value;
+  const starts = result.shots
+    .map((shot) => Number(shot.startMs))
+    .filter((start) => Number.isFinite(start));
+  if (starts.length === 0) return value;
+  const firstStart = Math.min(...starts);
+  if (firstStart >= segmentStartMs - 1000) return value;
+  const offset = segmentStartMs;
+  for (const shot of result.shots) {
+    for (const key of ['startMs', 'endMs', 'representativeTimeMs'] as const) {
+      const current = Number(shot[key]);
+      if (Number.isFinite(current)) shot[key] = current + offset;
+    }
+  }
+  if (result.segment) {
+    const start = Number(result.segment.startMs);
+    const end = Number(result.segment.endMs);
+    if (Number.isFinite(start)) result.segment.startMs = start + offset;
+    if (Number.isFinite(end)) result.segment.endMs = end + offset;
+  }
+  return result;
 }
 
 function extractMessageText(content: string | Array<{ type?: string; text?: string }> | undefined): string {
@@ -429,4 +493,16 @@ function combinedSignal(signal: AbortSignal, timeoutMs: number): AbortSignal {
   const timeout = AbortSignal.timeout(Math.max(1, timeoutMs));
   if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, timeout]);
   return signal.aborted ? signal : timeout;
+}
+
+function describeFetchError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    const code = (cause as Error & { code?: unknown }).code;
+    return [error.message, typeof code === 'string' ? code : '', cause.message]
+      .filter(Boolean)
+      .join(' · ');
+  }
+  return error.message;
 }

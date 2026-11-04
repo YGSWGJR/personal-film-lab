@@ -98,6 +98,15 @@ interface TranscodeHwaccelAttempt {
   downloadCudaFrames: boolean;
 }
 
+interface CreateAiSegmentArgs {
+  path: string;
+  startMs: number;
+  endMs: number;
+  outputPath: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 /**
  * MediaService（docs/S01 §5.2）：
  * - probe：ffprobe JSON 元信息（时长 / 分辨率 / 帧率 / 编码 / 大小 / 音轨）；
@@ -480,6 +489,102 @@ export class MediaService {
     } finally {
       this.jobs.delete(jobId);
     }
+  }
+
+  /**
+   * 为 AI 原生视频识别生成低码率时间片，避免把整部 4K 原片或完整代理读入内存。
+   * 时间片只用于请求传输；识别结果仍使用相对整部影片的毫秒时间戳。
+   */
+  async createAiSegment(args: CreateAiSegmentArgs): Promise<{ outputPath: string; sizeBytes: number }> {
+    const inputPath = this.validateInput(args.path);
+    const outputPath = this.validateOutputPath(args.outputPath);
+    this.assertNotSameFile(inputPath, outputPath);
+    const startMs = Math.max(0, Math.round(args.startMs));
+    const endMs = Math.max(startMs + 1, Math.round(args.endMs));
+    const durationSeconds = ((endMs - startMs) / 1000).toFixed(3);
+    const startSeconds = (startMs / 1000).toFixed(3);
+    const { ffmpeg } = await this.ensureReady();
+    mkdirSync(dirname(outputPath), { recursive: true });
+    this.removeQuietly(outputPath);
+
+    const ffArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-y',
+      '-ss',
+      startSeconds,
+      '-i',
+      inputPath,
+      '-t',
+      durationSeconds,
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a:0?',
+      '-vf',
+      'scale=640:-2:force_original_aspect_ratio=decrease,setsar=1',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '31',
+      '-maxrate',
+      '420k',
+      '-bufsize',
+      '840k',
+      '-g',
+      '48',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '64k',
+      '-ac',
+      '1',
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ];
+    const result = await runProcess({
+      command: ffmpeg,
+      args: ffArgs,
+      timeoutMs: args.timeoutMs ?? 10 * 60_000,
+      signal: args.signal,
+    });
+
+    if (result.timedOut) {
+      this.removeQuietly(outputPath);
+      throw new MediaError('AI_SEGMENT_TIMEOUT', 'AI 时间片生成超时', {
+        ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+        inputPath,
+        outputPath,
+      });
+    }
+    if (result.aborted) {
+      this.removeQuietly(outputPath);
+      throw new MediaError('CANCELLED', 'AI 时间片生成已取消', {
+        ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+        inputPath,
+        outputPath,
+      });
+    }
+    if (result.exitCode !== 0 || !existsSync(outputPath)) {
+      this.removeQuietly(outputPath);
+      throw new MediaError(
+        'AI_SEGMENT_FAILED',
+        `AI 时间片生成失败：${this.stderrSummary(result.stderr) || `ffmpeg exit ${result.exitCode}`}`,
+        {
+          ...diagnosticsOf(formatCommand(ffmpeg, ffArgs), result),
+          inputPath,
+          outputPath,
+        },
+      );
+    }
+    return { outputPath, sizeBytes: statSync(outputPath).size };
   }
 
   transcodeProxy(args: TranscodeProxyArgs): Promise<TranscodeProxyResult> {

@@ -65,15 +65,19 @@ const playheadPercent = computed(() =>
   clampPercent(((props.currentTimeMs - viewStartMs.value) / visibleDurationMs.value) * 100),
 );
 const audioHeight = computed(() =>
-  Math.max(48, Math.min(96, Math.round(props.trackHeight * 0.7))),
+  Math.max(1, Math.min(96, Math.round(props.trackHeight * 0.7))),
 );
 const densityLabel = computed(() => `${props.pxPerSecond} px/s`);
 const heightLabel = computed(() => `${props.trackHeight}px`);
+const compactHead = computed(() => props.trackHeight <= 48);
 const mediaLabel = computed(() => props.mediaLabel?.trim() || '影片原声');
 const durationLabel = computed(() => formatDuration(props.durationMs));
 const timelineGridStyle = computed(() => ({
   '--second-px': `${Math.max(8, props.pxPerSecond)}px`,
 }));
+const navigatorMaxMs = computed(() => Math.max(0, Math.round(maxViewStartMs.value)));
+const navigatorValueMs = computed(() => Math.round(viewStartMs.value));
+const navigatorDisabled = computed(() => navigatorMaxMs.value <= 0);
 const selectionRange = computed(() => {
   if (props.inPointMs === null || props.outPointMs === null) return null;
   const start = Math.min(props.inPointMs, props.outPointMs);
@@ -386,6 +390,11 @@ function onRulerWheel(event: WheelEvent): void {
   panView(event);
 }
 
+function onNavigatorInput(event: Event): void {
+  if (navigatorDisabled.value) return;
+  viewStartMs.value = clampViewStart(Number((event.target as HTMLInputElement).value));
+}
+
 function onTracksWheel(event: WheelEvent): void {
   if (event.ctrlKey || event.metaKey) {
     event.preventDefault();
@@ -649,7 +658,7 @@ onBeforeUnmount(() => {
               <span>轨道高度</span>
               <input
                 type="range"
-                min="48"
+                min="1"
                 max="240"
                 step="1"
                 :value="trackHeight"
@@ -660,7 +669,7 @@ onBeforeUnmount(() => {
                 class="zoom-num"
                 v-model="zoomHeightDraft"
                 type="number"
-                min="48"
+                min="1"
                 max="240"
                 @focus="beginHeightInput"
                 @keydown.enter.prevent="commitHeightInput"
@@ -699,9 +708,29 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div class="navigator-row" aria-label="时间线区域导航">
+      <span class="navigator-label">导航</span>
+      <div class="navigator-track">
+        <input
+          class="timeline-navigator-slider"
+          type="range"
+          min="0"
+          :max="Math.max(1, navigatorMaxMs)"
+          step="1"
+          :value="navigatorValueMs"
+          :disabled="navigatorDisabled"
+          :title="navigatorDisabled ? '当前缩放已显示全片' : '拖到任意位置快速跳转时间线视图'"
+          @input="onNavigatorInput"
+        />
+        <span class="navigator-range-label">
+          {{ navigatorDisabled ? '全片' : `${formatShortClock(viewStartMs)} – ${formatShortClock(viewEndMs)}` }}
+        </span>
+      </div>
+    </div>
+
     <div class="tracks" :style="timelineGridStyle" @wheel="onTracksWheel">
       <div class="track-row track-row-v2" :class="{ 'track-hidden': !v2Visible }">
-        <div class="track-head">
+        <div class="track-head" :class="{ compact: compactHead }">
           <div class="head-topline">
             <span class="track-badge video-badge">V2</span>
             <div class="head-actions">
@@ -753,7 +782,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="track-row track-row-v1" :class="{ 'track-hidden': !v1Visible }">
-        <div class="track-head">
+        <div class="track-head" :class="{ compact: compactHead }">
           <div class="head-topline">
             <span class="track-badge video-badge">V1</span>
             <div class="head-actions">
@@ -828,7 +857,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="track-row track-row-a1" :class="{ 'track-muted': audioMuted }">
-        <div class="track-head audio-head">
+        <div class="track-head audio-head" :class="{ compact: compactHead }">
           <div class="head-topline">
             <span class="track-badge audio-badge">A1</span>
             <div class="head-actions audio-actions">
@@ -961,7 +990,7 @@ onBeforeUnmount(() => {
 .track-container {
   position: relative;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   cursor: crosshair;
 }
 
@@ -991,6 +1020,8 @@ onBeforeUnmount(() => {
 }
 
 .tracks {
+  position: relative;
+  z-index: 1;
   display: flex;
   max-height: min(58vh, 620px);
   flex-direction: column;
@@ -1004,22 +1035,25 @@ onBeforeUnmount(() => {
 }
 
 .track-row-v2 {
-  min-height: var(--track-height);
+  height: var(--track-height);
 }
 
 .track-row-v1 {
-  min-height: var(--track-height);
+  height: var(--track-height);
 }
 
 .track-row-a1 {
-  min-height: var(--audio-height);
+  height: var(--audio-height);
 }
 
 .track-head {
   display: flex;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   justify-content: center;
+  overflow: hidden;
   gap: 3px;
   padding: 7px 11px;
   border-right: 1px solid rgba(148, 163, 184, 0.16);
@@ -1041,6 +1075,42 @@ onBeforeUnmount(() => {
   font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.track-head.compact {
+  gap: 0;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.track-head.compact .head-topline {
+  min-height: 16px;
+}
+
+.track-head.compact .track-badge {
+  min-width: 24px;
+  height: 16px;
+  font-size: 8px;
+}
+
+.track-head.compact .head-control {
+  width: 16px;
+  height: 16px;
+  font-size: 9px;
+}
+
+.track-head.compact strong {
+  font-size: 9px;
+  line-height: 11px;
+}
+
+.track-head.compact small {
+  font-size: 7px;
+  line-height: 9px;
+}
+
+.audio-head.compact small {
+  display: none;
 }
 
 .head-topline {
@@ -1135,19 +1205,19 @@ onBeforeUnmount(() => {
 }
 
 .v2-lane {
-  height: var(--track-height);
+  height: 100%;
   padding: 4px 0;
   background-color: #101923;
 }
 
 .v1-lane {
-  height: var(--track-height);
+  height: 100%;
   padding: 4px 0;
   background-color: #111923;
 }
 
 .a1-lane {
-  height: var(--audio-height);
+  height: 100%;
   padding: 4px 0;
   background-color: #101b18;
 }
@@ -1488,7 +1558,7 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 4px;
   right: 7px;
-  z-index: 40;
+  z-index: 80;
 }
 
 .zoom-btn {
@@ -1521,7 +1591,7 @@ onBeforeUnmount(() => {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 60;
+  z-index: 90;
   display: flex;
   width: 280px;
   flex-direction: column;
@@ -1591,6 +1661,57 @@ onBeforeUnmount(() => {
   font-size: 8px;
 }
 
+.navigator-row {
+  display: grid;
+  height: 24px;
+  grid-template-columns: clamp(146px, 20vw, 232px) minmax(0, 1fr);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: #0e1620;
+}
+
+.navigator-label {
+  display: flex;
+  align-items: center;
+  padding-left: 15px;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  color: #5e7186;
+  font-size: 8px;
+  letter-spacing: 0.6px;
+}
+
+.navigator-track {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.timeline-navigator-slider {
+  width: 100%;
+  height: 14px;
+  margin: 0;
+  accent-color: #4b95e8;
+  cursor: ew-resize;
+}
+
+.timeline-navigator-slider:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.navigator-range-label {
+  position: absolute;
+  right: 13px;
+  bottom: -1px;
+  padding: 0 3px;
+  background: #0e1620;
+  color: #5e7186;
+  font-family: var(--mono);
+  font-size: 7px;
+  pointer-events: none;
+}
+
 @keyframes audio-pulse {
   50% {
     opacity: 0.35;
@@ -1603,7 +1724,8 @@ onBeforeUnmount(() => {
   }
 
   .ruler-row,
-  .track-row {
+  .track-row,
+  .navigator-row {
     grid-template-columns: 132px minmax(0, 1fr);
   }
 

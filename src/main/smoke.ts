@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { app, ipcMain, type BrowserWindow } from 'electron';
+import { app, ipcMain, net, type BrowserWindow } from 'electron';
 import { unzipSync } from 'fflate';
 import type { DataLayer } from '../data/db';
 import { DataError } from '../data/errors';
@@ -20,6 +20,7 @@ import {
   isNativeVideoModel,
   MockProvider,
   OpenAiCompatProvider,
+  createProviderFromSettings,
   resolveActiveProvider,
 } from './ai/provider';
 import type { DetectService } from './detect/detect-service';
@@ -47,7 +48,7 @@ interface RendererState {
   error: string | null;
 }
 
-const SMOKE_TIMEOUT_MS = 60_000;
+const SMOKE_TIMEOUT_MS = Number(process.env['SMOKE_TIMEOUT_MS'] ?? '60000') || 60_000;
 const HOLD_MS = Number(process.env['SMOKE_HOLD_MS'] ?? '0');
 
 /**
@@ -82,16 +83,20 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let mcpToolChecks: Record<string, unknown> = {};
   let detectBgChecks: Record<string, unknown> = {};
   let aiProviderChecks: Record<string, unknown> = {};
+  let aiLiveProbeChecks: Record<string, unknown> = {};
+  let aiLiveCallChecks: Record<string, unknown> = {};
+  let aiLiveTextChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
+  let aiSegmentChecks: Record<string, unknown> = {};
   let opencvFrameChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -330,6 +335,39 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, aiProviderChecksAssertions(aiProviderChecks));
     }
 
+    if (process.env['SMOKE_AI_LIVE_PROBE'] === '1') {
+      aiLiveProbeChecks = await runAiLiveProbeChecks(win);
+      Object.assign(checks, {
+        aiLiveProbe: aiLiveProbeChecks.ok === true,
+        aiLiveNativeVideo: aiLiveProbeChecks.supportsNativeVideo === true,
+      });
+    }
+
+    if (process.env['SMOKE_AI_LIVE_CALL'] === '1') {
+      aiLiveCallChecks = await runAiLiveCallChecks(
+        win,
+        deps,
+        process.env['SMOKE_AI_LIVE_VIDEO'] ?? process.env['SMOKE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, {
+        aiLiveCall: aiLiveCallChecks.ok === true,
+        aiLiveCallShots: Number(aiLiveCallChecks.shots ?? 0) > 0,
+      });
+    }
+
+    if (process.env['SMOKE_AI_LIVE_TEXT'] === '1') {
+      aiLiveTextChecks = await runAiLiveTextChecks(win);
+      Object.assign(checks, { aiLiveText: aiLiveTextChecks.ok === true });
+    }
+
+    if (process.env['SMOKE_AI_SEGMENT'] === '1') {
+      aiSegmentChecks = await runAiSegmentChecks(
+        deps,
+        process.env['SMOKE_AI_SEGMENT_VIDEO'] ?? process.env['SMOKE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, aiSegmentChecksAssertions(aiSegmentChecks));
+    }
+
     if (process.env['SMOKE_OPENCV_FRAMES'] === '1') {
       opencvFrameChecks = await runOpenCvFrameChecks(
         win,
@@ -352,7 +390,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -3376,6 +3414,127 @@ function aiProviderChecksAssertions(result: Record<string, any>): Record<string,
   };
 }
 
+async function runAiLiveProbeChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  try {
+    const settings = (await win.webContents.executeJavaScript(
+      'window.api.settings.get()',
+    )) as { ok: boolean; data?: any };
+    if (!settings.ok || !settings.data?.ai) return { ok: false, error: 'settings unavailable' };
+    const probe = await createProviderFromSettings(settings.data.ai).probeCapability();
+    return {
+      ok: probe.ok === true,
+      supportsNativeVideo: probe.supportsNativeVideo === true,
+      provider: probe.provider,
+      model: probe.model,
+      error: probe.error,
+    };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+async function runAiLiveCallChecks(
+  win: BrowserWindow,
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  const media = deps.getMedia?.() ?? null;
+  if (!videoPath || !data || !media) return { skipped: true };
+  const settings = (await win.webContents.executeJavaScript(
+    'window.api.settings.get()',
+  )) as { ok: boolean; data?: any };
+  if (!settings.ok || !settings.data?.ai) return { ok: false, error: 'settings unavailable' };
+  const active = resolveActiveProvider(settings.data.ai);
+  if (!active?.baseUrl || !active.apiKey) return { ok: false, error: 'provider unavailable' };
+  const project = data.projects.create({
+    name: `S37 Live AI ${Date.now()}`,
+    source: { type: 'local', path: videoPath },
+    media: {
+      filename: 'ai-live-smoke.mp4',
+      proxyPath: videoPath,
+      durationMs: 8000,
+      fps: 500 / 21,
+      width: 640,
+      height: 360,
+    },
+  });
+  try {
+    const result = await new AiDetectRunner(data, media).run({
+      project,
+      provider: new OpenAiCompatProvider({
+        baseUrl: active.baseUrl,
+        apiKey: decryptApiKey(active.apiKey),
+        model: active.model,
+        timeoutMs: 45_000,
+      }),
+      signal: new AbortController().signal,
+      options: { segmentSeconds: 30, segmentOverlapSeconds: 5, maxRetriesPerSegment: 0 },
+      resume: false,
+    });
+    return {
+      ok: result.status === 'done',
+      status: result.status,
+      shots: result.result.shots.length,
+      segments: result.segmentsTotal,
+      usage: result.usage,
+      error: result.error,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: String(error instanceof Error ? error.stack ?? error.message : error),
+    };
+  } finally {
+    try {
+      data.projects.delete(project.id);
+      rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.json`), { force: true });
+      rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.log`), { force: true });
+      rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+}
+
+async function runAiLiveTextChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  try {
+    const settings = (await win.webContents.executeJavaScript(
+      'window.api.settings.get()',
+    )) as { ok: boolean; data?: any };
+    if (!settings.ok || !settings.data?.ai) return { ok: false, error: 'settings unavailable' };
+    const active = resolveActiveProvider(settings.data.ai);
+    if (!active?.baseUrl || !active.apiKey) {
+      return { ok: false, error: 'provider unavailable' };
+    }
+    const response = await net.fetch(`${active.baseUrl.replace(/\/+$/u, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${decryptApiKey(active.apiKey)}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: active.model,
+        messages: [{ role: 'user', content: '只回复 OK' }],
+        max_tokens: 8,
+        temperature: 0,
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    const text = await response.text();
+    return {
+      ok: response.ok,
+      status: response.status,
+      response: text.slice(0, 500),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: String(error instanceof Error ? error.stack ?? error.message : error),
+    };
+  }
+}
+
 async function runAiProvidersChecks(win: BrowserWindow): Promise<Record<string, any>> {
   const out: Record<string, any> = {};
   try {
@@ -3642,6 +3801,8 @@ function timelineZoomChecksAssertions(result: Record<string, any>): Record<strin
     zoomCapsule: result.capsule === true,
     zoomPopover: result.popover === true,
     zoomHeightSlider: result.heightSlider === true,
+    zoomMinHeight: result.minHeight === true,
+    zoomMinCollapsed: Number(result.minHeightRowPx ?? 99) <= 2,
     zoomDensitySlider: result.densitySlider === true,
     zoomDirectInput: result.directInput === true,
     zoomWheel: result.wheel === true,
@@ -3660,6 +3821,8 @@ function nleTrackChecksAssertions(result: Record<string, any>): Record<string, b
     nleV2Visibility: result.v2Visibility === true,
     nleAudioMS: result.audioMute === true && result.audioSolo === true,
     nleZoomPreserved: result.zoom === true,
+    nleZoomUnclipped: result.zoomUnclipped === true,
+    nleNavigator: result.navigator === true && result.navigatorMoved === true,
     nleRestoreWorkspace: result.restoredWorkspace === true,
   };
 }
@@ -3736,11 +3899,37 @@ async function runNleTrackChecks(win: BrowserWindow): Promise<Record<string, any
         out.audioSolo = audioControls[1]?.getAttribute('aria-pressed') === 'true'
           && timeline.querySelector('.a1-lane')?.classList.contains('solo');
 
+        const navigator = timeline.querySelector('.timeline-navigator-slider');
+        const navigatorLabel = timeline.querySelector('.navigator-range-label');
+        const navigatorBefore = String(navigatorLabel?.textContent || '').trim();
+        out.navigator = Boolean(navigator) && Number(navigator?.max || 0) > 0;
+        if (navigator) {
+          const target = Math.round(Number(navigator.max) / 2);
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+            ?.set?.call(navigator, String(target));
+          navigator.dispatchEvent(new Event('input', { bubbles: true }));
+          await sleep(120);
+          out.navigatorMoved = Number(navigator.value) === target
+            && String(navigatorLabel?.textContent || '').trim() !== navigatorBefore;
+        }
+
         const zoomButton = timeline.querySelector('.zoom-btn');
         zoomButton?.click();
         await sleep(80);
         const zoomPop = timeline.querySelector('.zoom-pop');
         out.zoom = Boolean(zoomButton && zoomPop && getComputedStyle(zoomPop).display !== 'none');
+        if (zoomPop) {
+          const popRect = zoomPop.getBoundingClientRect();
+          const rulerRect = timeline.querySelector('.track-container')?.getBoundingClientRect();
+          const point = document.elementFromPoint(
+            popRect.left + popRect.width / 2,
+            popRect.top + popRect.height / 2,
+          );
+          out.zoomUnclipped = popRect.height > 50
+            && Boolean(rulerRect)
+            && popRect.bottom > rulerRect.bottom
+            && Boolean(point?.closest('.zoom-pop'));
+        }
         zoomButton?.click();
         v2Toggle?.click();
         v1Controls[1]?.click();
@@ -3874,6 +4063,15 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
         const wheelDown = (await readTimeline())?.trackHeight === 48;
         out.wheel = wheelUp === true && wheelDown === true;
 
+        heightNumber.focus();
+        setValue(heightNumber, 1);
+        heightNumber.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await waitFor(async () => (await readTimeline())?.trackHeight === 1, 4000);
+        out.minHeight = (await readTimeline())?.trackHeight === 1;
+        out.minHeightRowPx = Math.round(
+          document.querySelector('.track-row-v1')?.getBoundingClientRect().height ?? 99,
+        );
+
         document.querySelector('.zoom-reset')?.click();
         await waitFor(async () => {
           const timeline = await readTimeline();
@@ -3903,6 +4101,118 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
     })()
   `)) as Record<string, any>;
   return { ...out, ...ui };
+}
+
+function aiSegmentChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    aiSegmentCreated: result.created === true,
+    aiSegmentBounded: Number(result.sizeBytes ?? 0) > 0
+      && Number(result.sizeBytes ?? 0) < 64 * 1024 * 1024,
+    aiSegmentDuration: result.durationOk === true,
+    aiSegmentRunnerClip: result.runnerUsedTemporaryClip === true,
+    aiSegmentRunnerBounded: result.runnerClipBounded === true,
+  };
+}
+
+async function runAiSegmentChecks(
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const media = deps.getMedia?.() ?? null;
+  const data = deps.getData?.() ?? null;
+  if (!videoPath || !media) return { skipped: true };
+  const outputDir = join(tmpdir(), `lapian-ai-segment-${Date.now()}`);
+  const outputPath = join(outputDir, 'segment-001.mp4');
+  const requestedEndMs = Math.max(
+    1000,
+    Number(process.env['SMOKE_AI_SEGMENT_END_MS'] ?? '8000') || 8000,
+  );
+  const out: Record<string, any> = {};
+  try {
+    mkdirSync(outputDir, { recursive: true });
+    await media.createAiSegment({
+      path: videoPath,
+      startMs: 0,
+      endMs: requestedEndMs,
+      outputPath,
+      timeoutMs: 120_000,
+    });
+    out.created = existsSync(outputPath);
+    if (out.created) {
+      out.sizeBytes = statSync(outputPath).size;
+      const probe = await media.probe({ path: outputPath });
+      out.durationMs = probe.durationMs;
+      out.width = probe.width;
+      out.height = probe.height;
+      out.requestedEndMs = requestedEndMs;
+      out.durationOk = Math.abs(probe.durationMs - requestedEndMs) <= 2000;
+    }
+
+    if (data) {
+      const project = data.projects.create({
+        name: `S37 AI Segment ${Date.now()}`,
+        source: { type: 'local', path: videoPath },
+        media: {
+          filename: 'ai-segment-smoke.mp4',
+          proxyPath: videoPath,
+          durationMs: requestedEndMs,
+          fps: 500 / 21,
+          width: 640,
+          height: 360,
+        },
+      });
+      try {
+        let observedPath = '';
+        let observedSize = 0;
+        const provider = {
+          id: 'ai-segment-probe',
+          requiresVideoBytes: true,
+          probeCapability: async () => ({
+            ok: true,
+            supportsNativeVideo: true,
+            provider: 'ai-segment-probe',
+            model: 'probe-video-v1',
+            error: null,
+          }),
+          listModels: async () => ({ ok: true, models: ['probe-video-v1'] }),
+          analyzeSegment: async (input: any, signal: AbortSignal) => {
+            observedPath = input.videoPath;
+            observedSize = existsSync(input.videoPath) ? statSync(input.videoPath).size : 0;
+            return new MockProvider({ shotsPerSegment: 2 }).analyzeSegment(input, signal);
+          },
+          cancel: () => {},
+          getUsage: () => ({ seconds: 0, tokens: 0, cost: 0 }),
+        };
+        const result = await new AiDetectRunner(data, media).run({
+          project,
+          provider,
+          signal: new AbortController().signal,
+          options: { segmentSeconds: 30, segmentOverlapSeconds: 5, maxRetriesPerSegment: 0 },
+          resume: false,
+        });
+        out.runnerUsedTemporaryClip =
+          observedPath !== videoPath
+          && observedPath.length > 0
+          && !existsSync(observedPath);
+        out.runnerClipBounded = observedSize > 0 && observedSize < 64 * 1024 * 1024;
+        out.runnerStatus = result.status;
+      } finally {
+        try {
+          data.projects.delete(project.id);
+          rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.json`), { force: true });
+          rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.log`), { force: true });
+          rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
+        } catch {
+          // ignore cleanup failures
+        }
+      }
+    }
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true });
+  }
+  return out;
 }
 
 function opencvFrameChecksAssertions(result: Record<string, any>): Record<string, boolean> {
