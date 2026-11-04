@@ -10,6 +10,8 @@
 ## 打包维护
 
 - 为 Windows PowerShell 5.1 打包预处理脚本补齐 UTF-8 BOM，避免中文脚本被错误代码页解析。
+- 安装版采用 `Setup + local-ai 离线资源包`：Setup 负责应用主体、快捷方式和 NSIS 卸载项，Setup 自动将同目录的 `local-ai.7z` 解压到安装目录，避开 NSIS 无法可靠承载 12.49 GB 单文件载荷的限制。
+- 独立卸载工具升级到 v0.1.9，同时识别完整绿色包和未安装本地 AI 资源的安装版，并可从 `UninstallString` 定位没有 `InstallLocation` 的 NSIS 安装项。
 
 ## 验证
 
