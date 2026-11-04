@@ -112,6 +112,7 @@ export interface IpcDeps {
   getSession(): SessionService | null;
   getStats(): StatsService | null;
   getAi(): AiAccessService | null;
+  getLocalAi(): import('../ai/local-vision-service').LocalVisionService | null;
 }
 
 /**
@@ -132,6 +133,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireAi = (): AiAccessService => {
     const service = deps.getAi();
     if (!service) throw new Error('AI 服务尚未就绪');
+    return service;
+  };
+  const requireLocalAi = (): import('../ai/local-vision-service').LocalVisionService => {
+    const service = deps.getLocalAi();
+    if (!service) throw new Error('本地视觉模型服务尚未就绪');
     return service;
   };
   const requireData = (): DataLayer => {
@@ -201,6 +207,10 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.AI_GET_SNAPSHOT,
     withEnvelope((args: { projectId: string }): AiProjectSnapshot => requireAi().getSnapshot(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.AI_LOCAL_STATUS,
+    withEnvelope(() => requireLocalAi().getStatus()),
   );
   ipcMain.handle(
     IPC.AI_PROBE_PROVIDER,

@@ -1632,50 +1632,39 @@ async function openDetection(): Promise<void> {
   }
   const engine = settings.value?.recognition?.engine ?? 'ai';
   if (engine === 'ai') {
-    let probe: Awaited<ReturnType<typeof window.api.ai.probeProvider>>;
-    try {
-      probe = await window.api.ai.probeProvider();
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), 'error', 'AI 端点探测失败');
-      return;
-    }
-    if (!probe.ok) {
-      showToast(probe.error.message, 'error', probe.error.code);
-      return;
-    }
-    if (!probe.data.ok || !probe.data.supportsNativeVideo) {
+    const local = await window.api.ai.getLocalStatus();
+    if (!local.ok || !local.data.available) {
       detectionError.value =
-        probe.data.error?.message ?? 'AI 端点未声明原生视频输入能力，请在设置中更换端点';
+        local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
       detectionProgress.value = null;
       detectionResult.value = null;
       detecting.value = false;
       detectionOpen.value = true;
       return;
     }
-  } else {
-    let environment: IpcResult<DetectEnvCheck>;
-    try {
-      environment = await window.api.detect.checkEnv();
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), 'error', '检测环境检查失败');
-      return;
-    }
-    if (!environment.ok) {
-      showToast(environment.error.message, 'error', environment.error.code);
-      return;
-    }
-    if (!environment.data) {
-      showToast('检测环境返回了无效结果，请重试。', 'error', 'DETECT_ENV_INVALID');
-      return;
-    }
-    if (!environment.data.ok && environment.data.error) {
-      detectionError.value = `${environment.data.error.message}。${environment.data.error.guide}`;
-      detectionProgress.value = null;
-      detectionResult.value = null;
-      detecting.value = false;
-      detectionOpen.value = true;
-      return;
-    }
+  }
+  let environment: IpcResult<DetectEnvCheck>;
+  try {
+    environment = await window.api.detect.checkEnv();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error', '检测环境检查失败');
+    return;
+  }
+  if (!environment.ok) {
+    showToast(environment.error.message, 'error', environment.error.code);
+    return;
+  }
+  if (!environment.data) {
+    showToast('检测环境返回了无效结果，请重试。', 'error', 'DETECT_ENV_INVALID');
+    return;
+  }
+  if (!environment.data.ok && environment.data.error) {
+    detectionError.value = `${environment.data.error.message}。${environment.data.error.guide}`;
+    detectionProgress.value = null;
+    detectionResult.value = null;
+    detecting.value = false;
+    detectionOpen.value = true;
+    return;
   }
   detectionError.value = null;
   detectionResult.value = null;
@@ -2086,27 +2075,6 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
   } finally {
     settingsSaving.value = false;
   }
-}
-
-/** S36-7：AI 菜单快速切换当前检测供应商并持久化。 */
-async function switchAiProvider(id: string): Promise<void> {
-  const current = settings.value;
-  if (!current?.ai) return;
-  const providers = current.ai.providers ?? [];
-  if (id && !providers.some((provider) => provider.id === id)) return;
-  const result = await window.api.settings.set(
-    plainSettings({
-      ...current,
-      ai: { ...current.ai, activeProviderId: id },
-    }),
-  );
-  if (!result.ok) {
-    showToast(result.error.message, 'error', result.error.code);
-    return;
-  }
-  settings.value = result.data;
-  const name = providers.find((provider) => provider.id === id)?.name ?? '未命名供应商';
-  showToast(`已切换检测供应商：${name}`, 'success', '供应商已切换');
 }
 
 function workspaceStateSnapshot(): WorkspaceState {
@@ -2756,16 +2724,12 @@ onBeforeUnmount(() => {
           :mcp-busy="aiMcpBusy"
           :copying="aiCopying"
           :auth-request="aiAuthRequest"
-          :providers="settings?.ai?.providers ?? []"
-          :active-provider-id="settings?.ai?.activeProviderId ?? ''"
-          :provider-kind="settings?.ai?.provider ?? 'openai-compatible'"
           @toggle="aiMenuOpen = !aiMenuOpen"
           @close="aiMenuOpen = false"
           @copy-prompt="copyAiPrompt"
           @copy-snapshot="copyAiPrompt([])"
           @toggle-mcp="toggleAiMcp"
           @respond-auth="respondAiMcpAuth"
-          @switch-provider="switchAiProvider"
         />
       </nav>
 

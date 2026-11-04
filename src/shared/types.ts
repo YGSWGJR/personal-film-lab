@@ -47,7 +47,7 @@ export interface AiListModelsResult {
 
 /** S36-2：AI 识别配置（apiKey 在 settings.json 中为 safeStorage 密文）。 */
 export interface AiSettings {
-  provider?: 'openai-compatible' | 'mock';
+  provider?: 'local' | 'openai-compatible' | 'mock';
   /** S36-7：多供应商列表（mock 不进此列表） */
   providers?: AiProviderConfig[];
   /** S36-7：当前激活供应商 id */
@@ -61,6 +61,20 @@ export interface AiSettings {
   timeoutSeconds?: number;
   maxRetriesPerSegment?: number;
   enabled?: boolean;
+  /** 本地视觉识别失败时是否自动保留 OpenCV 镜头切分结果。 */
+  fallbackToOpenCv?: boolean;
+  /** 本地视觉分析每批图片数量。 */
+  localBatchSize?: number;
+}
+
+export interface LocalAiStatus {
+  available: boolean;
+  running: boolean;
+  engine: 'qwen3vl-8b-w4a8';
+  pythonPath: string | null;
+  comfyRoot: string | null;
+  modelPath: string | null;
+  error: string | null;
 }
 
 /** S36-3a：轨道高度档位（px）；S37 起支持折叠到 1px。 */
@@ -225,6 +239,7 @@ export interface AiMcpDataChangedEvent {
 export interface AiApi {
   copyPrompt(args: AiCopyPromptArgs): Promise<IpcResult<AiCopyPromptResult>>;
   getShotSnapshot(args: { projectId: string }): Promise<IpcResult<AiProjectSnapshot>>;
+  getLocalStatus(): Promise<IpcResult<LocalAiStatus>>;
   /** S36-2a：探测 API 端点能力（是否支持原生视频输入）。 */
   probeProvider(args?: { baseUrl?: string; apiKey?: string; providerId?: string }): Promise<IpcResult<AiProviderProbeResult>>;
   /** S36-7：获取供应商端点模型列表。 */
@@ -770,6 +785,12 @@ export interface ShotPreview {
   thumbnail?: string | null;
   /** 兼容 D1-E 初版字段；新调用优先使用 thumbnail */
   thumbPath?: string;
+  shotSize?: string | null;
+  cameraMethod?: string | null;
+  dialogue?: string | null;
+  remark?: string | null;
+  tags?: Record<string, string[]>;
+  confidence?: number;
 }
 
 export interface DetectResult {

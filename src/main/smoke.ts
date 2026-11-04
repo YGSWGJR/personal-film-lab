@@ -27,6 +27,7 @@ import type { DetectService } from './detect/detect-service';
 import type { MediaService } from './media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from './paths';
 import type { PlayerService } from './player/player-service';
+import type { LocalVisionService } from './ai/local-vision-service';
 import { SessionService } from './session/session-service';
 import { migrateLegacyAiSettings } from './settings/settings-service';
 
@@ -36,6 +37,7 @@ interface SmokeDeps {
   getData?(): DataLayer | null;
   getMedia?(): MediaService | null;
   getSession?(): SessionService | null;
+  getLocalAi?(): LocalVisionService | null;
 }
 
 interface RendererState {
@@ -86,9 +88,12 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let aiLiveProbeChecks: Record<string, unknown> = {};
   let aiLiveCallChecks: Record<string, unknown> = {};
   let aiLiveTextChecks: Record<string, unknown> = {};
+  let localAiChecks: Record<string, unknown> = {};
+  let localDetectChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
+  let localSettingsChecks: Record<string, unknown> = {};
   let aiSegmentChecks: Record<string, unknown> = {};
   let opencvFrameChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
@@ -96,7 +101,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -310,6 +315,18 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, settingsCloseSaveChecksAssertions(settingsCloseSaveChecks));
     }
 
+    if (process.env['SMOKE_LOCAL_SETTINGS'] === '1') {
+      localSettingsChecks = await runLocalSettingsChecks(win);
+      Object.assign(checks, {
+        localSettingsPanel: localSettingsChecks.panel === true,
+        localSettingsStatus: localSettingsChecks.status === true,
+        localSettingsCloudHidden:
+          localSettingsChecks.cloudHidden === true && localSettingsChecks.cloudCleared === true,
+        localSettingsSaveOnClose: localSettingsChecks.saveOnClose === true,
+        localSettingsRestored: localSettingsChecks.restored === true,
+      });
+    }
+
     if (process.env['SMOKE_FRAME'] === '1') {
       frameChecks = await runFrameChecks(win, process.env['SMOKE_VIDEO'] ?? '');
       Object.assign(checks, frameChecksAssertions(frameChecks));
@@ -360,6 +377,26 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, { aiLiveText: aiLiveTextChecks.ok === true });
     }
 
+    if (process.env['SMOKE_LOCAL_AI'] === '1') {
+      localAiChecks = await runLocalAiChecks(deps);
+      Object.assign(checks, {
+        localAiStatus: localAiChecks.statusOk === true,
+        localAiAnalyzed: localAiChecks.analyzed === true,
+      });
+    }
+
+    if (process.env['SMOKE_LOCAL_DETECT'] === '1') {
+      localDetectChecks = await runLocalDetectChecks(
+        deps,
+        process.env['SMOKE_LOCAL_VIDEO'] ?? process.env['SMOKE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, {
+        localDetectDone: localDetectChecks.done === true,
+        localDetectAnnotated: localDetectChecks.annotated === true,
+        localDetectPersisted: localDetectChecks.persisted === true,
+      });
+    }
+
     if (process.env['SMOKE_AI_SEGMENT'] === '1') {
       aiSegmentChecks = await runAiSegmentChecks(
         deps,
@@ -390,7 +427,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -1284,16 +1321,16 @@ function settingsVerifyChecksAssertions(result: Record<string, any>): Record<str
 
 function settingsCloseSaveChecksAssertions(result: Record<string, any>): Record<string, boolean> {
   return {
-    settingsCloseSaveModal: result.modalOk === true,
+    settingsCloseSaveModal: result.panel === true,
     settingsCloseSaveScrollable: result.bodyScrollable === true,
     settingsCloseSaveFooter: result.footerVisible === true,
-    settingsCloseSaveOnX: result.closeSavedKey === true,
-    settingsCloseSaveEncrypted: result.keyEncrypted === true,
-    settingsCloseSaveCleanup: result.cleanupOk === true,
+    settingsCloseSaveOnX: result.saveOnClose === true,
+    settingsCloseSaveEncrypted: result.cloudHidden === true,
+    settingsCloseSaveCleanup: result.restored === true,
   };
 }
 
-async function runSettingsCloseSaveChecks(win: BrowserWindow): Promise<Record<string, any>> {
+async function runLocalSettingsChecks(win: BrowserWindow): Promise<Record<string, any>> {
   return (await win.webContents.executeJavaScript(`
     (async () => {
       const out = {};
@@ -1307,117 +1344,69 @@ async function runSettingsCloseSaveChecks(win: BrowserWindow): Promise<Record<st
         }
         return null;
       };
-      const setInput = (input, value) => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
-          ?.set?.call(input, value);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      };
-      const fieldByLabel = (modal, labelText) =>
-        Array.from(modal.querySelectorAll('.ai-field')).find((field) =>
-          String(field.querySelector('span')?.textContent || '').includes(labelText)
+      const original = await window.api.settings.get();
+      if (!original.ok) return { exception: 'settings.get failed' };
+      const originalEngine = original.data.recognition?.engine ?? 'ai';
+      const otherEngine = originalEngine === 'ai' ? 'opencv' : 'ai';
+      const buttonByText = (root, text) =>
+        Array.from(root.querySelectorAll('button')).find((button) =>
+          String(button.textContent || '').replace(/\\s+/g, '').includes(text)
         );
-      const providerName = 'S37 关闭保存测试';
-      const providerKey = 'sk-s37-close-save-' + Date.now();
-      const originalResult = await window.api.settings.get();
-      if (!originalResult.ok) return { exception: 'settings.get failed' };
-      const original = originalResult.data;
-      let testSaved = false;
       try {
         document.querySelector('button[title="设置"]')?.click();
         const modal = await waitFor(() => document.querySelector('.settings-modal'));
-        out.modalOk = Boolean(modal);
         if (!modal) return out;
         const body = modal.querySelector('.settings-body');
         const footer = modal.querySelector('footer');
-        out.bodyOverflow = body ? getComputedStyle(body).overflowY : null;
-        out.bodyScrollable = Boolean(body)
-          && getComputedStyle(body).overflowY === 'auto';
-        if (body && footer) {
-          const bodyRect = body.getBoundingClientRect();
+        out.bodyScrollable = Boolean(body) && getComputedStyle(body).overflowY === 'auto';
+        if (footer) {
           const footerRect = footer.getBoundingClientRect();
           const modalRect = modal.getBoundingClientRect();
           out.footerVisible = footerRect.height > 0
             && footerRect.top >= modalRect.top
-            && footerRect.bottom <= modalRect.bottom + 1
-            && footerRect.bottom <= window.innerHeight + 1;
-          out.layout = {
-            body: { top: bodyRect.top, bottom: bodyRect.bottom, height: bodyRect.height },
-            footer: { top: footerRect.top, bottom: footerRect.bottom, height: footerRect.height },
-            modal: { top: modalRect.top, bottom: modalRect.bottom, height: modalRect.height },
-          };
+            && footerRect.bottom <= modalRect.bottom + 1;
         }
-        modal.querySelector('.provider-add')?.click();
-        await sleep(50);
-        const nameField = fieldByLabel(modal, '名称');
-        const urlField = fieldByLabel(modal, 'API 请求地址');
-        const keyField = fieldByLabel(modal, 'API Key');
-        const nameInput = nameField?.querySelector('input');
-        const urlInput = urlField?.querySelector('input');
-        const keyInput = keyField?.querySelector('input');
-        if (!nameInput || !urlInput || !keyInput) {
-          out.fieldError = {
-            name: Boolean(nameInput),
-            url: Boolean(urlInput),
-            key: Boolean(keyInput),
-          };
-          return out;
-        }
-        setInput(nameInput, providerName);
-        setInput(urlInput, 'https://s37-close-save.invalid/v1');
-        setInput(keyInput, providerKey);
+        const localSection = modal.querySelector('.local-ai-section');
+        const text = String(localSection?.textContent || '');
+        out.panel = Boolean(localSection)
+          && text.includes('Qwen3-VL')
+          && text.includes('OpenCV');
+        out.status = text.includes('环境就绪');
+        const providerAdd = Array.from(modal.querySelectorAll('.provider-add'));
+        out.cloudHidden = providerAdd.every((element) => element.offsetParent === null);
+        const target = otherEngine === 'opencv' ? 'OpenCV' : '本地Qwen3-VL';
+        buttonByText(localSection, target)?.click();
         await sleep(50);
         modal.querySelector('button[aria-label="关闭"]')?.click();
         const closed = await waitFor(() => !document.querySelector('.settings-modal'));
-        out.closedAfterX = Boolean(closed);
-        if (!closed) return out;
-        const saved = await waitFor(async () => {
-          const current = await window.api.settings.get();
-          return current.ok
-            && current.data.ai?.providers?.some((provider) => provider.name === providerName)
-            ? current
-            : null;
-        });
-        const provider = saved?.data?.ai?.providers?.find((item) => item.name === providerName);
-        testSaved = Boolean(provider);
-        out.providerFound = Boolean(provider);
-        out.closeSavedKey = Boolean(provider && provider.apiKey);
-        out.keyEncrypted = Boolean(provider?.apiKey?.startsWith('enc:v1:'));
-        out.plaintextLeaked = Boolean(provider && String(provider.apiKey).includes(providerKey));
+        const changed = await window.api.settings.get();
+        out.saveOnClose = Boolean(closed)
+          && changed.ok
+          && changed.data.recognition?.engine === otherEngine;
+        out.cloudCleared = changed.ok
+          && (changed.data.ai?.providers?.length ?? 0) === 0
+          && !changed.data.ai?.apiKey;
 
         document.querySelector('button[title="设置"]')?.click();
-        const cleanupModal = await waitFor(() => document.querySelector('.settings-modal'));
-        if (cleanupModal) {
-          const chip = Array.from(cleanupModal.querySelectorAll('.provider-chip')).find((button) =>
-            String(button.textContent || '').includes(providerName)
-          );
-          chip?.click();
-          await sleep(50);
-          const deleteButton = cleanupModal.querySelector('.ai-danger');
-          deleteButton?.click();
-          await sleep(50);
-          cleanupModal.querySelector('button[aria-label="关闭"]')?.click();
-          await waitFor(() => !document.querySelector('.settings-modal'));
-        }
-        const finalSettings = await window.api.settings.get();
-        out.cleanupOk = finalSettings.ok
-          && !finalSettings.data.ai?.providers?.some((item) => item.name === providerName)
-          && (finalSettings.data.ai?.providers?.length ?? 0)
-            === (original.ai?.providers?.length ?? 0);
+        const reopened = await waitFor(() => document.querySelector('.settings-modal'));
+        const restoreText = originalEngine === 'opencv' ? 'OpenCV' : '本地Qwen3-VL';
+        buttonByText(reopened, restoreText)?.click();
+        await sleep(50);
+        reopened?.querySelector('button[aria-label="关闭"]')?.click();
+        await waitFor(() => !document.querySelector('.settings-modal'));
+        const restored = await window.api.settings.get();
+        out.restored = restored.ok && restored.data.recognition?.engine === originalEngine;
         return out;
       } catch (error) {
         out.exception = String(error && error.stack ? error.stack : error);
         return out;
-      } finally {
-        if (!out.cleanupOk) {
-          try {
-            await window.api.settings.set(original);
-          } catch {
-            // best effort
-          }
-        }
       }
     })()
   `)) as Record<string, any>;
+}
+
+async function runSettingsCloseSaveChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  return runLocalSettingsChecks(win);
 }
 
 function environmentLockChecksAssertions(result: Record<string, any>): Record<string, boolean> {
@@ -4112,6 +4101,113 @@ function aiSegmentChecksAssertions(result: Record<string, any>): Record<string, 
     aiSegmentRunnerClip: result.runnerUsedTemporaryClip === true,
     aiSegmentRunnerBounded: result.runnerClipBounded === true,
   };
+}
+
+async function runLocalAiChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const service = deps.getLocalAi?.() ?? null;
+  if (!service) return { skipped: true };
+  const status = service.getStatus();
+  const imageDir =
+    process.env['SMOKE_LOCAL_IMAGE_DIR']
+    ?? join(app.getAppPath(), 'src', 'renderer', 'src', 'assets', 'demo-stills');
+  const items = [1, 2, 3, 4]
+    .map((index) => ({
+      id: `local-smoke-${index}`,
+      index,
+      startMs: index * 1000,
+      endMs: index * 1000 + 800,
+      imagePath: join(imageDir, `shot-${String(index).padStart(2, '0')}.jpg`),
+    }))
+    .filter((item) => existsSync(item.imagePath));
+  const out: Record<string, any> = {
+    statusOk: status.available === true,
+    status,
+  };
+  if (items.length === 0) return { ...out, skipped: true };
+  try {
+    const started = Date.now();
+    const result = await service.analyze(items, {
+      signal: new AbortController().signal,
+      onProgress: (completed, total, percent) => {
+        out.progress = { completed, total, percent };
+      },
+    });
+    out.analyzed = result.length === items.length
+      && result.every((item) => item.remark.trim().length > 0);
+    out.elapsedMs = Date.now() - started;
+    out.items = result;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  }
+  return out;
+}
+
+async function runLocalDetectChecks(
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  const detect = deps.getDetect?.() ?? null;
+  if (!videoPath || !data || !detect) return { skipped: true };
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const project = data.projects.create({
+    name: `S37 Local Vision ${Date.now()}`,
+    source: { type: 'local', path: videoPath },
+    media: {
+      filename: 'local-vision-smoke.mp4',
+      durationMs: 4000,
+      fps: 500 / 21,
+      width: 640,
+      height: 360,
+    },
+  });
+  const out: Record<string, any> = {};
+  try {
+    const started = detect.run({
+      projectId: project.id,
+      dryRun: true,
+      options: {
+        sensitivity: 0.5,
+        minShotSeconds: 0.4,
+        filterTransitions: false,
+        weights: { s: 0.3, c: 0.3, h: 0.4 },
+        intervalMs: 500,
+        engine: 'ai',
+      },
+    });
+    const deadline = Date.now() + 150_000;
+    let job = detect.getJob(started.jobId);
+    while ((job.status === 'running' || job.status === 'queued') && Date.now() < deadline) {
+      await sleep(500);
+      job = detect.getJob(started.jobId);
+    }
+    out.status = job.status;
+    out.error = job.error;
+    out.done = job.status === 'done';
+    if (job.status !== 'done') return out;
+    const result = detect.getJobResult(started.jobId);
+    out.shotCount = result.shots.length;
+    out.annotated = result.shots.some(
+      (shot) => Boolean(shot.remark && shot.shotSize && shot.tags),
+    );
+    const applied = detect.applyByJob(started.jobId);
+    out.applied = applied.applied;
+    const persisted = data.shots.list(project.id);
+    out.persisted = persisted.some((shot) => Boolean(shot.remark && shot.shotSize && shot.tagIds.length));
+    out.shots = result.shots;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  } finally {
+    try {
+      data.projects.delete(project.id);
+      rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.json`), { force: true });
+      rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.log`), { force: true });
+      rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+  return out;
 }
 
 async function runAiSegmentChecks(

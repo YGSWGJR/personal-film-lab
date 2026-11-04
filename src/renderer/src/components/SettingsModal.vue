@@ -4,6 +4,7 @@ import AppIcon from './AppIcon.vue';
 import type {
   AiMcpStatus,
   AiProviderConfig,
+  LocalAiStatus,
   ProxyTier,
   Settings,
   SettingsSetArgs,
@@ -50,13 +51,14 @@ const proxyTier = ref<ProxyTier>('540p');
 const confirmUserContent = ref(true);
 /** S36-2：识别引擎与 AI 配置草稿 */
 const recognitionEngine = ref<'ai' | 'opencv'>('ai');
-const aiProvider = ref<'openai-compatible' | 'mock'>('openai-compatible');
+const aiProvider = ref<'local' | 'openai-compatible' | 'mock'>('local');
 const aiProviders = ref<AiProviderConfig[]>([]);
 const activeProviderId = ref('');
 const providerKeyDrafts = reactive<Record<string, string>>({});
 const providerClearKeys = reactive<Record<string, boolean>>({});
 const manualModelDraft = ref('');
-const initialAiSnapshot = ref('');
+const localAiStatus = ref<LocalAiStatus | null>(null);
+const localAiFallback = ref(true);
 const activeProvider = computed(
   () => aiProviders.value.find((item) => item.id === activeProviderId.value) ?? null,
 );
@@ -198,10 +200,8 @@ function fillDraft(settings: Settings): void {
     providerClearKeys[provider.id] = false;
   }
   manualModelDraft.value = '';
-  initialAiSnapshot.value = JSON.stringify({
-    providers: aiProviders.value,
-    activeProviderId: activeProviderId.value,
-  });
+  localAiFallback.value = settings.ai?.fallbackToOpenCv !== false;
+  void refreshLocalAiStatus();
   aiAgentEndpoint.value = settings.ai?.agentEndpoint ?? '';
   aiSegmentSeconds.value = settings.ai?.segmentSeconds ?? 600;
   aiTimeoutSeconds.value = settings.ai?.timeoutSeconds ?? 900;
@@ -478,15 +478,6 @@ async function probeAiProvider(): Promise<void> {
   }
 }
 
-function hasPendingAiChanges(): boolean {
-  if (Object.values(providerKeyDrafts).some((value) => value.trim().length > 0)) return true;
-  if (Object.values(providerClearKeys).some(Boolean)) return true;
-  return (
-    JSON.stringify({ providers: aiProviders.value, activeProviderId: activeProviderId.value }) !==
-    initialAiSnapshot.value
-  );
-}
-
 /**
  * S37：点 X / 遮罩退出时，若有未保存的供应商/Key 草稿，先尝试保存再关闭。
  * 保存校验失败时停留在设置面板并显示错误；底部「取消」仍表示放弃草稿。
@@ -497,11 +488,18 @@ function requestClose(): void {
     emit('close');
     return;
   }
-  if (hasPendingAiChanges()) {
-    submit();
-    return;
+  submit();
+}
+
+async function refreshLocalAiStatus(): Promise<void> {
+  try {
+    const result = await window.api.ai.getLocalStatus();
+    localAiStatus.value = result.ok ? result.data : null;
+    if (!result.ok) browseError.value = result.error.message;
+  } catch (error) {
+    localAiStatus.value = null;
+    browseError.value = error instanceof Error ? error.message : String(error);
   }
-  emit('close');
 }
 
 function submit(): void {
@@ -517,39 +515,19 @@ function submit(): void {
   value.proxyTier = proxyTier.value;
   value.confirmUserContent = confirmUserContent.value;
   value.recognition = { engine: recognitionEngine.value };
-  const providers = aiProviders.value.map((provider) => {
-    const draft = currentProviderKeyDraft(provider);
-    const clear = providerClearKeys[provider.id] === true;
-    const apiKey = clear ? '' : draft || provider.apiKey;
-    const note = provider.note?.trim() ?? '';
-    const homeUrl = provider.homeUrl?.trim() ?? '';
-    const model = provider.model?.trim() ?? '';
-    return {
-      id: provider.id,
-      name: provider.name.trim(),
-      ...(note ? { note } : {}),
-      ...(homeUrl ? { homeUrl } : {}),
-      baseUrl: provider.baseUrl.trim(),
-      ...(apiKey ? { apiKey } : {}),
-      ...(model ? { model } : {}),
-      models: [...new Set((provider.models ?? []).map((item) => item.trim()).filter(Boolean))],
-    };
-  });
-  if (providers.some((provider) => !provider.name || !provider.baseUrl)) {
-    browseError.value = '请填写供应商名称和 API 请求地址';
-    return;
-  }
   const aiValue: NonNullable<SettingsSetArgs['ai']> = {
-    provider: aiProvider.value,
-    providers,
-    activeProviderId: providers.some((provider) => provider.id === activeProviderId.value)
-      ? activeProviderId.value
-      : providers[0]?.id ?? '',
+    provider: 'local',
+    providers: [],
+    activeProviderId: '',
+    baseUrl: '',
+    apiKey: '',
     agentEndpoint: aiAgentEndpoint.value.trim(),
     segmentSeconds: Number(aiSegmentSeconds.value) || 600,
     timeoutSeconds: Number(aiTimeoutSeconds.value) || 900,
     maxRetriesPerSegment: Number(aiMaxRetries.value) || 3,
     enabled: true,
+    fallbackToOpenCv: localAiFallback.value,
+    localBatchSize: 4,
   };
   value.ai = aiValue;
   for (const key of [
@@ -650,7 +628,55 @@ function submit(): void {
           </div>
         </section>
 
-        <section class="ai-section">
+        <section class="ai-section local-ai-section">
+          <div class="ai-head">
+            <strong>本地镜头理解</strong>
+            <small>画面分析完全在本机执行，不上传视频、代理或 API Key。</small>
+          </div>
+          <div class="ai-engine-row">
+            <span>识别流程</span>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: recognitionEngine === 'ai' }"
+              :disabled="saving || resettingDefaults"
+              @click="recognitionEngine = 'ai'"
+            >
+              本地 Qwen3-VL
+            </button>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: recognitionEngine === 'opencv' }"
+              :disabled="saving || resettingDefaults"
+              @click="recognitionEngine = 'opencv'"
+            >
+              OpenCV（备用）
+            </button>
+          </div>
+          <div class="local-ai-card" :class="{ unavailable: localAiStatus && !localAiStatus.available }">
+            <div>
+              <strong>Qwen3-VL 8B · W4A8</strong>
+              <small>内置视觉模型 · 每批 4 帧 · 8GB 显存优化</small>
+            </div>
+            <span>{{ localAiStatus?.available ? '环境就绪' : '环境未就绪' }}</span>
+          </div>
+          <p class="local-ai-path">
+            {{ localAiStatus?.error || localAiStatus?.modelPath || '正在检查本地模型环境…' }}
+          </p>
+          <button
+            type="button"
+            class="local-ai-fallback"
+            :class="{ active: localAiFallback }"
+            :disabled="saving || resettingDefaults"
+            @click="localAiFallback = !localAiFallback"
+          >
+            {{ localAiFallback ? '本地模型失败时自动保留 OpenCV 结果' : '本地模型失败时停止任务' }}
+          </button>
+          <small class="ai-hint">本地模型负责景别、机位、运镜、光线、主体和画面描述；OpenCV 仍负责镜头切点。</small>
+        </section>
+
+        <section hidden class="ai-section legacy-ai-section">
           <div class="ai-head">
             <strong>AI 镜头识别</strong>
             <small>可维护多个供应商；同一时间一个激活供应商生效。Mock 仅用于自测，不进列表。</small>
@@ -1233,6 +1259,76 @@ function submit(): void {
   border: 1px solid var(--border);
   border-radius: 7px;
   background: rgba(15, 23, 42, 0.42);
+}
+
+.legacy-ai-section {
+  display: none !important;
+}
+
+.local-ai-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgba(14, 116, 144, 0.16), rgba(30, 41, 59, 0.42));
+}
+
+.local-ai-card > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.local-ai-card strong {
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.local-ai-card small,
+.local-ai-path {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.local-ai-card > span {
+  flex: 0 0 auto;
+  color: var(--green);
+  font-size: 9px;
+}
+
+.local-ai-card.unavailable {
+  border-color: rgba(245, 158, 11, 0.38);
+}
+
+.local-ai-card.unavailable > span {
+  color: var(--gold);
+}
+
+.local-ai-path {
+  overflow: hidden;
+  margin: -4px 0 0;
+  font-family: var(--mono);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.local-ai-fallback {
+  align-self: flex-start;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.local-ai-fallback.active {
+  border-color: rgba(34, 197, 94, 0.42);
+  color: #86efac;
 }
 
 .ai-head {

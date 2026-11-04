@@ -301,7 +301,7 @@ function normalizeAi(
     provider:
       value?.provider === 'mock' || fallback?.provider === 'mock'
         ? 'mock'
-        : 'openai-compatible',
+        : 'local',
     providers: migratedProviders,
     activeProviderId,
     baseUrl: clearLegacy ? '' : legacyBaseUrl,
@@ -323,6 +323,8 @@ function normalizeAi(
       10,
     ),
     enabled: value?.enabled ?? fallback?.enabled ?? true,
+    fallbackToOpenCv: value?.fallbackToOpenCv ?? fallback?.fallbackToOpenCv ?? true,
+    localBatchSize: clampInt(value?.localBatchSize ?? fallback?.localBatchSize, 4, 1, 4),
   };
 }
 

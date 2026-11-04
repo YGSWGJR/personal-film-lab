@@ -9,6 +9,7 @@ export const IPC = {
   /** AI 助手 / 本地 MCP */
   AI_COPY_PROMPT: 'ai:copyPrompt',
   AI_GET_SNAPSHOT: 'ai:getShotSnapshot',
+  AI_LOCAL_STATUS: 'ai:getLocalStatus',
   AI_PROBE_PROVIDER: 'ai:probeProvider',
   AI_LIST_MODELS: 'ai:listModels',
   AI_START_MCP: 'ai:startMcp',

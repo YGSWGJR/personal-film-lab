@@ -25,6 +25,7 @@ import type {
   ShotPreview,
 } from '../../shared/types';
 import type { AiDetectRunner } from '../ai/ai-detect-runner';
+import type { LocalVisionService } from '../ai/local-vision-service';
 import type { ShotDetectionProvider } from '../ai/provider';
 import type { MediaService } from '../media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
@@ -90,6 +91,7 @@ export class DetectService {
     private readonly emitProgress: (event: DetectProgressEvent) => void,
     private readonly emitDone: (event: DetectDoneEvent) => void,
     private readonly ai?: AiDetectDeps,
+    private readonly localVision?: LocalVisionService,
   ) {}
 
   run(args: DetectRunArgs): DetectRunResult {
@@ -104,11 +106,11 @@ export class DetectService {
     const engine: RecognitionEngine =
       args.options.engine ?? this.ai?.getSettings().recognition?.engine ?? 'ai';
     if (engine === 'ai') {
-      if (!this.ai) {
-        throw new DetectError('AI_NOT_READY', 'AI 识别服务尚未初始化');
+      if (!this.localVision) {
+        throw new DetectError('LOCAL_AI_NOT_READY', '本地视觉识别服务尚未初始化');
       }
-      if (this.ai.getSettings().ai?.enabled === false) {
-        throw new DetectError('AI_DISABLED', 'AI 识别已在设置中关闭');
+      if (this.ai?.getSettings().ai?.enabled === false) {
+        throw new DetectError('LOCAL_AI_DISABLED', '本地视觉识别已在设置中关闭');
       }
     } else {
       resolveDetectSource(project);
@@ -258,65 +260,7 @@ export class DetectService {
     options: ResolvedDetectOptions,
     dryRun: boolean,
   ): Promise<void> {
-    if (job.engine === 'ai') {
-      await this.runAiJob(job, options);
-      return;
-    }
     await this.runOpenCvJob(job, options, dryRun);
-  }
-
-  private async runAiJob(
-    job: InternalDetectJob,
-    _options: ResolvedDetectOptions,
-  ): Promise<void> {
-    const ai = this.ai;
-    if (!ai) {
-      job.status = 'error';
-      job.error = 'AI 识别服务尚未初始化';
-      return;
-    }
-    try {
-      job.status = 'running';
-      const project = getDetectProject(this.data, job.projectId);
-      const settings = ai.getSettings();
-      const provider = ai.getProvider();
-      job.provider = provider;
-      const result = await ai.runner.run({
-        project,
-        provider,
-        signal: job.controller.signal,
-        resume: true,
-        options: {
-          segmentSeconds: settings.ai?.segmentSeconds,
-          segmentOverlapSeconds: settings.ai?.segmentOverlapSeconds,
-          maxRetriesPerSegment: settings.ai?.maxRetriesPerSegment,
-        },
-        callbacks: {
-          onProgress: (percent, current, total) => {
-            job.currentSegment = current;
-            job.segmentsTotal = total;
-            this.setProgress(job, percent, 'analyze');
-          },
-        },
-      });
-      job.currentSegment = result.currentSegment;
-      job.segmentsTotal = result.segmentsTotal;
-      job.usage = result.usage;
-      job.progress = 100;
-      job.error = result.error;
-      job.status = result.status;
-      job.result = result.result;
-      this.latestByProject.set(project.id, result.result);
-      this.emitProgress({ jobId: job.jobId, stage: 'analyze', percent: 100 });
-      this.emitDone({ jobId: job.jobId, result: result.result });
-    } catch (error) {
-      if (job.status === 'cancelled' || job.controller.signal.aborted) {
-        job.status = 'cancelled';
-        return;
-      }
-      job.status = 'error';
-      job.error = error instanceof Error ? error.message : String(error);
-    }
   }
 
   private async runOpenCvJob(
@@ -401,6 +345,10 @@ export class DetectService {
       const result = this.toPreview(job, project.id, analysis, project.media.durationMs);
       await this.createShotThumbnails(job, project, result.shots, sourcePath, thumbsDir, extraction.frames);
       this.assertActive(job);
+      if (job.engine === 'ai') {
+        await this.annotateWithLocalVision(job, result.shots, extraction.frames);
+      }
+      this.assertActive(job);
       job.status = 'done';
       job.progress = 100;
       job.result = result;
@@ -419,6 +367,61 @@ export class DetectService {
       job.error = error instanceof Error ? error.message : String(error);
     } finally {
       this.cleanupDetectFrames(framesDir);
+    }
+  }
+
+  private async annotateWithLocalVision(
+    job: InternalDetectJob,
+    shots: ShotPreview[],
+    extractedFrames: Array<{ timeMs: number; path: string }>,
+  ): Promise<void> {
+    const service = this.localVision;
+    if (!service || shots.length === 0) return;
+    const settings = this.ai?.getSettings();
+    const fallback = settings?.ai?.fallbackToOpenCv !== false;
+    try {
+      const items = shots.flatMap((shot) => {
+        const imagePath =
+          nearestExtractedFrame(extractedFrames, shot.startMs, shot.durationMs)?.path
+          ?? shot.thumbnail;
+        if (!imagePath || !existsSync(imagePath)) return [];
+        return [{
+          id: shot.id,
+          index: shot.index,
+          startMs: shot.startMs,
+          endMs: shot.endMs,
+          imagePath,
+        }];
+      });
+      if (items.length === 0) {
+        throw new DetectError('LOCAL_AI_IMAGES_MISSING', '没有可用的镜头代表帧');
+      }
+      this.setProgress(job, 94, 'analyze');
+      const analyses = await service.analyze(items, {
+        signal: job.controller.signal,
+        onProgress: (_completed, _total, percent) => {
+          this.setProgress(job, 94 + Math.round(percent * 0.05), 'analyze');
+        },
+      });
+      const byId = new Map(analyses.map((analysis) => [analysis.id, analysis]));
+      for (const shot of shots) {
+        const analysis = byId.get(shot.id);
+        if (!analysis) continue;
+        shot.remark = analysis.remark;
+        shot.shotSize = analysis.shotSize;
+        shot.cameraMethod = analysis.cameraMethod;
+        shot.tags = analysis.tags;
+        shot.confidence = analysis.confidence;
+      }
+      job.currentSegment = analyses.length;
+      job.segmentsTotal = items.length;
+    } catch (error) {
+      if (job.controller.signal.aborted) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!fallback) throw error;
+      job.error = `本地视觉分析失败，已保留 OpenCV 备用结果：${message}`;
+      console.warn(`[local-ai] ${job.error}`);
+      this.setProgress(job, 99, 'analyze');
     }
   }
 
@@ -732,6 +735,24 @@ export function resolveIntervalMs(
   if (options.intervalMs) return Math.max(50, Math.round(options.intervalMs));
   const frameStep = Math.max(1, options.frameInterval ?? 12);
   return Math.max(50, Math.round((1000 / Math.max(1, fps)) * frameStep));
+}
+
+function nearestExtractedFrame(
+  frames: Array<{ timeMs: number; path: string }>,
+  startMs: number,
+  durationMs: number,
+): { timeMs: number; path: string } | null {
+  const nearest = frames.reduce<{ timeMs: number; path: string } | null>(
+    (best, frame) =>
+      !best || Math.abs(frame.timeMs - startMs) < Math.abs(best.timeMs - startMs)
+        ? frame
+        : best,
+    null,
+  );
+  if (!nearest) return null;
+  return Math.abs(nearest.timeMs - startMs) <= Math.max(1000, durationMs)
+    ? nearest
+    : null;
 }
 
 function embeddedPythonExecutable(resourcesPath = process.resourcesPath): string | null {
