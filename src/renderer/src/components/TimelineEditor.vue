@@ -15,7 +15,8 @@ const props = defineProps<{
   fps: number;
   audioWaveform: AudioWaveform | null;
   audioLoading?: boolean;
-  /** S36-3a：轨道高度（px），5 档 48/96/144/192/240。 */
+  mediaLabel?: string;
+  /** S36-3a：V1/V2 轨道高度（px），5 档 48/96/144/192/240。 */
   trackHeight: number;
   /** S36-3b：横向时间密度（px/s），6 档 24/48/96/192/384/768。 */
   pxPerSecond: number;
@@ -34,14 +35,16 @@ const emit = defineEmits<{
   updatePxPerSecond: [value: number];
 }>();
 
-const filmTrackEl = ref<HTMLElement | null>(null);
-const shotCanvasEl = ref<HTMLCanvasElement | null>(null);
-const markerCanvasEl = ref<HTMLCanvasElement | null>(null);
+const timelineViewportEl = ref<HTMLElement | null>(null);
 const audioCanvasEl = ref<HTMLCanvasElement | null>(null);
-const trackContainerEl = ref<HTMLElement | null>(null);
-const draggingBoundary = ref<number | null>(null);
 const viewStartMs = ref(0);
 const trackWidthPx = ref(0);
+const v2Visible = ref(true);
+const v1Visible = ref(true);
+const v1Locked = ref(false);
+const audioMuted = ref(false);
+const audioSolo = ref(false);
+const draggingBoundary = ref<number | null>(null);
 let activeBoundary: number | null = null;
 let latestBoundaryTime = 0;
 let boundaryMinTime = 0;
@@ -49,10 +52,6 @@ let boundaryMaxTime = 0;
 let drawFrame = 0;
 let resizeObserver: ResizeObserver | null = null;
 let scrubElement: HTMLElement | null = null;
-let dividerStartY = 0;
-let dividerStartHeight = 0;
-
-const thumbnailImages = new Map<string, HTMLImageElement | null>();
 
 const safeDuration = computed(() => Math.max(1, props.durationMs));
 const visibleDurationMs = computed(() =>
@@ -60,37 +59,70 @@ const visibleDurationMs = computed(() =>
     ? (trackWidthPx.value / Math.max(1, props.pxPerSecond)) * 1000
     : safeDuration.value,
 );
+const viewEndMs = computed(() => viewStartMs.value + visibleDurationMs.value);
 const maxViewStartMs = computed(() => Math.max(0, safeDuration.value - visibleDurationMs.value));
 const playheadPercent = computed(() =>
   clampPercent(((props.currentTimeMs - viewStartMs.value) / visibleDurationMs.value) * 100),
 );
-
-function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, value));
-}
-
-function clampIndex(value: number, length: number): number {
-  return Math.max(0, Math.min(length - 1, value));
-}
-
-function pad2(value: number): string {
-  return String(value).padStart(2, '0');
-}
-
-function formatSecond(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
-  return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
-}
-
-function formatTenSecond(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${pad2(seconds)}`;
-}
+const audioHeight = computed(() =>
+  Math.max(48, Math.min(96, Math.round(props.trackHeight * 0.7))),
+);
+const densityLabel = computed(() => `${props.pxPerSecond} px/s`);
+const heightLabel = computed(() => `${props.trackHeight}px`);
+const mediaLabel = computed(() => props.mediaLabel?.trim() || '影片原声');
+const durationLabel = computed(() => formatDuration(props.durationMs));
+const timelineGridStyle = computed(() => ({
+  '--second-px': `${Math.max(8, props.pxPerSecond)}px`,
+}));
+const selectionRange = computed(() => {
+  if (props.inPointMs === null || props.outPointMs === null) return null;
+  const start = Math.min(props.inPointMs, props.outPointMs);
+  const end = Math.max(props.inPointMs, props.outPointMs);
+  if (end <= viewStartMs.value || start >= viewEndMs.value) return null;
+  return {
+    left: `${clampPercent(((start - viewStartMs.value) / visibleDurationMs.value) * 100)}%`,
+    width: `${Math.max(
+      0.1,
+      clampPercent(((Math.min(end, viewEndMs.value) - Math.max(start, viewStartMs.value)) / visibleDurationMs.value) * 100),
+    )}%`,
+  };
+});
+const visibleMarkers = computed(() =>
+  props.markers
+    .filter((marker) => marker.timeMs >= viewStartMs.value && marker.timeMs <= viewEndMs.value)
+    .map((marker) => ({
+      ...marker,
+      left: `${clampPercent(((marker.timeMs - viewStartMs.value) / visibleDurationMs.value) * 100)}%`,
+    })),
+);
+const visibleShots = computed(() => {
+  const viewStart = viewStartMs.value;
+  const viewEnd = viewEndMs.value;
+  const viewDuration = visibleDurationMs.value;
+  return props.shots.flatMap((shot, index) => {
+    if (shot.endMs <= viewStart || shot.startMs >= viewEnd) return [];
+    const clippedStart = Math.max(viewStart, shot.startMs);
+    const clippedEnd = Math.min(viewEnd, shot.endMs);
+    const widthPx = ((clippedEnd - clippedStart) / viewDuration) * trackWidthPx.value;
+    const tileWidth = Math.max(56, Math.min(150, audioHeight.value * 1.55));
+    return [{
+      shot,
+      index,
+      left: `${clampPercent(((shot.startMs - viewStart) / viewDuration) * 100)}%`,
+      width: `${clampPercent(((shot.endMs - shot.startMs) / viewDuration) * 100)}%`,
+      thumbnailCopies: Array.from(
+        { length: Math.max(1, Math.min(10, Math.ceil(widthPx / tileWidth))) },
+        (_, tileIndex) => tileIndex,
+      ),
+      duration: formatDuration(shot.durationMs || shot.endMs - shot.startMs),
+      label: shot.title || shot.dialogue || shot.shotSize || '未命名镜头',
+      selected: shot.id === props.selectedId,
+      current: props.currentTimeMs >= shot.startMs && props.currentTimeMs < shot.endMs,
+      canTrimLeft: index > 0 && !v1Locked.value && !shot.locked,
+      canTrimRight: index < props.shots.length - 1 && !v1Locked.value && !shot.locked,
+    }];
+  });
+});
 
 const ticks = computed(() => {
   const width = trackWidthPx.value;
@@ -100,8 +132,7 @@ const ticks = computed(() => {
 
   const frameMs = 1000 / Math.max(1, props.fps || 24);
   const msPerPixel = 1000 / Math.max(1, props.pxPerSecond);
-  const minSpacingPx = 80;
-
+  const minSpacingPx = 82;
   let mode: 'frame' | 'second' | 'ten';
   let candidates: number[];
   if (props.pxPerSecond >= 384) {
@@ -125,24 +156,20 @@ const ticks = computed(() => {
 
   const labelFor = (ms: number): string => {
     if (mode === 'frame') return formatTimecodeFF(ms, props.fps);
-    if (mode === 'second') return formatSecond(ms);
-    return formatTenSecond(ms);
+    if (mode === 'second') return formatClock(ms);
+    return formatShortClock(ms);
   };
-
   const list: Array<{ percent: number; label: string }> = [];
   let first = Math.ceil(start / interval) * interval;
   if (mode === 'frame') first = Math.ceil(start / frameMs) * frameMs;
   const end = start + duration;
-  for (let t = first; t <= end; t += interval) {
-    if (t < 0) continue;
-    list.push({ percent: ((t - start) / duration) * 100, label: labelFor(t) });
+  for (let time = first; time <= end; time += interval) {
+    if (time < 0) continue;
+    list.push({ percent: ((time - start) / duration) * 100, label: labelFor(time) });
     if (list.length > 300) break;
   }
   return list;
 });
-
-const densityLabel = computed(() => `${props.pxPerSecond} px/s`);
-const heightLabel = computed(() => `${props.trackHeight}px`);
 
 /** S36-8：音量式缩放控件状态。 */
 const zoomOpen = ref(false);
@@ -152,6 +179,38 @@ const zoomDensityDraft = ref(String(props.pxPerSecond));
 const zoomHeightEditing = ref(false);
 const zoomDensityEditing = ref(false);
 const zoomCtlEl = ref<HTMLElement | null>(null);
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
+function clampIndex(value: number, length: number): number {
+  return Math.max(0, Math.min(length - 1, value));
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${pad2(Math.floor(total / 3600))}:${pad2(Math.floor((total % 3600) / 60))}:${pad2(total % 60)}`;
+}
+
+function formatShortClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${pad2(total % 60)}`;
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return hours > 0
+    ? `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`
+    : `${pad2(minutes)}:${pad2(seconds)}`;
+}
 
 function onDocumentPointerDown(event: PointerEvent): void {
   if (!zoomOpen.value) return;
@@ -219,8 +278,9 @@ function commitDensityInput(): void {
     zoomDensityEditing.value = false;
     return;
   }
-  setPxPerSecond(value);
-  zoomDensityDraft.value = String(snapToLevel(value, PX_PER_SEC_LEVELS));
+  const snapped = snapToLevel(value, PX_PER_SEC_LEVELS);
+  emit('updatePxPerSecond', snapped);
+  zoomDensityDraft.value = String(snapped);
   zoomDensityEditing.value = false;
 }
 
@@ -251,7 +311,6 @@ watch(
     if (!zoomHeightEditing.value) zoomHeightDraft.value = String(value);
   },
 );
-
 watch(
   () => props.pxPerSecond,
   (value) => {
@@ -275,25 +334,21 @@ function clampViewStart(value: number): number {
 function resetDensity(): void {
   if (props.pxPerSecond !== 96) emit('updatePxPerSecond', 96);
   viewStartMs.value = 0;
-  scheduleDraw();
 }
 
 function setPxPerSecond(nextPx: number, anchorClientX?: number): void {
   const clamped = snapToLevel(nextPx, PX_PER_SEC_LEVELS);
   if (clamped === props.pxPerSecond) return;
   const width = trackWidthPx.value;
+  const rect = timelineViewportEl.value?.getBoundingClientRect();
   const ratio =
-    width > 0 && anchorClientX !== undefined
-      ? Math.max(
-          0,
-          Math.min(1, (anchorClientX - (trackContainerEl.value?.getBoundingClientRect().left ?? 0)) / width),
-        )
+    width > 0 && anchorClientX !== undefined && rect
+      ? Math.max(0, Math.min(1, (anchorClientX - rect.left) / width))
       : 0.5;
   const anchorTime = viewStartMs.value + visibleDurationMs.value * ratio;
   emit('updatePxPerSecond', clamped);
-  const nextVisible = width > 0 ? (width / clamped) * 1000 : safeDuration.value / clamped;
+  const nextVisible = width > 0 ? (width / clamped) * 1000 : safeDuration.value;
   viewStartMs.value = clampViewStart(anchorTime - nextVisible * ratio);
-  scheduleDraw();
 }
 
 function stepPxPerSecond(direction: 1 | -1): number {
@@ -317,10 +372,9 @@ function panView(event: WheelEvent): void {
     Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.shiftKey ? event.deltaY : 0;
   if (delta === 0) return;
   event.preventDefault();
-  const rect = trackContainerEl.value?.getBoundingClientRect();
+  const rect = timelineViewportEl.value?.getBoundingClientRect();
   if (!rect || rect.width <= 0) return;
   viewStartMs.value = clampViewStart(viewStartMs.value + (delta / rect.width) * visibleDurationMs.value);
-  scheduleDraw();
 }
 
 function onRulerWheel(event: WheelEvent): void {
@@ -339,32 +393,6 @@ function onTracksWheel(event: WheelEvent): void {
     return;
   }
   panView(event);
-}
-
-function beginDividerDrag(event: PointerEvent): void {
-  event.preventDefault();
-  dividerStartY = event.clientY;
-  dividerStartHeight = props.trackHeight;
-  window.addEventListener('pointermove', handleDividerMove);
-  window.addEventListener('pointerup', finishDividerDrag, { once: true });
-}
-
-function handleDividerMove(event: PointerEvent): void {
-  const delta = event.clientY - dividerStartY;
-  const target = snapToLevel(dividerStartHeight + delta, TRACK_HEIGHT_LEVELS);
-  if (target !== props.trackHeight) emit('updateTrackHeight', target);
-}
-
-function finishDividerDrag(): void {
-  window.removeEventListener('pointermove', handleDividerMove);
-}
-
-function seekFromPointer(event: PointerEvent): void {
-  beginScrub(event, filmTrackEl.value);
-}
-
-function seekFromAudioPointer(event: PointerEvent): void {
-  beginScrub(event, audioCanvasEl.value);
 }
 
 function beginScrub(event: PointerEvent, element: HTMLElement | null): void {
@@ -386,90 +414,54 @@ function finishScrub(): void {
   scrubElement = null;
 }
 
-function findShotIndexAtX(clientX: number): number {
-  const canvas = shotCanvasEl.value;
-  const rect = canvas?.getBoundingClientRect();
-  if (!rect) return -1;
-  const timeMs = timeFromClientX(clientX, canvas);
-  let low = 0;
-  let high = props.shots.length - 1;
-  while (low <= high) {
-    const middle = (low + high) >> 1;
-    const shot = props.shots[middle];
-    if (timeMs < shot.startMs) high = middle - 1;
-    else if (timeMs >= shot.endMs) low = middle + 1;
-    else return middle;
-  }
-  return -1;
+function onRulerPointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  const viewport = timelineViewportEl.value;
+  if (!viewport) return;
+  beginScrub(event, viewport);
 }
 
-function findBoundaryAtX(clientX: number): number {
-  const canvas = shotCanvasEl.value;
-  const rect = canvas?.getBoundingClientRect();
-  if (!rect) return -1;
-  for (let index = 0; index < props.shots.length - 1; index += 1) {
-    const boundaryX =
-      rect.left +
-      ((props.shots[index].endMs - viewStartMs.value) / visibleDurationMs.value) * rect.width;
-    if (boundaryX < rect.left - 5 || boundaryX > rect.right + 5) continue;
-    if (Math.abs(clientX - boundaryX) <= 5) return index;
-  }
-  return -1;
+function onTimelineBlankPointerDown(event: PointerEvent): void {
+  if (event.button !== 0 || event.target !== event.currentTarget) return;
+  beginScrub(event, event.currentTarget as HTMLElement);
 }
 
-function onShotPointerDown(event: PointerEvent): void {
+function selectShotAt(shot: WorkspaceShot): void {
+  emit('select', shot);
+  emit('seek', shot.startMs);
+}
+
+function onShotClipPointerDown(index: number, event: PointerEvent): void {
+  if (event.button !== 0) return;
   event.preventDefault();
-  const boundary = findBoundaryAtX(event.clientX);
-  if (boundary >= 0) {
-    beginBoundaryDrag(boundary, event);
+  event.stopPropagation();
+  const shot = props.shots[index];
+  if (!shot) return;
+  if (v1Locked.value) {
+    selectShotAt(shot);
     return;
   }
-  const index = findShotIndexAtX(event.clientX);
-  if (index >= 0) {
-    const shot = props.shots[index];
-    emit('select', shot);
-    emit('seek', shot.startMs);
-    return;
-  }
-  emit('seek', timeFromClientX(event.clientX, shotCanvasEl.value));
+  selectShotAt(shot);
 }
 
-function onMarkerPointerDown(event: PointerEvent): void {
-  const canvas = markerCanvasEl.value;
-  const rect = canvas?.getBoundingClientRect();
-  if (!rect || props.markers.length === 0) return;
-  const targetX = event.clientX - rect.left;
-  let nearest: TimelineMarker | null = null;
-  let nearestDistance = Number.POSITIVE_INFINITY;
-  for (const marker of props.markers) {
-    const distance = Math.abs(
-      ((marker.timeMs - viewStartMs.value) / visibleDurationMs.value) * rect.width - targetX,
-    );
-    if (distance < nearestDistance) {
-      nearest = marker;
-      nearestDistance = distance;
-    }
-  }
-  if (nearest && nearestDistance <= 7) {
-    const shot = props.shots.find((item) => item.id === nearest?.shotId);
-    if (shot) emit('select', shot);
-    emit('seek', nearest.timeMs);
-    return;
-  }
-  emit('seek', timeFromClientX(event.clientX, canvas));
+function beginTrim(index: number, side: 'left' | 'right', event: PointerEvent): void {
+  if (v1Locked.value || props.shots[index]?.locked) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const boundaryIndex = side === 'right' ? index : index - 1;
+  if (boundaryIndex < 0 || boundaryIndex >= props.shots.length - 1) return;
+  beginBoundaryDrag(boundaryIndex, event);
 }
 
 function beginBoundaryDrag(index: number, event: PointerEvent): void {
   const shot = props.shots[index];
   const next = props.shots[index + 1];
   if (!shot || !next) return;
-
   activeBoundary = index;
   draggingBoundary.value = index;
   latestBoundaryTime = shot.endMs;
   boundaryMinTime = shot.startMs + 350;
   boundaryMaxTime = next.endMs - 350;
-  scheduleDraw();
   window.addEventListener('pointermove', handleBoundaryMove);
   window.addEventListener('pointerup', finishBoundaryDrag, { once: true });
   handleBoundaryMove(event);
@@ -479,11 +471,10 @@ function handleBoundaryMove(event: PointerEvent): void {
   if (activeBoundary === null) return;
   const candidate = Math.max(
     boundaryMinTime,
-    Math.min(boundaryMaxTime, timeFromClientX(event.clientX, shotCanvasEl.value)),
+    Math.min(boundaryMaxTime, timeFromClientX(event.clientX, timelineViewportEl.value)),
   );
   latestBoundaryTime = candidate;
   emit('boundaryChange', { index: activeBoundary, timeMs: candidate });
-  scheduleDraw();
 }
 
 function finishBoundaryDrag(): void {
@@ -493,7 +484,15 @@ function finishBoundaryDrag(): void {
   }
   activeBoundary = null;
   draggingBoundary.value = null;
-  scheduleDraw();
+}
+
+function onMarkerPointerDown(marker: TimelineMarker, event: PointerEvent): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const shot = props.shots.find((item) => item.id === marker.shotId);
+  if (shot) emit('select', shot);
+  emit('seek', marker.timeMs);
 }
 
 function resizeCanvas(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
@@ -511,207 +510,61 @@ function resizeCanvas(canvas: HTMLCanvasElement): CanvasRenderingContext2D | nul
   return context;
 }
 
-function loadThumbnail(url: string): void {
-  if (thumbnailImages.has(url)) {
-    const cached = thumbnailImages.get(url);
-    if (cached) scheduleDraw();
-    return;
-  }
-  thumbnailImages.set(url, null);
-  const image = new Image();
-  image.onload = () => {
-    thumbnailImages.set(url, image);
-    scheduleDraw();
-  };
-  image.onerror = () => {
-    thumbnailImages.set(url, null);
-  };
-  image.src = url;
-}
-
-function drawTimeline(): void {
+function drawAudioWaveform(): void {
   drawFrame = 0;
-  const shotCanvas = shotCanvasEl.value;
-  const markerCanvas = markerCanvasEl.value;
-  const audioCanvas = audioCanvasEl.value;
-  if (!shotCanvas || !markerCanvas || !audioCanvas) return;
-
-  const shotContext = resizeCanvas(shotCanvas);
-  const markerContext = resizeCanvas(markerCanvas);
-  const audioContext = resizeCanvas(audioCanvas);
-  if (!shotContext || !markerContext || !audioContext) return;
-
-  const shotRect = shotCanvas.getBoundingClientRect();
-  const markerRect = markerCanvas.getBoundingClientRect();
-  const audioRect = audioCanvas.getBoundingClientRect();
-  const shotWidth = shotRect.width;
-  const shotHeight = shotRect.height;
-  const markerWidth = markerRect.width;
-  const markerHeight = markerRect.height;
-  const audioWidth = audioRect.width;
-  const audioHeight = audioRect.height;
-
-  shotContext.clearRect(0, 0, shotWidth, shotHeight);
-  markerContext.clearRect(0, 0, markerWidth, markerHeight);
-  audioContext.clearRect(0, 0, audioWidth, audioHeight);
-
-  const selectedId = props.selectedId;
-  const currentTime = props.currentTimeMs;
-  const viewEnd = viewStartMs.value + visibleDurationMs.value;
-
-  if (props.inPointMs !== null && props.outPointMs !== null) {
-    const leftMs = Math.min(props.inPointMs, props.outPointMs);
-    const rightMs = Math.max(props.inPointMs, props.outPointMs);
-    if (rightMs > viewStartMs.value && leftMs < viewEnd) {
-      const x1 = ((leftMs - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
-      const x2 = ((rightMs - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
-      shotContext.fillStyle = 'rgba(34, 197, 94, 0.18)';
-      shotContext.fillRect(Math.max(0, x1), 0, Math.max(1, x2 - x1), shotHeight);
-    }
-  }
-
-  shotContext.imageSmoothingEnabled = true;
-  shotContext.imageSmoothingQuality = 'high';
-
-  for (let index = 0; index < props.shots.length; index += 1) {
-    const shot = props.shots[index];
-    if (shot.endMs < viewStartMs.value || shot.startMs > viewEnd) continue;
-    const x = ((shot.startMs - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
-    const rawWidth = ((shot.endMs - shot.startMs) / visibleDurationMs.value) * shotWidth;
-    const width = Math.max(1, rawWidth - 0.7);
-    const isCurrent = currentTime >= shot.startMs && currentTime < shot.endMs;
-    const isSelected = shot.id === selectedId;
-
-    if (shot.thumbnail && !thumbnailImages.has(shot.thumbnail)) loadThumbnail(shot.thumbnail);
-    const image = shot.thumbnail ? thumbnailImages.get(shot.thumbnail) : undefined;
-    if (image) {
-      shotContext.drawImage(image, x + 1, 1, Math.max(1, width - 2), Math.max(1, shotHeight - 2));
-    } else {
-      shotContext.fillStyle = isCurrent ? '#fbbf24' : '#f59e0b';
-      shotContext.fillRect(x, 0, width, shotHeight);
-    }
-
-    shotContext.fillStyle = '#0f172a';
-    shotContext.fillRect(x + Math.max(1, width - 0.7), 0, 0.7, shotHeight);
-
-    if (isSelected) {
-      shotContext.strokeStyle = '#ffffff';
-      shotContext.lineWidth = 2;
-      shotContext.strokeRect(x + 1, 1, Math.max(1, width - 2), Math.max(1, shotHeight - 2));
-    }
-
-    if (width >= 23 && props.trackHeight >= 96) {
-      shotContext.fillStyle = isCurrent ? '#1f2937' : '#ffffff';
-      shotContext.font = '600 10px "Cascadia Mono", Consolas, monospace';
-      shotContext.textAlign = 'center';
-      shotContext.textBaseline = 'middle';
-      shotContext.fillText(String(shot.index).padStart(2, '0'), x + width / 2, shotHeight / 2);
-    }
-  }
-
-  if (draggingBoundary.value !== null) {
-    const shot = props.shots[draggingBoundary.value];
-    if (shot) {
-      const x = ((shot.endMs - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
-      shotContext.strokeStyle = '#fbbf24';
-      shotContext.lineWidth = 2;
-      shotContext.beginPath();
-      shotContext.moveTo(x, 0);
-      shotContext.lineTo(x, shotHeight);
-      shotContext.stroke();
-    }
-  }
-
-  const playheadX = ((currentTime - viewStartMs.value) / visibleDurationMs.value) * shotWidth;
-  shotContext.strokeStyle = '#ffffff';
-  shotContext.lineWidth = 1;
-  shotContext.beginPath();
-  shotContext.moveTo(playheadX, 0);
-  shotContext.lineTo(playheadX, shotHeight);
-  shotContext.stroke();
-
-  markerContext.strokeStyle = 'rgba(71, 85, 105, 0.6)';
-  markerContext.lineWidth = 1;
-  markerContext.setLineDash([3, 3]);
-  markerContext.beginPath();
-  markerContext.moveTo(0, markerHeight / 2);
-  markerContext.lineTo(markerWidth, markerHeight / 2);
-  markerContext.stroke();
-  markerContext.setLineDash([]);
-
-  markerContext.fillStyle = '#22c55e';
-  for (const marker of props.markers) {
-    if (marker.timeMs < viewStartMs.value || marker.timeMs > viewEnd) continue;
-    const x = ((marker.timeMs - viewStartMs.value) / visibleDurationMs.value) * markerWidth;
-    markerContext.fillRect(x - 1, Math.max(2, markerHeight / 2 - 5), 2, Math.min(10, markerHeight - 4));
-  }
-
-  markerContext.strokeStyle = '#ffffff';
-  markerContext.lineWidth = 1;
-  markerContext.beginPath();
-  markerContext.moveTo(playheadX, 0);
-  markerContext.lineTo(playheadX, markerHeight);
-  markerContext.stroke();
-
-  const audioCenterY = audioHeight / 2;
-  audioContext.strokeStyle = 'rgba(100, 116, 139, 0.52)';
-  audioContext.lineWidth = 1;
-  audioContext.setLineDash([3, 3]);
-  audioContext.beginPath();
-  audioContext.moveTo(0, audioCenterY);
-  audioContext.lineTo(audioWidth, audioCenterY);
-  audioContext.stroke();
-  audioContext.setLineDash([]);
+  const canvas = audioCanvasEl.value;
+  if (!canvas) return;
+  const context = resizeCanvas(canvas);
+  if (!context) return;
+  const rect = canvas.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  context.clearRect(0, 0, width, height);
+  const centerY = height / 2;
+  context.strokeStyle = 'rgba(132, 204, 188, 0.3)';
+  context.lineWidth = 1;
+  context.setLineDash([3, 3]);
+  context.beginPath();
+  context.moveTo(0, centerY);
+  context.lineTo(width, centerY);
+  context.stroke();
+  context.setLineDash([]);
 
   if (props.audioWaveform) {
     const bucketWidthMs = props.audioWaveform.bucketMs;
-    const halfHeight = Math.max(2, audioHeight / 2 - 2);
+    const halfHeight = Math.max(2, height / 2 - 3);
     for (const bucket of props.audioWaveform.buckets) {
-      if (
-        bucket.startMs + bucketWidthMs < viewStartMs.value ||
-        bucket.startMs > viewEnd
-      ) {
+      if (bucket.startMs + bucketWidthMs < viewStartMs.value || bucket.startMs > viewEndMs.value) {
         continue;
       }
-      const x = ((bucket.startMs - viewStartMs.value) / visibleDurationMs.value) * audioWidth;
-      const width = Math.max(1, (bucketWidthMs / visibleDurationMs.value) * audioWidth - 0.35);
-      const peakHeight = Math.max(0.5, bucket.peak * halfHeight);
+      const x = ((bucket.startMs - viewStartMs.value) / visibleDurationMs.value) * width;
+      const bucketWidth = Math.max(
+        1,
+        (bucketWidthMs / visibleDurationMs.value) * width - 0.3,
+      );
+      const peakHeight = Math.max(0.6, bucket.peak * halfHeight);
       const rmsHeight = Math.max(0.5, bucket.rms * halfHeight);
-      audioContext.fillStyle = 'rgba(56, 189, 248, 0.24)';
-      audioContext.fillRect(x, audioCenterY - peakHeight, width, peakHeight * 2);
-      audioContext.fillStyle = 'rgba(125, 211, 252, 0.68)';
-      audioContext.fillRect(x, audioCenterY - rmsHeight, width, rmsHeight * 2);
+      context.fillStyle = 'rgba(199, 232, 220, 0.34)';
+      context.fillRect(x, centerY - peakHeight, bucketWidth, peakHeight * 2);
+      context.fillStyle = 'rgba(228, 246, 238, 0.84)';
+      context.fillRect(x, centerY - rmsHeight, bucketWidth, rmsHeight * 2);
     }
   }
-
-  audioContext.strokeStyle = '#ef4444';
-  audioContext.lineWidth = 1;
-  audioContext.beginPath();
-  audioContext.moveTo(playheadX, 0);
-  audioContext.lineTo(playheadX, audioHeight);
-  audioContext.stroke();
 }
 
 function scheduleDraw(): void {
   if (drawFrame) return;
-  drawFrame = requestAnimationFrame(drawTimeline);
+  drawFrame = requestAnimationFrame(drawAudioWaveform);
 }
 
 watch(
   () => [
-    props.shots,
-    props.markers,
     props.audioWaveform,
-    props.selectedId,
-    props.currentTimeMs,
     props.durationMs,
-    props.trackHeight,
     props.pxPerSecond,
-    props.inPointMs,
-    props.outPointMs,
-    draggingBoundary.value,
     viewStartMs.value,
     trackWidthPx.value,
+    audioHeight.value,
   ],
   scheduleDraw,
 );
@@ -723,12 +576,11 @@ watch(
     const end = viewStartMs.value + visibleDurationMs.value;
     if (timeMs >= viewStartMs.value && timeMs <= end) return;
     viewStartMs.value = clampViewStart(timeMs - visibleDurationMs.value * 0.12);
-    scheduleDraw();
   },
 );
 
 function measureTrackWidth(): void {
-  const rect = trackContainerEl.value?.getBoundingClientRect();
+  const rect = timelineViewportEl.value?.getBoundingClientRect();
   trackWidthPx.value = rect && rect.width > 0 ? rect.width : 0;
 }
 
@@ -736,15 +588,12 @@ onMounted(async () => {
   await nextTick();
   document.addEventListener('pointerdown', onDocumentPointerDown);
   measureTrackWidth();
-  // px/s 档位不再「整条时间线适配一屏」，初始视窗对准播放头，避免播放头在视野外。
   viewStartMs.value = clampViewStart(props.currentTimeMs - visibleDurationMs.value * 0.12);
   resizeObserver = new ResizeObserver(() => {
     measureTrackWidth();
     scheduleDraw();
   });
-  if (trackContainerEl.value) resizeObserver.observe(trackContainerEl.value);
-  if (shotCanvasEl.value) resizeObserver.observe(shotCanvasEl.value);
-  if (markerCanvasEl.value) resizeObserver.observe(markerCanvasEl.value);
+  if (timelineViewportEl.value) resizeObserver.observe(timelineViewportEl.value);
   if (audioCanvasEl.value) resizeObserver.observe(audioCanvasEl.value);
   scheduleDraw();
 });
@@ -758,20 +607,33 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', finishBoundaryDrag);
   window.removeEventListener('pointermove', scrubMove);
   window.removeEventListener('pointerup', finishScrub);
-  window.removeEventListener('pointermove', handleDividerMove);
-  window.removeEventListener('pointerup', finishDividerDrag);
 });
 </script>
 
 <template>
-  <section class="timeline" :style="{ '--track-height': `${trackHeight}px` }">
+  <section class="timeline" :style="{ '--track-height': `${trackHeight}px`, '--audio-height': `${audioHeight}px` }">
+    <div class="timeline-context">
+      <div class="timeline-tab">
+        <AppIcon name="film" :size="12" />
+        <span>Timeline 1</span>
+        <em>{{ shots.length }} 镜头</em>
+      </div>
+      <span class="source-chip">单视频源 · V2 参考轨</span>
+      <span class="timeline-duration">{{ durationLabel }}</span>
+    </div>
+
     <div class="ruler-row" @wheel="onRulerWheel">
-      <span class="label">缩放</span>
-      <div ref="trackContainerEl" class="track-container">
-        <span v-for="tick in ticks" :key="`${tick.percent}-${tick.label}`" class="tick" :style="{ left: `${tick.percent}%` }">
+      <span class="ruler-head">时间码</span>
+      <div ref="timelineViewportEl" class="track-container" @pointerdown="onRulerPointerDown">
+        <span
+          v-for="tick in ticks"
+          :key="`${tick.percent}-${tick.label}`"
+          class="tick"
+          :style="{ left: `${tick.percent}%` }"
+        >
           <i></i><em>{{ tick.label }}</em>
         </span>
-        <div ref="zoomCtlEl" class="zoom-ctl">
+        <div ref="zoomCtlEl" class="zoom-ctl" @pointerdown.stop>
           <button
             type="button"
             class="zoom-btn"
@@ -837,67 +699,175 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="tracks" @wheel="onTracksWheel">
-      <div class="track-row">
-        <span class="label">影片</span>
-        <button
-          ref="filmTrackEl"
-          class="track film"
-          type="button"
-          aria-label="影片层，点击跳转播放位置"
-          @pointerdown="seekFromPointer"
-        >
-          <span class="film-base"></span>
-          <span class="film-progress" :style="{ width: `${playheadPercent}%` }"></span>
+    <div class="tracks" :style="timelineGridStyle" @wheel="onTracksWheel">
+      <div class="track-row track-row-v2" :class="{ 'track-hidden': !v2Visible }">
+        <div class="track-head">
+          <div class="head-topline">
+            <span class="track-badge video-badge">V2</span>
+            <div class="head-actions">
+              <button
+                type="button"
+                class="head-control"
+                :class="{ active: v2Visible }"
+                :aria-pressed="v2Visible"
+                title="显示或隐藏 V2 缩略图"
+                @click="v2Visible = !v2Visible"
+              >◉</button>
+              <button type="button" class="head-control muted-control" title="V2 为只读参考轨" disabled>⌾</button>
+            </div>
+          </div>
+          <strong>视频 2</strong>
+          <small>{{ shots.length }} 个片段 · 缩略图参考</small>
+        </div>
+        <div class="lane v2-lane" @pointerdown="onTimelineBlankPointerDown">
+          <div
+            v-for="item in visibleShots"
+            :key="`v2-${item.shot.id}`"
+            class="v2-clip"
+            :class="{ selected: item.selected, current: item.current }"
+            :style="{ left: item.left, width: item.width }"
+            :title="`${String(item.shot.index).padStart(2, '0')} · ${item.label}`"
+            @pointerdown.stop="selectShotAt(item.shot)"
+          >
+            <div v-if="v2Visible && item.shot.thumbnail" class="v2-tiles">
+              <img
+                v-for="copy in item.thumbnailCopies"
+                :key="copy"
+                :src="item.shot.thumbnail"
+                alt=""
+                draggable="false"
+              />
+            </div>
+            <div v-else class="v2-fallback">
+              <span>{{ String(item.shot.index).padStart(2, '0') }}</span>
+            </div>
+            <div class="v2-caption">
+              <span>{{ item.label }}</span>
+              <em>{{ item.duration }}</em>
+            </div>
+          </div>
+          <div v-if="shots.length === 0" class="lane-empty">检测镜头后，这里显示缩略图参考条</div>
+          <div v-if="!v2Visible" class="lane-empty hidden-note">V2 缩略图已隐藏</div>
           <span class="playhead" :style="{ left: `${playheadPercent}%` }"></span>
-        </button>
-      </div>
-
-      <div class="track-divider" role="separator" aria-label="拖动分隔条调节轨道高度" @pointerdown="beginDividerDrag"></div>
-
-      <div class="track-row">
-        <span class="label">镜头</span>
-        <div class="track canvas-track shot-track">
-          <canvas
-            ref="shotCanvasEl"
-            class="timeline-canvas"
-            role="img"
-            :aria-label="`${shots.length} 个镜头分段，点击跳转，拖动边界微调`"
-            @pointerdown="onShotPointerDown"
-          ></canvas>
         </div>
       </div>
 
-      <div class="track-divider" role="separator" aria-label="拖动分隔条调节轨道高度" @pointerdown="beginDividerDrag"></div>
-
-      <div class="track-row">
-        <span class="label">标注</span>
-        <div class="track canvas-track marker-track">
-          <canvas
-            ref="markerCanvasEl"
-            class="timeline-canvas"
-            role="img"
-            :aria-label="`${markers.length} 个截图或笔记标记`"
-            @pointerdown="onMarkerPointerDown"
-          ></canvas>
+      <div class="track-row track-row-v1" :class="{ 'track-hidden': !v1Visible }">
+        <div class="track-head">
+          <div class="head-topline">
+            <span class="track-badge video-badge">V1</span>
+            <div class="head-actions">
+              <button
+                type="button"
+                class="head-control"
+                :class="{ active: v1Visible }"
+                :aria-pressed="v1Visible"
+                title="显示或隐藏 V1 剪辑"
+                @click="v1Visible = !v1Visible"
+              >◉</button>
+              <button
+                type="button"
+                class="head-control"
+                :class="{ active: v1Locked }"
+                :aria-pressed="v1Locked"
+                title="锁定 V1 边界编辑"
+                @click="v1Locked = !v1Locked"
+              >{{ v1Locked ? '▣' : '□' }}</button>
+            </div>
+          </div>
+          <strong>视频 1</strong>
+          <small>{{ shots.length }} 个剪辑 · 边界可调</small>
+        </div>
+        <div class="lane v1-lane" @pointerdown="onTimelineBlankPointerDown">
+          <div v-if="selectionRange" class="selection-range" :style="selectionRange"></div>
+          <div
+            v-for="item in visibleShots"
+            :key="`v1-${item.shot.id}`"
+            class="v1-clip"
+            :class="{
+              selected: item.selected,
+              current: item.current,
+              dragging: draggingBoundary === item.index || draggingBoundary === item.index - 1,
+            }"
+            :style="{ left: item.left, width: item.width }"
+            @pointerdown="onShotClipPointerDown(item.index, $event)"
+          >
+            <button
+              v-if="item.canTrimLeft"
+              type="button"
+              class="trim-handle trim-left"
+              title="拖动调整前一个镜头的出点"
+              @pointerdown="beginTrim(item.index, 'left', $event)"
+            ></button>
+            <div class="v1-copy">
+              <span class="v1-index">{{ String(item.shot.index).padStart(2, '0') }}</span>
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.duration }} · {{ item.shot.shotSize || '镜头' }}</small>
+            </div>
+            <button
+              v-if="item.canTrimRight"
+              type="button"
+              class="trim-handle trim-right"
+              title="拖动调整本镜头出点"
+              @pointerdown="beginTrim(item.index, 'right', $event)"
+            ></button>
+          </div>
+          <button
+            v-for="marker in visibleMarkers"
+            :key="`marker-${marker.id}`"
+            type="button"
+            class="marker-pin"
+            :class="marker.type"
+            :style="{ left: marker.left }"
+            :title="marker.label"
+            @pointerdown="onMarkerPointerDown(marker, $event)"
+          ><span></span></button>
+          <div v-if="shots.length === 0" class="lane-empty">暂无镜头剪辑</div>
+          <span class="playhead" :style="{ left: `${playheadPercent}%` }"></span>
         </div>
       </div>
 
-      <div class="track-divider" role="separator" aria-label="拖动分隔条调节轨道高度" @pointerdown="beginDividerDrag"></div>
-
-      <div class="track-row">
-        <span class="label audio-label">
-          音频
-          <i v-if="audioLoading" class="audio-loading-dot"></i>
-        </span>
-        <div class="track canvas-track audio-track">
-          <canvas
-            ref="audioCanvasEl"
-            class="timeline-canvas"
-            role="img"
-            :aria-label="audioWaveform ? `${audioWaveform.buckets.length} 个音频包络分桶` : '音频波形加载中或不可用'"
-            @pointerdown="seekFromAudioPointer"
-          ></canvas>
+      <div class="track-row track-row-a1" :class="{ 'track-muted': audioMuted }">
+        <div class="track-head audio-head">
+          <div class="head-topline">
+            <span class="track-badge audio-badge">A1</span>
+            <div class="head-actions audio-actions">
+              <button
+                type="button"
+                class="head-control letter-control"
+                :class="{ active: audioMuted }"
+                :aria-pressed="audioMuted"
+                title="静音 A1"
+                @click="audioMuted = !audioMuted"
+              >M</button>
+              <button
+                type="button"
+                class="head-control letter-control"
+                :class="{ active: audioSolo }"
+                :aria-pressed="audioSolo"
+                title="独奏 A1"
+                @click="audioSolo = !audioSolo"
+              >S</button>
+            </div>
+          </div>
+          <strong>音频 1</strong>
+          <small>原声 · {{ durationLabel }}</small>
+        </div>
+        <div class="lane a1-lane" :class="{ muted: audioMuted, solo: audioSolo }" @pointerdown="onTimelineBlankPointerDown">
+          <div class="audio-clip">
+            <canvas
+              ref="audioCanvasEl"
+              class="audio-canvas"
+              role="img"
+              :aria-label="audioWaveform ? `${audioWaveform.buckets.length} 个音频包络分桶` : '音频波形加载中或不可用'"
+            ></canvas>
+            <span class="audio-caption">
+              <i v-if="audioLoading" class="audio-loading-dot"></i>
+              {{ audioLoading ? '读取音频波形…' : mediaLabel }}
+              <em>{{ durationLabel }}</em>
+            </span>
+          </div>
+          <span class="playhead" :style="{ left: `${playheadPercent}%` }"></span>
         </div>
       </div>
     </div>
@@ -906,50 +876,619 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .timeline {
+  position: relative;
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  gap: 2px;
-  padding: 4px 12px;
   border: 1px solid var(--border);
   border-top: 0;
-  border-radius: 0;
-  background: var(--bg-panel);
+  background: #111923;
+  color: var(--text-secondary);
 }
 
-.tracks {
+.timeline-context {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  height: 26px;
+  align-items: stretch;
+  gap: 10px;
+  padding: 0 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  background: #0c131c;
+}
+
+.timeline-tab {
+  display: flex;
+  min-width: 170px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  border-left: 2px solid #3d8de8;
+  background: rgba(61, 141, 232, 0.08);
+  color: #dce7f5;
+  font-size: 10px;
+}
+
+.timeline-tab em {
+  color: #6f8194;
+  font-family: var(--mono);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.source-chip {
+  align-self: center;
+  padding: 2px 7px;
+  border: 1px solid rgba(91, 112, 135, 0.22);
+  border-radius: 3px;
+  color: #687b90;
+  font-size: 8px;
+}
+
+.timeline-duration {
+  margin-left: auto;
+  align-self: center;
+  color: #65788d;
+  font-family: var(--mono);
+  font-size: 9px;
 }
 
 .ruler-row,
 .track-row {
   display: grid;
   min-width: 0;
-  grid-template-columns: 40px minmax(0, 1fr);
-  align-items: center;
+  grid-template-columns: clamp(146px, 20vw, 232px) minmax(0, 1fr);
 }
 
 .ruler-row {
-  height: 16px;
+  position: relative;
+  z-index: 12;
+  height: 28px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  background: #101821;
+}
+
+.ruler-head {
+  display: flex;
+  align-items: center;
+  padding-left: 15px;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  color: #5e7186;
+  font-size: 8px;
+  letter-spacing: 0.6px;
 }
 
 .track-container {
   position: relative;
-  height: 16px;
+  min-width: 0;
+  overflow: hidden;
+  cursor: crosshair;
 }
 
-.label {
-  color: var(--text-faint);
+.tick {
+  position: absolute;
+  top: 0;
+  display: flex;
+  height: 100%;
+  align-items: flex-start;
+  gap: 4px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.tick i {
+  width: 1px;
+  height: 6px;
+  background: rgba(148, 163, 184, 0.34);
+}
+
+.tick em {
+  color: #718397;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.tracks {
+  display: flex;
+  max-height: min(58vh, 620px);
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.track-row {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.track-row-v2 {
+  min-height: var(--track-height);
+}
+
+.track-row-v1 {
+  min-height: var(--track-height);
+}
+
+.track-row-a1 {
+  min-height: var(--audio-height);
+}
+
+.track-head {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 7px 11px;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  background: #111923;
+}
+
+.track-head strong {
+  overflow: hidden;
+  color: #b9c7d7;
   font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-head small {
+  overflow: hidden;
+  color: #687b90;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.head-topline {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.track-badge {
+  display: inline-grid;
+  min-width: 28px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  place-items: center;
+}
+
+.video-badge {
+  border: 1px solid rgba(94, 155, 230, 0.5);
+  background: rgba(49, 107, 173, 0.2);
+  color: #8bb9ed;
+}
+
+.audio-badge {
+  border: 1px solid rgba(72, 184, 143, 0.5);
+  background: rgba(43, 145, 109, 0.2);
+  color: #8ad9bb;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.head-control {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: #64778b;
+  font-family: var(--mono);
+  font-size: 11px;
+  place-items: center;
+}
+
+.head-control:hover:not(:disabled) {
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(148, 163, 184, 0.08);
+  color: #bac7d6;
+}
+
+.head-control.active {
+  color: #72b4ff;
+}
+
+.head-control.muted-control {
+  color: #455467;
+  opacity: 0.65;
+}
+
+.letter-control {
+  border-color: rgba(148, 163, 184, 0.16);
+  font-size: 8px;
+}
+
+.letter-control.active {
+  border-color: rgba(234, 179, 8, 0.55);
+  background: rgba(234, 179, 8, 0.12);
+  color: #f4c84a;
+}
+
+.lane {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background-color: #111923;
+  background-image: linear-gradient(
+    to right,
+    rgba(148, 163, 184, 0.09) 1px,
+    transparent 1px
+  );
+  background-size: var(--second-px) 100%;
+}
+
+.v2-lane {
+  height: var(--track-height);
+  padding: 4px 0;
+  background-color: #101923;
+}
+
+.v1-lane {
+  height: var(--track-height);
+  padding: 4px 0;
+  background-color: #111923;
+}
+
+.a1-lane {
+  height: var(--audio-height);
+  padding: 4px 0;
+  background-color: #101b18;
+}
+
+.v2-clip,
+.v1-clip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  min-width: 2px;
+  overflow: hidden;
+  border-radius: 4px;
+}
+
+.v2-clip {
+  border: 1px solid rgba(99, 151, 207, 0.56);
+  background: #1a3047;
+  cursor: pointer;
+}
+
+.v2-clip.selected {
+  border-color: #e7f2ff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34);
+  z-index: 3;
+}
+
+.v2-clip.current {
+  border-color: #f4c84a;
+}
+
+.v2-tiles {
+  position: absolute;
+  inset: 0 0 18px;
+  display: flex;
+  overflow: hidden;
+  background: #0a1119;
+}
+
+.v2-tiles img {
+  width: 90px;
+  min-width: 1px;
+  height: 100%;
+  flex: 1 1 0;
+  border-right: 1px solid rgba(0, 0, 0, 0.34);
+  object-fit: cover;
+  user-select: none;
+}
+
+.v2-fallback {
+  position: absolute;
+  inset: 0 0 18px;
+  display: grid;
+  background:
+    linear-gradient(135deg, rgba(69, 118, 168, 0.24), rgba(25, 48, 71, 0.38)),
+    #152435;
+  color: #7395b8;
+  font-family: var(--mono);
+  font-size: 10px;
+  place-items: center;
+}
+
+.v2-caption {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  height: 18px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px;
+  background: rgba(33, 64, 91, 0.9);
+  color: #cfdce9;
+  font-size: 8px;
+}
+
+.v2-caption span {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v2-caption em {
+  color: #89a1b8;
+  font-family: var(--mono);
+  font-size: 7px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.v1-clip {
+  border: 1px solid rgba(185, 145, 214, 0.72);
+  background:
+    linear-gradient(180deg, rgba(175, 126, 202, 0.9), rgba(112, 77, 137, 0.82));
+  cursor: pointer;
+}
+
+.v1-clip.selected {
+  border-color: #f7fbff;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.48),
+    0 0 0 1px rgba(255, 255, 255, 0.28);
+  z-index: 4;
+}
+
+.v1-clip.current {
+  background:
+    linear-gradient(180deg, rgba(196, 151, 221, 0.96), rgba(126, 87, 153, 0.9));
+}
+
+.v1-clip.dragging {
+  filter: brightness(1.15);
+}
+
+.v1-copy {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 3px 9px;
+  pointer-events: none;
+}
+
+.v1-index {
+  color: rgba(247, 242, 250, 0.7);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.v1-copy strong {
+  overflow: hidden;
+  color: #fbf7fd;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v1-copy small {
+  overflow: hidden;
+  color: rgba(240, 228, 247, 0.74);
+  font-family: var(--mono);
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 7;
+  width: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.trim-handle::after {
+  position: absolute;
+  top: 24%;
+  bottom: 24%;
+  width: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.8);
+  content: '';
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.trim-left {
+  left: 0;
+}
+
+.trim-left::after {
+  left: 2px;
+}
+
+.trim-right {
+  right: 0;
+}
+
+.trim-right::after {
+  right: 2px;
+}
+
+.v1-clip:hover .trim-handle::after,
+.v1-clip.selected .trim-handle::after {
+  opacity: 1;
+}
+
+.selection-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  border-right: 1px solid rgba(74, 222, 128, 0.64);
+  border-left: 1px solid rgba(74, 222, 128, 0.64);
+  background: rgba(34, 197, 94, 0.13);
+  pointer-events: none;
+}
+
+.marker-pin {
+  position: absolute;
+  top: 0;
+  z-index: 9;
+  width: 1px;
+  height: 9px;
+  padding: 0;
+  border: 0;
+  background: #f4c84a;
+  cursor: pointer;
+}
+
+.marker-pin span {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 7px;
+  height: 5px;
+  border-radius: 0 0 2px 2px;
+  background: inherit;
+}
+
+.marker-pin.note {
+  background: #57d7a6;
+}
+
+.audio-clip {
+  position: absolute;
+  inset: 4px 0;
+  overflow: hidden;
+  border: 1px solid rgba(99, 197, 157, 0.62);
+  border-radius: 4px;
+  background: #245c47;
+}
+
+.audio-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.audio-caption {
+  position: absolute;
+  right: 7px;
+  bottom: 4px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: rgba(236, 255, 247, 0.92);
+  font-size: 8px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  white-space: nowrap;
+}
+
+.audio-caption em {
+  color: rgba(208, 238, 226, 0.68);
+  font-family: var(--mono);
+  font-size: 7px;
+  font-style: normal;
+}
+
+.audio-loading-dot {
+  width: 4px;
+  height: 4px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #f4c84a;
+  animation: audio-pulse 900ms ease-in-out infinite;
+}
+
+.a1-lane.muted .audio-clip,
+.track-muted .audio-clip {
+  opacity: 0.42;
+}
+
+.a1-lane.solo .audio-clip {
+  border-color: #f4c84a;
+  box-shadow: inset 0 0 0 1px rgba(244, 200, 74, 0.22);
+}
+
+.lane-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  color: #4e6277;
+  font-size: 9px;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+
+.hidden-note {
+  color: #667b90;
+}
+
+.track-hidden .lane {
+  opacity: 0.48;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 15;
+  width: 1px;
+  background: #f2f7fd;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.playhead::before {
+  position: absolute;
+  top: 0;
+  left: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: #f2f7fd;
+  content: '';
+}
+
+.playhead-ruler {
+  top: 0;
+  bottom: 0;
 }
 
 .zoom-ctl {
   position: absolute;
-  top: -4px;
-  right: 0;
-  z-index: 20;
+  top: 4px;
+  right: 7px;
+  z-index: 40;
 }
 
 .zoom-btn {
@@ -960,8 +1499,8 @@ onBeforeUnmount(() => {
   padding: 0 8px;
   border: 1px solid rgba(100, 116, 139, 0.35);
   border-radius: 999px;
-  background: rgba(38, 52, 73, 0.78);
-  color: var(--text-faint);
+  background: rgba(38, 52, 73, 0.9);
+  color: #788ca1;
   font-family: var(--mono);
   font-size: 8px;
   white-space: nowrap;
@@ -969,13 +1508,13 @@ onBeforeUnmount(() => {
 
 .zoom-btn:hover,
 .zoom-btn.active {
-  border-color: var(--border-strong);
-  color: var(--text-secondary);
+  border-color: rgba(148, 163, 184, 0.58);
+  color: #b7c5d5;
 }
 
 .zoom-btn.dragging {
   border-color: rgba(96, 165, 250, 0.5);
-  color: var(--blue-hi);
+  color: #72b4ff;
 }
 
 .zoom-pop {
@@ -990,8 +1529,8 @@ onBeforeUnmount(() => {
   padding: 10px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  background: var(--bg-panel);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  background: #141e2a;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
 .zoom-row {
@@ -1002,14 +1541,14 @@ onBeforeUnmount(() => {
 }
 
 .zoom-row > span {
-  color: var(--text-faint);
+  color: #718397;
   font-size: 9px;
 }
 
 .zoom-row input[type='range'] {
   width: 100%;
   min-width: 0;
-  accent-color: var(--blue);
+  accent-color: #4b95e8;
 }
 
 .zoom-num {
@@ -1048,98 +1587,8 @@ onBeforeUnmount(() => {
 }
 
 .zoom-hint {
-  color: var(--text-faint);
+  color: #5f7084;
   font-size: 8px;
-}
-
-.tick {
-  position: absolute;
-  top: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  transform: translateX(-50%);
-}
-
-.tick i {
-  width: 1px;
-  height: 4px;
-  background: var(--border);
-}
-
-.tick em {
-  color: var(--text-faint);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-style: normal;
-  white-space: nowrap;
-}
-
-.track {
-  position: relative;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.film {
-  height: var(--track-height);
-}
-
-.film-base,
-.film-progress {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  height: 12px;
-  border-radius: 3px;
-  transform: translateY(-50%);
-}
-
-.film-base {
-  width: 100%;
-  background: rgba(59, 130, 246, 0.2);
-}
-
-.film-progress {
-  background: var(--blue-hi);
-}
-
-.canvas-track {
-  height: var(--track-height);
-  cursor: pointer;
-}
-
-.track-divider {
-  height: 5px;
-  margin-left: 40px;
-  border-radius: 2px;
-  background: transparent;
-  cursor: row-resize;
-  transition: background 120ms ease;
-}
-
-.track-divider:hover {
-  background: rgba(148, 163, 184, 0.28);
-}
-
-.audio-label {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.audio-loading-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--amber);
-  animation: audio-pulse 900ms ease-in-out infinite;
-}
-
-.audio-track .timeline-canvas {
-  cursor: crosshair;
 }
 
 @keyframes audio-pulse {
@@ -1148,45 +1597,23 @@ onBeforeUnmount(() => {
   }
 }
 
-.timeline-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
+@media (max-width: 980px) {
+  .source-chip {
+    display: none;
+  }
 
-.shot-track .timeline-canvas {
-  cursor: col-resize;
-}
+  .ruler-row,
+  .track-row {
+    grid-template-columns: 132px minmax(0, 1fr);
+  }
 
-.marker-track .timeline-canvas {
-  cursor: crosshair;
-}
+  .track-head {
+    padding-right: 7px;
+    padding-left: 8px;
+  }
 
-.playhead {
-  position: absolute;
-  top: -4px;
-  bottom: -4px;
-  width: 1px;
-  background: #fff;
-  pointer-events: none;
-  transform: translateX(-50%);
-  z-index: 3;
-}
-
-.playhead::before {
-  position: absolute;
-  top: -1px;
-  left: -2px;
-  width: 5px;
-  height: 5px;
-  border-radius: 1px;
-  background: #fff;
-  content: '';
-}
-
-.playhead-ruler {
-  top: 10px;
-  bottom: auto;
-  height: 6px;
+  .v1-copy small {
+    display: none;
+  }
 }
 </style>

@@ -251,6 +251,9 @@ const displayDurationMs = computed(() => {
 });
 const displayTimeMs = computed(() => (player.hasFile ? player.timeMs : previewTimeMs.value));
 const shotListTitle = computed(() => (demoMode.value ? '示例镜头' : activeProject.value?.name ?? '镜头列表'));
+const mediaLabel = computed(
+  () => activeProject.value?.media.filename || (demoMode.value ? '示例影片原声' : '影片原声'),
+);
 const topTimecode = computed(
   () => `${formatReadout(displayTimeMs.value)} / ${formatReadout(displayDurationMs.value)}`,
 );
@@ -2848,6 +2851,7 @@ onBeforeUnmount(() => {
         :busy="busy"
         :audio-waveform="audioWaveform"
         :audio-loading="audioLoading"
+        :media-label="mediaLabel"
         :track-height="timelineSettings.trackHeight"
         :px-per-second="timelineSettings.pxPerSecond"
         :in-point-ms="inPointMs"

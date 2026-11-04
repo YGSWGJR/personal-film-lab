@@ -341,7 +341,9 @@ export class DetectService {
       );
 
       ensureProjectDirs(this.data.dataRoot, project.id);
-      framesDir = resolveDetectFramesDir(project.id);
+      // S37：每个检测 job 独立帧目录，避免旧任务失败/取消后的异步 cleanup
+      // 删掉新任务刚抽出的帧（detect000001.jpg 丢失）。
+      framesDir = join(resolveDetectFramesDir(project.id), job.jobId);
       const thumbsDir = join(resolveThumbCacheDir(), project.id);
       const fps = project.media.fps && project.media.fps > 0 ? project.media.fps : 25;
       const durationMs = project.media.durationMs;
@@ -374,6 +376,20 @@ export class DetectService {
         },
       );
       this.assertActive(job);
+      if (extraction.frames.length === 0) {
+        throw new DetectError('DETECT_FRAMES_MISSING', '抽帧完成但没有可用帧，请重新检测', {
+          jobId: job.jobId,
+          framesDir,
+        });
+      }
+      const missingFrame = extraction.frames.find((frame) => !existsSync(frame.path));
+      if (missingFrame) {
+        throw new DetectError('DETECT_FRAMES_MISSING', '检测帧文件在分析前被清理，请重新检测', {
+          jobId: job.jobId,
+          framesDir,
+          missingPath: missingFrame.path,
+        });
+      }
 
       const analysis = await this.runPython(
         job,

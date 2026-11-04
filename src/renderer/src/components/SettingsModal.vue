@@ -56,6 +56,7 @@ const activeProviderId = ref('');
 const providerKeyDrafts = reactive<Record<string, string>>({});
 const providerClearKeys = reactive<Record<string, boolean>>({});
 const manualModelDraft = ref('');
+const initialAiSnapshot = ref('');
 const activeProvider = computed(
   () => aiProviders.value.find((item) => item.id === activeProviderId.value) ?? null,
 );
@@ -197,6 +198,10 @@ function fillDraft(settings: Settings): void {
     providerClearKeys[provider.id] = false;
   }
   manualModelDraft.value = '';
+  initialAiSnapshot.value = JSON.stringify({
+    providers: aiProviders.value,
+    activeProviderId: activeProviderId.value,
+  });
   aiAgentEndpoint.value = settings.ai?.agentEndpoint ?? '';
   aiSegmentSeconds.value = settings.ai?.segmentSeconds ?? 600;
   aiTimeoutSeconds.value = settings.ai?.timeoutSeconds ?? 900;
@@ -394,6 +399,11 @@ function currentProviderKeyDraft(provider: AiProviderConfig): string {
   return providerKeyDrafts[provider.id]?.trim() ?? '';
 }
 
+function onProviderKeyInput(provider: AiProviderConfig, event: Event): void {
+  providerKeyDrafts[provider.id] = (event.target as HTMLInputElement).value;
+  if (providerKeyDrafts[provider.id].trim()) providerClearKeys[provider.id] = false;
+}
+
 async function fetchModels(): Promise<void> {
   const provider = activeProvider.value;
   if (!provider || aiProbeState.value.tone === 'busy') return;
@@ -468,6 +478,32 @@ async function probeAiProvider(): Promise<void> {
   }
 }
 
+function hasPendingAiChanges(): boolean {
+  if (Object.values(providerKeyDrafts).some((value) => value.trim().length > 0)) return true;
+  if (Object.values(providerClearKeys).some(Boolean)) return true;
+  return (
+    JSON.stringify({ providers: aiProviders.value, activeProviderId: activeProviderId.value }) !==
+    initialAiSnapshot.value
+  );
+}
+
+/**
+ * S37：点 X / 遮罩退出时，若有未保存的供应商/Key 草稿，先尝试保存再关闭。
+ * 保存校验失败时停留在设置面板并显示错误；底部「取消」仍表示放弃草稿。
+ */
+function requestClose(): void {
+  if (props.saving) return;
+  if (lockedByEnvironment.value) {
+    emit('close');
+    return;
+  }
+  if (hasPendingAiChanges()) {
+    submit();
+    return;
+  }
+  emit('close');
+}
+
 function submit(): void {
   if (props.saving || lockedByEnvironment.value) return;
   const rootPaths = {
@@ -537,7 +573,7 @@ function submit(): void {
       v-if="open"
       class="modal-mask"
       @pointerdown.self="!saving && !checkingEnvironment && !resettingDefaults
-        && emit('close')"
+        && requestClose()"
     >
       <form class="settings-modal" @submit.prevent="submit">
         <header class="modal-head">
@@ -550,12 +586,13 @@ function submit(): void {
             type="button"
             :disabled="saving || checkingEnvironment || resettingDefaults"
             aria-label="关闭"
-            @click="emit('close')"
+            @click="requestClose"
           >
             ×
           </button>
         </header>
 
+        <div class="settings-body">
         <div v-if="lockedByEnvironment" class="environment-note">
           <strong>路径被环境变量锁定</strong>
           <p>
@@ -692,6 +729,7 @@ function submit(): void {
                 type="password"
                 spellcheck="false"
                 :placeholder="activeProvider.apiKey ? '已保存（留空保持不变）' : '未配置'"
+                @input="onProviderKeyInput(activeProvider, $event)"
               />
             </label>
             <div class="ai-key-actions">
@@ -886,6 +924,7 @@ function submit(): void {
           }}
         </div>
         <div v-if="browseError || error" class="settings-error">{{ browseError || error }}</div>
+        </div>
 
         <footer>
           <span>导出、截图和缓存目录会按项目 ID 自动建立子目录。</span>
@@ -938,6 +977,15 @@ function submit(): void {
   border-radius: 10px;
   background: var(--bg-panel);
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.52);
+}
+
+.settings-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .modal-head {
@@ -1536,10 +1584,9 @@ function submit(): void {
 .path-list {
   display: flex;
   min-height: 0;
-  flex: 1;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 8px;
-  overflow-y: auto;
   padding: 14px 16px;
 }
 

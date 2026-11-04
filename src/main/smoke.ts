@@ -83,12 +83,15 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let detectBgChecks: Record<string, unknown> = {};
   let aiProviderChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
+  let nleTrackChecks: Record<string, unknown> = {};
+  let settingsCloseSaveChecks: Record<string, unknown> = {};
+  let opencvFrameChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -292,6 +295,16 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, timelineZoomChecksAssertions(timelineZoomChecks));
     }
 
+    if (process.env['SMOKE_NLE_TRACKS'] === '1') {
+      nleTrackChecks = await runNleTrackChecks(win);
+      Object.assign(checks, nleTrackChecksAssertions(nleTrackChecks));
+    }
+
+    if (process.env['SMOKE_SETTINGS_CLOSE_SAVE'] === '1') {
+      settingsCloseSaveChecks = await runSettingsCloseSaveChecks(win);
+      Object.assign(checks, settingsCloseSaveChecksAssertions(settingsCloseSaveChecks));
+    }
+
     if (process.env['SMOKE_FRAME'] === '1') {
       frameChecks = await runFrameChecks(win, process.env['SMOKE_VIDEO'] ?? '');
       Object.assign(checks, frameChecksAssertions(frameChecks));
@@ -317,6 +330,15 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, aiProviderChecksAssertions(aiProviderChecks));
     }
 
+    if (process.env['SMOKE_OPENCV_FRAMES'] === '1') {
+      opencvFrameChecks = await runOpenCvFrameChecks(
+        win,
+        deps,
+        process.env['SMOKE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, opencvFrameChecksAssertions(opencvFrameChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -330,7 +352,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -1220,6 +1242,144 @@ function settingsVerifyChecksAssertions(result: Record<string, any>): Record<str
     settingsVerifyToast: result.toastOk === true,
     settingsVerifyPath: result.pathOk === true,
   };
+}
+
+function settingsCloseSaveChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    settingsCloseSaveModal: result.modalOk === true,
+    settingsCloseSaveScrollable: result.bodyScrollable === true,
+    settingsCloseSaveFooter: result.footerVisible === true,
+    settingsCloseSaveOnX: result.closeSavedKey === true,
+    settingsCloseSaveEncrypted: result.keyEncrypted === true,
+    settingsCloseSaveCleanup: result.cleanupOk === true,
+  };
+}
+
+async function runSettingsCloseSaveChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 12000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const setInput = (input, value) => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+          ?.set?.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const fieldByLabel = (modal, labelText) =>
+        Array.from(modal.querySelectorAll('.ai-field')).find((field) =>
+          String(field.querySelector('span')?.textContent || '').includes(labelText)
+        );
+      const providerName = 'S37 关闭保存测试';
+      const providerKey = 'sk-s37-close-save-' + Date.now();
+      const originalResult = await window.api.settings.get();
+      if (!originalResult.ok) return { exception: 'settings.get failed' };
+      const original = originalResult.data;
+      let testSaved = false;
+      try {
+        document.querySelector('button[title="设置"]')?.click();
+        const modal = await waitFor(() => document.querySelector('.settings-modal'));
+        out.modalOk = Boolean(modal);
+        if (!modal) return out;
+        const body = modal.querySelector('.settings-body');
+        const footer = modal.querySelector('footer');
+        out.bodyOverflow = body ? getComputedStyle(body).overflowY : null;
+        out.bodyScrollable = Boolean(body)
+          && getComputedStyle(body).overflowY === 'auto';
+        if (body && footer) {
+          const bodyRect = body.getBoundingClientRect();
+          const footerRect = footer.getBoundingClientRect();
+          const modalRect = modal.getBoundingClientRect();
+          out.footerVisible = footerRect.height > 0
+            && footerRect.top >= modalRect.top
+            && footerRect.bottom <= modalRect.bottom + 1
+            && footerRect.bottom <= window.innerHeight + 1;
+          out.layout = {
+            body: { top: bodyRect.top, bottom: bodyRect.bottom, height: bodyRect.height },
+            footer: { top: footerRect.top, bottom: footerRect.bottom, height: footerRect.height },
+            modal: { top: modalRect.top, bottom: modalRect.bottom, height: modalRect.height },
+          };
+        }
+        modal.querySelector('.provider-add')?.click();
+        await sleep(50);
+        const nameField = fieldByLabel(modal, '名称');
+        const urlField = fieldByLabel(modal, 'API 请求地址');
+        const keyField = fieldByLabel(modal, 'API Key');
+        const nameInput = nameField?.querySelector('input');
+        const urlInput = urlField?.querySelector('input');
+        const keyInput = keyField?.querySelector('input');
+        if (!nameInput || !urlInput || !keyInput) {
+          out.fieldError = {
+            name: Boolean(nameInput),
+            url: Boolean(urlInput),
+            key: Boolean(keyInput),
+          };
+          return out;
+        }
+        setInput(nameInput, providerName);
+        setInput(urlInput, 'https://s37-close-save.invalid/v1');
+        setInput(keyInput, providerKey);
+        await sleep(50);
+        modal.querySelector('button[aria-label="关闭"]')?.click();
+        const closed = await waitFor(() => !document.querySelector('.settings-modal'));
+        out.closedAfterX = Boolean(closed);
+        if (!closed) return out;
+        const saved = await waitFor(async () => {
+          const current = await window.api.settings.get();
+          return current.ok
+            && current.data.ai?.providers?.some((provider) => provider.name === providerName)
+            ? current
+            : null;
+        });
+        const provider = saved?.data?.ai?.providers?.find((item) => item.name === providerName);
+        testSaved = Boolean(provider);
+        out.providerFound = Boolean(provider);
+        out.closeSavedKey = Boolean(provider && provider.apiKey);
+        out.keyEncrypted = Boolean(provider?.apiKey?.startsWith('enc:v1:'));
+        out.plaintextLeaked = Boolean(provider && String(provider.apiKey).includes(providerKey));
+
+        document.querySelector('button[title="设置"]')?.click();
+        const cleanupModal = await waitFor(() => document.querySelector('.settings-modal'));
+        if (cleanupModal) {
+          const chip = Array.from(cleanupModal.querySelectorAll('.provider-chip')).find((button) =>
+            String(button.textContent || '').includes(providerName)
+          );
+          chip?.click();
+          await sleep(50);
+          const deleteButton = cleanupModal.querySelector('.ai-danger');
+          deleteButton?.click();
+          await sleep(50);
+          cleanupModal.querySelector('button[aria-label="关闭"]')?.click();
+          await waitFor(() => !document.querySelector('.settings-modal'));
+        }
+        const finalSettings = await window.api.settings.get();
+        out.cleanupOk = finalSettings.ok
+          && !finalSettings.data.ai?.providers?.some((item) => item.name === providerName)
+          && (finalSettings.data.ai?.providers?.length ?? 0)
+            === (original.ai?.providers?.length ?? 0);
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      } finally {
+        if (!out.cleanupOk) {
+          try {
+            await window.api.settings.set(original);
+          } catch {
+            // best effort
+          }
+        }
+      }
+    })()
+  `)) as Record<string, any>;
 }
 
 function environmentLockChecksAssertions(result: Record<string, any>): Record<string, boolean> {
@@ -3211,6 +3371,7 @@ function aiProviderChecksAssertions(result: Record<string, any>): Record<string,
     providerExplicitModel: result.p4Explicit === true,
     providerDoubaoRegex: result.p5Regex === true,
     providerDoubaoProbe: result.p5Probe === true,
+    providerProbeStoredKey: result.p7 === true,
     providerDeleteFallback: result.p6 === true,
   };
 }
@@ -3318,6 +3479,7 @@ async function runAiProvidersChecks(win: BrowserWindow): Promise<Record<string, 
       missing.ok === false && missing.error?.code === 'PROVIDER_BASE_URL_MISSING';
 
     let capturedModel: string | null = null;
+    let capturedAuth: string | null = null;
     const server = createServer((request, response) => {
       let body = '';
       request.on('data', (chunk) => {
@@ -3325,6 +3487,7 @@ async function runAiProvidersChecks(win: BrowserWindow): Promise<Record<string, 
       });
       request.on('end', () => {
         if (request.method === 'GET' && request.url === '/models') {
+          capturedAuth = request.headers.authorization ?? null;
           response.writeHead(200, { 'content-type': 'application/json' });
           response.end(
             JSON.stringify({
@@ -3401,6 +3564,48 @@ async function runAiProvidersChecks(win: BrowserWindow): Promise<Record<string, 
       );
       out.p4Explicit =
         capturedModel === 'doubao-seed-2-1-pro-260915' && analysis.shots.length === 1;
+
+      // P-7：providerId + baseUrl 但未传 draft apiKey 时，应回落到已存密文
+      const currentSettings = (await win.webContents.executeJavaScript(
+        'window.api.settings.get()',
+      )) as { ok: boolean; data?: any };
+      if (currentSettings.ok && currentSettings.data) {
+        const original = currentSettings.data;
+        const tempProvider = {
+          id: 'local-probe',
+          name: 'Local Probe',
+          baseUrl: `http://127.0.0.1:${port}`,
+          apiKey: 'sk-stored-probe',
+          models: [],
+        };
+        try {
+          const saved = (await win.webContents.executeJavaScript(
+            `window.api.settings.set(${JSON.stringify({
+              ...original,
+              ai: {
+                ...(original.ai ?? {}),
+                providers: [tempProvider],
+                activeProviderId: 'local-probe',
+              },
+            })})`,
+          )) as { ok: boolean };
+          const probed = (await win.webContents.executeJavaScript(
+            `window.api.ai.probeProvider(${JSON.stringify({
+              providerId: 'local-probe',
+              baseUrl: `http://127.0.0.1:${port}`,
+            })})`,
+          )) as { ok: boolean; data?: any };
+          out.p7 =
+            saved.ok === true &&
+            probed.ok === true &&
+            probed.data?.supportsNativeVideo === true &&
+            capturedAuth === 'Bearer sk-stored-probe';
+        } finally {
+          await win.webContents.executeJavaScript(
+            `window.api.settings.set(${JSON.stringify(original)})`,
+          );
+        }
+      }
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     }
@@ -3444,6 +3649,135 @@ function timelineZoomChecksAssertions(result: Record<string, any>): Record<strin
     zoomOutsideClose: result.outsideClose === true,
     zoomPersist: result.persist === true,
   };
+}
+
+function nleTrackChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    nleThreeTrackHeads: result.badges?.join(',') === 'V2,V1,A1',
+    nleShotCounts: result.v2Count === true && result.v1Count === true,
+    nleV1Selection: result.v1Selection === true,
+    nleV1Lock: result.v1Lock === true,
+    nleV2Visibility: result.v2Visibility === true,
+    nleAudioMS: result.audioMute === true && result.audioSolo === true,
+    nleZoomPreserved: result.zoom === true,
+    nleRestoreWorkspace: result.restoredWorkspace === true,
+  };
+}
+
+async function runNleTrackChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  const result = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 10000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      try {
+        await sleep(2500);
+        const navButtons = Array.from(document.querySelectorAll('.main-nav .nav-item'));
+        const startedInDemo = navButtons.some(
+          (button) => String(button.textContent || '').trim() === '最近项目',
+        );
+        const demoButton = Array.from(document.querySelectorAll('.main-nav .nav-item')).find(
+          (button) => String(button.textContent || '').trim() === '示例模式',
+        );
+        demoButton?.click();
+        await waitFor(() => document.querySelectorAll('.v1-clip').length > 0, 5000);
+        const timeline = await waitFor(() => document.querySelector('.timeline'));
+        if (!timeline) return { exception: 'timeline missing' };
+        const badges = Array.from(timeline.querySelectorAll('.track-badge'))
+          .map((item) => String(item.textContent || '').trim());
+        out.badges = badges;
+        const v2Head = timeline.querySelector('.track-row-v2 .track-head');
+        const v1Head = timeline.querySelector('.track-row-v1 .track-head');
+        const a1Head = timeline.querySelector('.track-row-a1 .track-head');
+        out.v2Count = /\\d+ 个片段/.test(String(v2Head?.textContent || ''));
+        out.v1Count = /\\d+ 个剪辑/.test(String(v1Head?.textContent || ''));
+        out.a1Shown = Boolean(a1Head && /音频 1/.test(String(a1Head.textContent || '')));
+
+        const clips = timeline.querySelectorAll('.v1-clip');
+        out.v1ClipCount = clips.length;
+        const target = clips.length > 1 ? clips[1] : clips[0];
+        target?.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: 320,
+          clientY: 200,
+        }));
+        await sleep(120);
+        out.v1Selection = Boolean(timeline.querySelector('.v1-clip.selected'));
+
+        const v1Controls = timeline.querySelectorAll('.track-row-v1 .head-control');
+        v1Controls[1]?.click();
+        await sleep(80);
+        out.v1Lock = v1Controls[1]?.getAttribute('aria-pressed') === 'true'
+          && timeline.querySelectorAll('.v1-clip .trim-handle').length === 0;
+
+        const v2Toggle = timeline.querySelector('.track-row-v2 .head-control');
+        v2Toggle?.click();
+        await sleep(80);
+        out.v2Visibility = v2Toggle?.getAttribute('aria-pressed') === 'false'
+          && timeline.querySelector('.track-row-v2')?.classList.contains('track-hidden')
+          && Boolean(timeline.querySelector('.track-row-v2 .hidden-note'));
+
+        const audioControls = timeline.querySelectorAll('.track-row-a1 .head-control');
+        audioControls[0]?.click();
+        audioControls[1]?.click();
+        await sleep(80);
+        out.audioMute = audioControls[0]?.getAttribute('aria-pressed') === 'true'
+          && timeline.querySelector('.track-row-a1')?.classList.contains('track-muted');
+        out.audioSolo = audioControls[1]?.getAttribute('aria-pressed') === 'true'
+          && timeline.querySelector('.a1-lane')?.classList.contains('solo');
+
+        const zoomButton = timeline.querySelector('.zoom-btn');
+        zoomButton?.click();
+        await sleep(80);
+        const zoomPop = timeline.querySelector('.zoom-pop');
+        out.zoom = Boolean(zoomButton && zoomPop && getComputedStyle(zoomPop).display !== 'none');
+        zoomButton?.click();
+        v2Toggle?.click();
+        v1Controls[1]?.click();
+        audioControls[0]?.click();
+        audioControls[1]?.click();
+        await sleep(120);
+        out.startedInDemo = startedInDemo;
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
+  const screenshotPath = process.env['SMOKE_NLE_SCREENSHOT'];
+  if (screenshotPath) {
+    const image = await win.webContents.capturePage();
+    writeFileSync(screenshotPath, image.toPNG());
+  }
+  if (result.startedInDemo === false) {
+    result.restoredWorkspace = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const recentButton = Array.from(document.querySelectorAll('.main-nav .nav-item')).find(
+          (button) => String(button.textContent || '').trim() === '最近项目',
+        );
+        recentButton?.click();
+        await sleep(300);
+        return !Array.from(document.querySelectorAll('.main-nav .nav-item')).some(
+          (button) => String(button.textContent || '').trim() === '最近项目',
+        );
+      })()
+    `);
+  } else {
+    result.restoredWorkspace = true;
+  }
+  return result;
 }
 
 async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string, any>> {
@@ -3569,4 +3903,86 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
     })()
   `)) as Record<string, any>;
   return { ...out, ...ui };
+}
+
+function opencvFrameChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  const error = String(result.secondError ?? '');
+  return {
+    opencvFramesDone: result.done === true,
+    opencvFramesApplied: Number(result.applied ?? 0) > 0,
+    opencvFramesShots: Number(result.shots ?? 0) > 0,
+    opencvFramesNoMissing:
+      !error.includes('无法读取帧') &&
+      !error.includes('DETECT_FRAMES_MISSING') &&
+      !error.includes('检测帧文件'),
+  };
+}
+
+async function runOpenCvFrameChecks(
+  _win: BrowserWindow,
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  const detect = deps.getDetect?.() ?? null;
+  if (!videoPath || !data || !detect) return { skipped: true };
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const project = data.projects.create({
+    name: `S37 OpenCV Frames ${Date.now()}`,
+    source: { type: 'local', path: videoPath },
+    media: {
+      filename: 'opencv-frames.mp4',
+      durationMs: 8000,
+      fps: 500 / 21,
+      width: 640,
+      height: 360,
+    },
+  });
+  const out: Record<string, any> = {};
+  try {
+    const options: DetectOptions = {
+      sensitivity: 0.5,
+      minShotSeconds: 0.4,
+      filterTransitions: false,
+      weights: { s: 0.3, c: 0.3, h: 0.4 },
+      intervalMs: 500,
+      engine: 'opencv',
+    };
+    try {
+      const first = detect.run({ projectId: project.id, options, dryRun: true });
+      out.firstJobId = first.jobId;
+      await sleep(400);
+      detect.cancel(first.jobId);
+    } catch (error) {
+      out.firstError = String(error);
+    }
+    const second = detect.run({ projectId: project.id, options, dryRun: true });
+    out.secondJobId = second.jobId;
+    const deadline = Date.now() + 60_000;
+    let job = detect.getJob(second.jobId);
+    while ((job.status === 'running' || job.status === 'queued') && Date.now() < deadline) {
+      await sleep(250);
+      job = detect.getJob(second.jobId);
+    }
+    out.secondStatus = job.status;
+    out.secondError = job.error;
+    out.done = job.status === 'done';
+    if (job.status === 'done') {
+      const applied = detect.applyByJob(second.jobId);
+      out.applied = applied.applied;
+      out.shots = data.shots.list(project.id).length;
+    }
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  } finally {
+    try {
+      data.projects.delete(project.id);
+      rmSync(join(resolveDetectFramesDir(project.id)), { recursive: true, force: true });
+      rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
+      deps.getSession?.()?.clear();
+    } catch (error) {
+      out.cleanupError = String(error);
+    }
+  }
+  return out;
 }
