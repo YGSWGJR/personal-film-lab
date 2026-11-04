@@ -3,6 +3,8 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { app, dialog, type BrowserWindow } from 'electron';
 import { settingsSetArgsSchema } from '../../shared/schemas';
 import type {
+  AiSettings,
+  RecognitionSettings,
   Settings,
   SettingsChooseDirectoryArgs,
   SettingsSetArgs,
@@ -13,7 +15,14 @@ import {
   TRACK_HEIGHT_LEVELS,
   snapToLevel,
 } from '../../shared/types';
-import { defaultSettings, defaultTimelineSettings, environmentDataRoot } from '../paths';
+import {
+  defaultAiSettings,
+  defaultRecognitionSettings,
+  defaultSettings,
+  defaultTimelineSettings,
+  environmentDataRoot,
+} from '../paths';
+import { encryptApiKey } from '../ai/credential-store';
 
 const SETTINGS_PATH_FIELDS = [
   'dataRoot',
@@ -64,6 +73,8 @@ export class SettingsService {
         proxyTier: '540p',
         confirmUserContent: this.stored?.confirmUserContent ?? true,
         timeline: this.stored?.timeline ?? defaultTimelineSettings(),
+        recognition: this.stored?.recognition ?? defaultRecognitionSettings(),
+        ai: this.stored?.ai ?? defaultAiSettings(),
         settingsPath: this.settingsPath,
         environmentOverride: true,
       };
@@ -83,9 +94,9 @@ export class SettingsService {
       );
     }
     const current = this.get();
-    // 设置面板只提交路径/代理/删除确认等键，不含 timeline；
-    // 这里用当前已存值兜底，避免保存设置时把时间线档位重置为默认。
-    const normalized = normalizeSettings(args, this.stored?.timeline);
+    // 设置面板可能只提交部分键（如仅路径）；用当前已存值兜底，
+    // 避免保存设置时把 timeline / recognition / ai 重置为默认。
+    const normalized = normalizeSettings(args, this.stored ?? undefined);
     for (const key of SETTINGS_PATH_FIELDS) {
       const path = normalized[key];
       if (path) mkdirSync(path, { recursive: true });
@@ -182,7 +193,17 @@ export function verifyStoredSettings(
       stored.proxyTier === expected.proxyTier &&
       stored.confirmUserContent === expected.confirmUserContent &&
       stored.timeline?.trackHeight === expected.timeline?.trackHeight &&
-      stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond
+      stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond &&
+      stored.recognition?.engine === expected.recognition?.engine &&
+      stored.ai?.provider === expected.ai?.provider &&
+      stored.ai?.baseUrl === expected.ai?.baseUrl &&
+      stored.ai?.apiKey === expected.ai?.apiKey &&
+      stored.ai?.agentEndpoint === expected.ai?.agentEndpoint &&
+      stored.ai?.segmentSeconds === expected.ai?.segmentSeconds &&
+      stored.ai?.segmentOverlapSeconds === expected.ai?.segmentOverlapSeconds &&
+      stored.ai?.timeoutSeconds === expected.ai?.timeoutSeconds &&
+      stored.ai?.maxRetriesPerSegment === expected.ai?.maxRetriesPerSegment &&
+      stored.ai?.enabled === expected.ai?.enabled
     );
   } catch {
     return false;
@@ -191,7 +212,7 @@ export function verifyStoredSettings(
 
 function normalizeSettings(
   args: SettingsSetArgs,
-  fallbackTimeline?: TimelineSettings,
+  fallback?: SettingsSetArgs,
 ): SettingsSetArgs {
   return {
     dataRoot: normalizePath(args.dataRoot),
@@ -206,7 +227,9 @@ function normalizeSettings(
     stillSubDir: normalizeOptionalPath(args.stillSubDir),
     proxyTier: args.proxyTier ?? '540p',
     confirmUserContent: args.confirmUserContent ?? true,
-    timeline: normalizeTimeline(args.timeline ?? fallbackTimeline),
+    timeline: normalizeTimeline(args.timeline ?? fallback?.timeline),
+    recognition: normalizeRecognition(args.recognition ?? fallback?.recognition),
+    ai: normalizeAi(args.ai, fallback?.ai),
   };
 }
 
@@ -219,6 +242,52 @@ function normalizeTimeline(value: TimelineSettings | undefined): TimelineSetting
     ? snapToLevel(source.pxPerSecond, PX_PER_SEC_LEVELS)
     : defaultTimelineSettings().pxPerSecond;
   return { trackHeight, pxPerSecond };
+}
+
+function normalizeRecognition(value: RecognitionSettings | undefined): RecognitionSettings {
+  return { engine: value?.engine === 'opencv' ? 'opencv' : 'ai' };
+}
+
+function normalizeAi(value: AiSettings | undefined, fallback: AiSettings | undefined): AiSettings {
+  const defaults = defaultAiSettings();
+  // 显式传入 apiKey（含空串）= 覆盖/清除；未传 apiKey = 保留已存值。
+  const keyProvided = value !== undefined && Object.prototype.hasOwnProperty.call(value, 'apiKey');
+  const keySource = keyProvided
+    ? typeof value?.apiKey === 'string'
+      ? value.apiKey
+      : ''
+    : fallback?.apiKey ?? defaults.apiKey ?? '';
+  return {
+    provider:
+      value?.provider === 'mock' || fallback?.provider === 'mock'
+        ? 'mock'
+        : 'openai-compatible',
+    baseUrl: (value?.baseUrl ?? fallback?.baseUrl ?? defaults.baseUrl ?? '').trim(),
+    // 落盘前加密（已加密则幂等保留）；settings.json 不得出现明文 Key。
+    apiKey: encryptApiKey(keySource),
+    agentEndpoint: (value?.agentEndpoint ?? fallback?.agentEndpoint ?? defaults.agentEndpoint ?? '').trim(),
+    segmentSeconds: clampInt(value?.segmentSeconds ?? fallback?.segmentSeconds, 600, 30, 3600),
+    segmentOverlapSeconds: clampInt(
+      value?.segmentOverlapSeconds ?? fallback?.segmentOverlapSeconds,
+      30,
+      0,
+      300,
+    ),
+    timeoutSeconds: clampInt(value?.timeoutSeconds ?? fallback?.timeoutSeconds, 900, 30, 7200),
+    maxRetriesPerSegment: clampInt(
+      value?.maxRetriesPerSegment ?? fallback?.maxRetriesPerSegment,
+      3,
+      0,
+      10,
+    ),
+    enabled: value?.enabled ?? fallback?.enabled ?? true,
+  };
+}
+
+function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  const number = Number(value ?? fallback);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
 }
 
 function normalizeOptionalPath(value: string | undefined): string | undefined {

@@ -307,12 +307,17 @@ function formatReadout(ms: number): string {
 
 function assetUrl(still: Still): string {
   const filePath = still.thumbPath || still.filePath;
+  return assetUrlForPath(still.projectId, filePath);
+}
+
+/** S36-2：把镜头封面路径（Shot.thumbnail）转成渲染层可加载的资产 URL。 */
+function assetUrlForPath(projectId: string, filePath: string): string {
   const encodedPath = filePath
     .split(/[\\/]/u)
     .filter(Boolean)
     .map((part) => encodeURIComponent(part))
     .join('/');
-  return `lapian-asset://${still.projectId}/${encodedPath}`;
+  return `lapian-asset://${projectId}/${encodedPath}`;
 }
 
 function showToast(message: string, tone: 'default' | 'error' | 'success' = 'default', title?: string): void {
@@ -350,7 +355,11 @@ function mapShots(items: Shot[], stills: Still[]): WorkspaceShot[] {
     const still = shotStills.find((item) => item.role === 'main') ?? shotStills[0];
     return {
       ...shot,
-      thumbnail: thumbnailStill ? assetUrl(thumbnailStill) : emptyShotsImage,
+      thumbnail: shot.thumbnail
+        ? assetUrlForPath(shot.projectId, shot.thumbnail)
+        : thumbnailStill
+          ? assetUrl(thumbnailStill)
+          : emptyShotsImage,
       title: shot.shotSize
         ? `${shot.shotSize} · ${String(shot.index).padStart(2, '0')}`
         : `镜头 ${String(shot.index).padStart(2, '0')}`,
@@ -1606,28 +1615,52 @@ async function openDetection(): Promise<void> {
     showToast('请先导入本地影片，再运行镜头检测。');
     return;
   }
-  let environment: IpcResult<DetectEnvCheck>;
-  try {
-    environment = await window.api.detect.checkEnv();
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error', '检测环境检查失败');
-    return;
-  }
-  if (!environment.ok) {
-    showToast(environment.error.message, 'error', environment.error.code);
-    return;
-  }
-  if (!environment.data) {
-    showToast('检测环境返回了无效结果，请重试。', 'error', 'DETECT_ENV_INVALID');
-    return;
-  }
-  if (!environment.data.ok && environment.data.error) {
-    detectionError.value = `${environment.data.error.message}。${environment.data.error.guide}`;
-    detectionProgress.value = null;
-    detectionResult.value = null;
-    detecting.value = false;
-    detectionOpen.value = true;
-    return;
+  const engine = settings.value?.recognition?.engine ?? 'ai';
+  if (engine === 'ai') {
+    let probe: Awaited<ReturnType<typeof window.api.ai.probeProvider>>;
+    try {
+      probe = await window.api.ai.probeProvider();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error', 'AI 端点探测失败');
+      return;
+    }
+    if (!probe.ok) {
+      showToast(probe.error.message, 'error', probe.error.code);
+      return;
+    }
+    if (!probe.data.ok || !probe.data.supportsNativeVideo) {
+      detectionError.value =
+        probe.data.error?.message ?? 'AI 端点未声明原生视频输入能力，请在设置中更换端点';
+      detectionProgress.value = null;
+      detectionResult.value = null;
+      detecting.value = false;
+      detectionOpen.value = true;
+      return;
+    }
+  } else {
+    let environment: IpcResult<DetectEnvCheck>;
+    try {
+      environment = await window.api.detect.checkEnv();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error', '检测环境检查失败');
+      return;
+    }
+    if (!environment.ok) {
+      showToast(environment.error.message, 'error', environment.error.code);
+      return;
+    }
+    if (!environment.data) {
+      showToast('检测环境返回了无效结果，请重试。', 'error', 'DETECT_ENV_INVALID');
+      return;
+    }
+    if (!environment.data.ok && environment.data.error) {
+      detectionError.value = `${environment.data.error.message}。${environment.data.error.guide}`;
+      detectionProgress.value = null;
+      detectionResult.value = null;
+      detecting.value = false;
+      detectionOpen.value = true;
+      return;
+    }
   }
   detectionError.value = null;
   detectionOpen.value = true;
@@ -2145,6 +2178,7 @@ watch(
 
 async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
+  const engine = settings.value?.recognition?.engine ?? 'ai';
   stopDetectionPolling();
   detecting.value = true;
   void syncTranscodeConcurrency();
@@ -2153,7 +2187,7 @@ async function startDetection(): Promise<void> {
   detectionResult.value = null;
   detectionProgress.value = {
     jobId: '',
-    stage: 'extractFrames',
+    stage: engine === 'ai' ? 'analyze' : 'extractFrames',
     percent: 0,
   };
   const started = unwrap(
@@ -2166,6 +2200,7 @@ async function startDetection(): Promise<void> {
         filterTransitions: true,
         weights: { s: 0.3, c: 0.3, h: 0.4 },
         intervalMs: 500,
+        engine,
       },
     }),
   );
@@ -2910,6 +2945,7 @@ onBeforeUnmount(() => {
       :gpu-label="gpuStatusText"
       :result="detectionResult"
       :error="detectionError"
+      :engine="settings?.recognition?.engine ?? 'ai'"
       @close="closeDetection"
       @cancel="cancelDetection"
       @retry="openDetection"

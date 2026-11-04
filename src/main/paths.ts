@@ -1,6 +1,12 @@
 import { app } from 'electron';
 import { join, resolve } from 'node:path';
-import type { Settings, SettingsSetArgs, TimelineSettings } from '../shared/types';
+import type {
+  AiSettings,
+  RecognitionSettings,
+  Settings,
+  SettingsSetArgs,
+  TimelineSettings,
+} from '../shared/types';
 
 let settingsProvider: (() => Settings) | null = null;
 
@@ -11,6 +17,26 @@ export function bindSettingsProvider(provider: () => Settings): void {
 /** 时间线轨道缩放默认档（S36-3）：轨高 96px / 密度 96px/s。 */
 export function defaultTimelineSettings(): TimelineSettings {
   return { trackHeight: 96, pxPerSecond: 96 };
+}
+
+/** S36-2：默认识别引擎 = AI（OpenCV 仅隐藏开关）。 */
+export function defaultRecognitionSettings(): RecognitionSettings {
+  return { engine: 'ai' };
+}
+
+/** S36-2：AI 识别默认参数。apiKey 为空时由凭据存储加密写入。 */
+export function defaultAiSettings(): AiSettings {
+  return {
+    provider: 'openai-compatible',
+    baseUrl: '',
+    apiKey: '',
+    agentEndpoint: '',
+    segmentSeconds: 600,
+    segmentOverlapSeconds: 30,
+    timeoutSeconds: 900,
+    maxRetriesPerSegment: 3,
+    enabled: true,
+  };
 }
 
 export function defaultSettings(): SettingsSetArgs {
@@ -29,6 +55,8 @@ export function defaultSettings(): SettingsSetArgs {
     proxyTier: '540p',
     confirmUserContent: true,
     timeline: defaultTimelineSettings(),
+    recognition: defaultRecognitionSettings(),
+    ai: defaultAiSettings(),
   };
 }
 

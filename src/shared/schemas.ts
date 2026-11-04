@@ -31,6 +31,24 @@ export const settingsSchema = z.object({
       pxPerSecond: z.number().finite().min(1),
     })
     .optional(),
+  recognition: z
+    .object({
+      engine: z.enum(['ai', 'opencv']),
+    })
+    .optional(),
+  ai: z
+    .object({
+      provider: z.enum(['openai-compatible', 'mock']).optional(),
+      baseUrl: z.string().max(2000).optional(),
+      apiKey: z.string().max(4000).optional(),
+      agentEndpoint: z.string().max(2000).optional(),
+      segmentSeconds: z.number().finite().min(30).max(3600).optional(),
+      segmentOverlapSeconds: z.number().finite().min(0).max(300).optional(),
+      timeoutSeconds: z.number().finite().min(30).max(7200).optional(),
+      maxRetriesPerSegment: z.number().int().min(0).max(10).optional(),
+      enabled: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 export const settingsSetArgsSchema = settingsSchema;
@@ -56,6 +74,14 @@ export const aiCopyPromptArgsSchema = z.object({
 export const aiProjectArgsSchema = z.object({
   projectId: z.string().min(1),
 });
+
+/** S36-2a：AI 端点能力探测（可临时覆盖 baseUrl/apiKey）。 */
+export const aiProbeProviderArgsSchema = z
+  .object({
+    baseUrl: z.string().max(2000).optional(),
+    apiKey: z.string().max(4000).optional(),
+  })
+  .optional();
 
 export const aiMcpSetEnabledArgsSchema = z.object({
   enabled: z.boolean(),
@@ -205,6 +231,7 @@ export const detectOptionsSchema = z
     weights: detectWeightsSchema,
     frameInterval: z.number().int().min(1).max(10_000).optional(),
     intervalMs: z.number().int().min(50).max(3_600_000).optional(),
+    engine: z.enum(['ai', 'opencv']).optional(),
   })
   .refine((value) => value.weights.s + value.weights.c + value.weights.h > 0, {
     message: 'weights 之和必须大于 0',
@@ -231,6 +258,34 @@ export const detectApplyArgsSchema = z.object({
   projectId: z.string().min(1),
   shotIds: z.array(z.string().min(1)).min(1).max(100_000),
   sceneIds: z.array(z.string().min(1)).max(10_000).optional(),
+});
+
+/** S36-2：shot-detection 契约（字段完整率 100% 的机检点）。 */
+export const shotDetectionResultSchema = z.object({
+  segment: z.object({
+    startMs: z.number().finite().min(0),
+    endMs: z.number().finite().min(0),
+  }),
+  shots: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        startMs: z.number().finite().min(0),
+        endMs: z.number().finite().min(0),
+        representativeTimeMs: z.number().finite().min(0),
+        note: z.string(),
+        tags: z.record(z.string(), z.array(z.string())),
+        confidence: z.number().min(0).max(1),
+      }),
+    )
+    .min(0)
+    .max(100_000),
+  usage: z.object({
+    seconds: z.number().finite().min(0),
+    tokens: z.number().finite().min(0),
+    cost: z.number().finite().min(0).optional(),
+  }),
+  generatedAt: z.string().min(1),
 });
 
 /* ---------- data 域（S01 §7） ---------- */

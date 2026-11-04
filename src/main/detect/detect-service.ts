@@ -18,9 +18,14 @@ import type {
   DetectRunResult,
   DetectWeights,
   Project,
+  RecognitionEngine,
   Scene,
+  Settings,
+  ShotDetectionUsage,
   ShotPreview,
 } from '../../shared/types';
+import type { AiDetectRunner } from '../ai/ai-detect-runner';
+import type { ShotDetectionProvider } from '../ai/provider';
 import type { MediaService } from '../media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
 import { DetectError } from './detect-error';
@@ -36,12 +41,23 @@ const environmentCache = new Map<string, { expiresAt: number; result: DetectEnvC
 interface InternalDetectJob {
   jobId: string;
   projectId: string;
+  engine: RecognitionEngine;
   status: DetectJobStatus;
   progress: number;
   error: string | null;
   controller: AbortController;
   child: ChildProcessWithoutNullStreams | null;
   result: DetectResult | null;
+  currentSegment: number;
+  segmentsTotal: number;
+  usage: ShotDetectionUsage | null;
+  provider: ShotDetectionProvider | null;
+}
+
+interface AiDetectDeps {
+  runner: AiDetectRunner;
+  getSettings: () => Settings;
+  getProvider: () => ShotDetectionProvider;
 }
 
 interface PythonShotRange {
@@ -73,6 +89,7 @@ export class DetectService {
     private readonly media: MediaService,
     private readonly emitProgress: (event: DetectProgressEvent) => void,
     private readonly emitDone: (event: DetectDoneEvent) => void,
+    private readonly ai?: AiDetectDeps,
   ) {}
 
   run(args: DetectRunArgs): DetectRunResult {
@@ -84,19 +101,35 @@ export class DetectService {
         });
       }
     }
-    resolveDetectSource(project);
+    const engine: RecognitionEngine =
+      args.options.engine ?? this.ai?.getSettings().recognition?.engine ?? 'ai';
+    if (engine === 'ai') {
+      if (!this.ai) {
+        throw new DetectError('AI_NOT_READY', 'AI 识别服务尚未初始化');
+      }
+      if (this.ai.getSettings().ai?.enabled === false) {
+        throw new DetectError('AI_DISABLED', 'AI 识别已在设置中关闭');
+      }
+    } else {
+      resolveDetectSource(project);
+    }
     const options = normalizeOptions(args.options);
 
     const jobId = `detect-${randomUUID()}`;
     const job: InternalDetectJob = {
       jobId,
       projectId: args.projectId,
+      engine,
       status: 'queued',
       progress: 0,
       error: null,
       controller: new AbortController(),
       child: null,
       result: null,
+      currentSegment: 0,
+      segmentsTotal: 0,
+      usage: null,
+      provider: null,
     };
     this.jobs.set(jobId, job);
     void this.runJob(job, options, Boolean(args.dryRun));
@@ -110,6 +143,7 @@ export class DetectService {
     job.controller.abort();
     this.media.cancelJob(jobId);
     job.child?.kill();
+    job.provider?.cancel();
     job.status = 'cancelled';
     job.progress = 0;
   }
@@ -123,34 +157,65 @@ export class DetectService {
       status: job.status,
       progress: job.progress,
       error: job.error,
+      engine: job.engine,
+      currentSegment: job.currentSegment,
+      segmentsTotal: job.segmentsTotal,
+      usage: job.usage ?? undefined,
     };
   }
 
   apply(args: DetectApplyArgs): DetectApplyResult {
-    this.data.projects.get(args.projectId);
     const preview = this.latestByProject.get(args.projectId);
     if (!preview) {
       throw new DetectError('DETECT_PREVIEW_NOT_FOUND', '没有可应用的检测预览', {
         projectId: args.projectId,
       });
     }
-    const selectedShotIds = new Set(args.shotIds);
+    return this.applyPreview(args.projectId, preview, args.shotIds, args.sceneIds);
+  }
+
+  /** S36-2b：MCP 按 jobId 应用识别预览。 */
+  getJobResult(jobId: string): DetectResult {
+    const job = this.jobs.get(jobId);
+    if (!job || !job.result) {
+      throw new DetectError('DETECT_PREVIEW_NOT_FOUND', `任务没有可应用的预览：${jobId}`, { jobId });
+    }
+    return job.result;
+  }
+
+  applyByJob(jobId: string, shotIds?: string[], sceneIds?: string[]): DetectApplyResult {
+    const job = this.jobs.get(jobId);
+    if (!job || !job.result) {
+      throw new DetectError('DETECT_PREVIEW_NOT_FOUND', `任务没有可应用的预览：${jobId}`, { jobId });
+    }
+    const ids = shotIds && shotIds.length > 0 ? shotIds : job.result.shots.map((shot) => shot.id);
+    return this.applyPreview(job.projectId, job.result, ids, sceneIds);
+  }
+
+  private applyPreview(
+    projectId: string,
+    preview: DetectResult,
+    shotIds: string[],
+    sceneIds?: string[],
+  ): DetectApplyResult {
+    this.data.projects.get(projectId);
+    const selectedShotIds = new Set(shotIds);
     const selectedShots = preview.shots.filter((shot) => selectedShotIds.has(shot.id));
     if (selectedShots.length !== selectedShotIds.size) {
       throw new DetectError('DETECT_PREVIEW_STALE', '部分预览镜头已失效，请重新检测', {
         missing: [...selectedShotIds].filter((id) => !preview.shots.some((shot) => shot.id === id)),
       });
     }
-    const selectedSceneIds = args.sceneIds ? new Set(args.sceneIds) : null;
+    const selectedSceneIds = sceneIds ? new Set(sceneIds) : null;
     const selectedScenes = selectedSceneIds
       ? preview.scenes.filter((scene) => selectedSceneIds.has(scene.id))
       : preview.scenes;
     if (selectedSceneIds && selectedScenes.length !== selectedSceneIds.size) {
       throw new DetectError('DETECT_PREVIEW_STALE', '部分预览场景已失效，请重新检测');
     }
-    const applied = this.data.shots.applyDetected(args.projectId, selectedShots);
+    const applied = this.data.shots.applyDetected(projectId, selectedShots);
     this.data.scenes.replace(
-      args.projectId,
+      projectId,
       selectedScenes.map((scene, index) => ({ ...scene, index: index + 1 })),
     );
     return { applied };
@@ -189,6 +254,72 @@ export class DetectService {
   }
 
   private async runJob(
+    job: InternalDetectJob,
+    options: ResolvedDetectOptions,
+    dryRun: boolean,
+  ): Promise<void> {
+    if (job.engine === 'ai') {
+      await this.runAiJob(job, options);
+      return;
+    }
+    await this.runOpenCvJob(job, options, dryRun);
+  }
+
+  private async runAiJob(
+    job: InternalDetectJob,
+    _options: ResolvedDetectOptions,
+  ): Promise<void> {
+    const ai = this.ai;
+    if (!ai) {
+      job.status = 'error';
+      job.error = 'AI 识别服务尚未初始化';
+      return;
+    }
+    try {
+      job.status = 'running';
+      const project = getDetectProject(this.data, job.projectId);
+      const settings = ai.getSettings();
+      const provider = ai.getProvider();
+      job.provider = provider;
+      const result = await ai.runner.run({
+        project,
+        provider,
+        signal: job.controller.signal,
+        resume: true,
+        options: {
+          segmentSeconds: settings.ai?.segmentSeconds,
+          segmentOverlapSeconds: settings.ai?.segmentOverlapSeconds,
+          maxRetriesPerSegment: settings.ai?.maxRetriesPerSegment,
+        },
+        callbacks: {
+          onProgress: (percent, current, total) => {
+            job.currentSegment = current;
+            job.segmentsTotal = total;
+            this.setProgress(job, percent, 'analyze');
+          },
+        },
+      });
+      job.currentSegment = result.currentSegment;
+      job.segmentsTotal = result.segmentsTotal;
+      job.usage = result.usage;
+      job.progress = 100;
+      job.error = result.error;
+      job.status = result.status;
+      job.result = result.result;
+      this.latestByProject.set(project.id, result.result);
+      this.emitProgress({ jobId: job.jobId, stage: 'analyze', percent: 100 });
+      this.emitDone({ jobId: job.jobId, result: result.result });
+    } catch (error) {
+      if (job.status === 'cancelled' || job.controller.signal.aborted) {
+        job.status = 'cancelled';
+        return;
+      }
+      job.status = 'error';
+      job.error = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private async runOpenCvJob(
     job: InternalDetectJob,
     options: ResolvedDetectOptions,
     dryRun: boolean,

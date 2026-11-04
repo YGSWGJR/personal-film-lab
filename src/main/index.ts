@@ -15,6 +15,8 @@ import type {
 } from '../shared/types';
 import { createMainWindow } from './app';
 import { AiAccessService, runMcpStdioServer } from './ai/mcp-server';
+import { AiDetectRunner } from './ai/ai-detect-runner';
+import { createProviderFromSettings } from './ai/provider';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
 import { importProjectFrom, scanCandidateRoots } from './data/import-service';
@@ -138,6 +140,7 @@ function createWindowDataServices(
       if (!win.isDestroyed()) win.webContents.send(IPC.EXPORT_EVENT_DONE, event);
     },
   );
+  const aiRunner = new AiDetectRunner(layer, media);
   const detect = new DetectService(
     layer,
     media,
@@ -146,6 +149,21 @@ function createWindowDataServices(
     },
     (event) => {
       if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_DONE, event);
+    },
+    {
+      runner: aiRunner,
+      getSettings: () =>
+        settingsService?.get() ?? {
+          dataRoot: '',
+          cacheDir: '',
+          exportDir: '',
+          stillDir: '',
+          environmentOverride: false,
+        },
+      getProvider: () =>
+        createProviderFromSettings(settingsService?.get().ai, {
+          forceMock: process.env['SMOKE_AI_PROVIDER'] === 'mock',
+        }),
     },
   );
   return { capture, exportService, detect };
@@ -390,11 +408,19 @@ app.whenReady().then(() => {
     getWindow: () => mainWindow,
     getData: () => dataLayer,
     getSessionState: () => sessionService?.get() ?? null,
+    getSettings: () => settingsService?.get() ?? null,
+    getDetect: () => detectService,
+    getMedia: () => mediaService,
   });
   void aiService.initialize();
 
   if (IS_SMOKE_TEST) {
-    void runSmokeTest(win, { getPlayer: () => playerService });
+    void runSmokeTest(win, {
+      getPlayer: () => playerService,
+      getDetect: () => detectService,
+      getData: () => dataLayer,
+      getMedia: () => mediaService,
+    });
   }
 
   app.on('activate', () => {

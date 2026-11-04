@@ -18,6 +18,26 @@ export interface TimelineSettings {
   pxPerSecond: number;
 }
 
+/** S36-2：镜头识别引擎。 */
+export type RecognitionEngine = 'ai' | 'opencv';
+
+export interface RecognitionSettings {
+  engine: RecognitionEngine;
+}
+
+/** S36-2：AI 识别配置（apiKey 在 settings.json 中为 safeStorage 密文）。 */
+export interface AiSettings {
+  provider?: 'openai-compatible' | 'mock';
+  baseUrl?: string;
+  apiKey?: string;
+  agentEndpoint?: string;
+  segmentSeconds?: number;
+  segmentOverlapSeconds?: number;
+  timeoutSeconds?: number;
+  maxRetriesPerSegment?: number;
+  enabled?: boolean;
+}
+
 /** S36-3a：轨道高度 5 档（px）。 */
 export const TRACK_HEIGHT_LEVELS: readonly number[] = [48, 96, 144, 192, 240];
 
@@ -54,6 +74,10 @@ export interface Settings {
   confirmUserContent?: boolean;
   /** 时间线轨道缩放（S36-3），缺省走 defaultSettings 默认档 */
   timeline?: TimelineSettings;
+  /** 识别引擎（S36-2），缺省 ai */
+  recognition?: RecognitionSettings;
+  /** AI 识别配置（S36-2） */
+  ai?: AiSettings;
 }
 
 export interface SettingsSetArgs {
@@ -72,6 +96,10 @@ export interface SettingsSetArgs {
   confirmUserContent?: boolean;
   /** 时间线轨道缩放（S36-3），缺省走 defaultSettings 默认档 */
   timeline?: TimelineSettings;
+  /** 识别引擎（S36-2），缺省 ai */
+  recognition?: RecognitionSettings;
+  /** AI 识别配置（S36-2） */
+  ai?: AiSettings;
 }
 
 export interface SettingsChooseDirectoryArgs {
@@ -172,6 +200,8 @@ export interface AiMcpDataChangedEvent {
 export interface AiApi {
   copyPrompt(args: AiCopyPromptArgs): Promise<IpcResult<AiCopyPromptResult>>;
   getShotSnapshot(args: { projectId: string }): Promise<IpcResult<AiProjectSnapshot>>;
+  /** S36-2a：探测 API 端点能力（是否支持原生视频输入）。 */
+  probeProvider(args?: { baseUrl?: string; apiKey?: string }): Promise<IpcResult<AiProviderProbeResult>>;
   startMcp(args: { enabled: boolean }): Promise<IpcResult<AiMcpStatus>>;
   getMcpStatus(): Promise<IpcResult<AiMcpStatus>>;
   onMcpAuthRequest(listener: (request: AiMcpAuthRequest) => void): () => void;
@@ -618,6 +648,8 @@ export interface DetectOptions {
   frameInterval?: number;
   /** 直接指定抽帧间隔（毫秒）；优先于 frameInterval */
   intervalMs?: number;
+  /** S36-2：识别引擎；缺省读取 settings.recognition.engine（默认 ai） */
+  engine?: RecognitionEngine;
 }
 
 export interface Project {
@@ -726,6 +758,11 @@ export interface DetectJobSnapshot {
   status: DetectJobStatus;
   progress: number;
   error: string | null;
+  /** S36-2：AI 任务附加进度（OpenCV 任务缺省） */
+  engine?: RecognitionEngine;
+  currentSegment?: number;
+  segmentsTotal?: number;
+  usage?: ShotDetectionUsage;
 }
 
 export interface DetectRunArgs {
@@ -757,6 +794,62 @@ export interface DetectApplyArgs {
 
 export interface DetectApplyResult {
   applied: number;
+}
+
+/** ---------- S36-2：镜头识别 AI 契约 ---------- */
+
+/** 交给 provider 的单个视频分段输入（原生视频，不本地抽帧）。 */
+export interface ShotDetectionSegment {
+  videoPath: string;
+  startMs: number;
+  endMs: number;
+}
+
+/** 结构化镜头：字段完整率 100% 的契约单元。 */
+export interface ShotDetectionShot {
+  id: string;
+  startMs: number;
+  endMs: number;
+  representativeTimeMs: number;
+  note: string;
+  /** category → name[]，如 { 景别: ['中景'], 运镜: ['跟'] } */
+  tags: Record<string, string[]>;
+  confidence: number;
+}
+
+export interface ShotDetectionUsage {
+  seconds: number;
+  tokens: number;
+  /** 估算费用（USD），provider 可选返回 */
+  cost?: number;
+}
+
+export interface ShotDetectionResult {
+  segment: { startMs: number; endMs: number };
+  shots: ShotDetectionShot[];
+  usage: ShotDetectionUsage;
+  generatedAt: string;
+}
+
+/** Provider 能力探测结果（S36-2a）。 */
+export interface AiProviderProbeResult {
+  ok: boolean;
+  supportsNativeVideo: boolean;
+  provider: string;
+  model: string | null;
+  error: { code: string; message: string } | null;
+}
+
+/** AI 识别任务快照（MCP get_detection_job 返回）。 */
+export interface AiJobSnapshot {
+  jobId: string;
+  projectId: string;
+  status: DetectJobStatus;
+  progress: number;
+  currentSegment: number;
+  segmentsTotal: number;
+  error: string | null;
+  usage: ShotDetectionUsage;
 }
 
 export interface ShotCreateArgs {

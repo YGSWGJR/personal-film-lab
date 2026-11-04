@@ -7,6 +7,7 @@ import type {
   AiMcpAuthResponseArgs,
   AiMcpStatus,
   AiProjectSnapshot,
+  AiProviderProbeResult,
   AppInfo,
   CandidateSource,
   CancelJobResult,
@@ -199,6 +200,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.AI_GET_SNAPSHOT,
     withEnvelope((args: { projectId: string }): AiProjectSnapshot => requireAi().getSnapshot(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.AI_PROBE_PROVIDER,
+    withEnvelope((args: { baseUrl?: string; apiKey?: string }): Promise<AiProviderProbeResult> =>
+      requireAi().probeProvider(args),
+    ),
   );
   ipcMain.handle(
     IPC.AI_START_MCP,

@@ -18,6 +18,7 @@ interface ShotRow {
   remark: string | null;
   origin: 'auto' | 'manual';
   locked: number;
+  thumbnail: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -129,6 +130,15 @@ export class ShotRepository {
     return this.get(current.id);
   }
 
+  /** S36-2：写入镜头封面缩略图路径（可由 AI/OpenCV 预览或按需抽帧生成）。 */
+  setThumbnail(id: string, thumbnail: string | null): Shot {
+    this.get(id);
+    this.db
+      .prepare('UPDATE shots SET thumbnail = ?, updated_at = ? WHERE id = ?')
+      .run(thumbnail, nowIso(), id);
+    return this.get(id);
+  }
+
   delete(id: string, extraSafeRoots: string[] = []): void {
     const current = this.get(id);
     const stillFiles = this.db
@@ -149,28 +159,35 @@ export class ShotRepository {
     );
   }
 
-  /** 应用检测预览：保留 locked 镜头，替换其他镜头并跳过与 locked 区间重叠的候选。 */
+  /**
+   * 应用检测预览：保留 locked 与 origin='manual' 的人工镜头，
+   * 替换其余自动镜头，并跳过与受保护区间重叠的候选（S36-2 人工修正优先）。
+   */
   applyDetected(projectId: string, previews: ShotPreview[]): number {
     this.assertProject(projectId);
     const now = nowIso();
     let applied = 0;
     this.layer.transaction(() => {
-      const lockedRows = this.db
-        .prepare('SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND locked = 1')
+      const protectedRows = this.db
+        .prepare(
+          "SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND (locked = 1 OR origin = 'manual')",
+        )
         .all(projectId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
-      this.db.prepare('DELETE FROM shots WHERE project_id = ? AND locked = 0').run(projectId);
-      let nextIndex = Math.max(0, ...lockedRows.map((row) => row.shot_index)) + 1;
+      this.db
+        .prepare("DELETE FROM shots WHERE project_id = ? AND locked = 0 AND origin = 'auto'")
+        .run(projectId);
+      let nextIndex = Math.max(0, ...protectedRows.map((row) => row.shot_index)) + 1;
       const insert = this.db.prepare(
         `INSERT INTO shots (
           id, project_id, shot_index, start_ms, end_ms, duration_ms,
-          shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'auto', 0, ?, ?)`,
+          shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'auto', 0, ?, ?, ?)`,
       );
       for (const preview of previews) {
-        const overlapsLocked = lockedRows.some(
+        const overlapsProtected = protectedRows.some(
           (row) => preview.startMs < row.end_ms && preview.endMs > row.start_ms,
         );
-        if (overlapsLocked) continue;
+        if (overlapsProtected) continue;
         insert.run(
           randomUUID(),
           projectId,
@@ -178,6 +195,7 @@ export class ShotRepository {
           preview.startMs,
           preview.endMs,
           preview.endMs - preview.startMs,
+          preview.thumbnail ?? preview.thumbPath ?? null,
           now,
           now,
         );
@@ -230,6 +248,7 @@ function mapShot(row: ShotRow, tagIds: string[]): Shot {
     remark: row.remark,
     origin: row.origin === 'auto' ? 'auto' : 'manual',
     locked: row.locked !== 0,
+    thumbnail: row.thumbnail ?? null,
     tagIds,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

@@ -14,6 +14,7 @@ const props = defineProps<{
   gpuLabel: string;
   result: DetectResult | null;
   error: string | null;
+  engine?: 'ai' | 'opencv';
 }>();
 
 const emit = defineEmits<{
@@ -68,7 +69,7 @@ function applyResult(): void {
           <div>
             <p>SHOT DETECTION</p>
             <h2>镜头检测</h2>
-            <span>{{ projectName }}</span>
+            <span>{{ projectName }} · {{ engine === 'ai' ? 'AI 全接管' : 'OpenCV（旧）' }}</span>
           </div>
           <button type="button" :disabled="running" aria-label="关闭" @click="emit('close')">×</button>
         </header>
@@ -76,15 +77,23 @@ function applyResult(): void {
         <div v-if="running" class="detect-running">
           <img :src="loadingImage" alt="" />
           <div class="running-copy">
-            <span class="scan-label">{{ progress?.stage === 'extractFrames' ? '正在抽取检测帧' : '正在分析色彩变化' }}</span>
+            <span class="scan-label">
+              {{ engine === 'ai'
+                ? 'AI 正在分段识别原生视频'
+                : progress?.stage === 'extractFrames'
+                  ? '正在抽取检测帧'
+                  : '正在分析色彩变化' }}
+            </span>
             <strong>{{ progress?.percent ?? 0 }}%</strong>
             <div class="progress-track">
               <i :style="{ width: `${progress?.percent ?? 0}%` }"></i>
             </div>
             <p>
-              {{ progress?.stage === 'extractFrames'
-                ? 'FFmpeg 正在建立可重建的采样帧序列'
-                : 'OpenCV 正在计算饱和度、对比度与色调差异曲线' }}
+              {{ engine === 'ai'
+                ? '模型直接观看原生视频并返回 shot-detection JSON；本地只负责契约校验、去重与落库'
+                : progress?.stage === 'extractFrames'
+                  ? 'FFmpeg 正在建立可重建的采样帧序列'
+                  : 'OpenCV 正在计算饱和度、对比度与色调差异曲线' }}
             </p>
             <small class="gpu-status">{{ gpuLabel }}</small>
           </div>

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   read,
   readFileSync,
@@ -20,14 +21,23 @@ import { IPC } from '../../shared/ipc-channels';
 import type {
   AiCopyPromptArgs,
   AiCopyPromptResult,
+  AiJobSnapshot,
   AiMcpAuthRequest,
   AiMcpAuthResponseArgs,
   AiMcpDataChangedEvent,
   AiMcpStatus,
   AiProjectSnapshot,
+  AiProviderProbeResult,
+  DetectOptions,
+  Settings,
+  ShotDetectionUsage,
   WorkspaceState,
 } from '../../shared/types';
+import type { DetectService } from '../detect/detect-service';
+import type { MediaService } from '../media/media-service';
+import { resolveThumbCacheDir } from '../paths';
 import { buildAiPrompt, buildSnapshotOnlyPrompt } from './ai-prompts';
+import { createProviderFromSettings } from './provider';
 import {
   buildContinuityCandidates,
   buildProjectSnapshot,
@@ -38,6 +48,9 @@ interface AiAccessDeps {
   getWindow: () => BrowserWindow | null;
   getData: () => DataLayer | null;
   getSessionState: () => WorkspaceState | null;
+  getSettings?: () => Settings | null;
+  getDetect?: () => DetectService | null;
+  getMedia?: () => MediaService | null;
 }
 
 interface McpBridgeConfig {
@@ -61,6 +74,21 @@ interface BridgeRequest {
   args?: Record<string, unknown>;
   agentName?: string;
 }
+
+/** S36-2b：11 个 MCP 工具（5 旧 + 6 新），HTTP 桥与 Stdio 两端共用此清单。 */
+export const MCP_TOOL_NAMES = [
+  'list_shots',
+  'get_shot_detail',
+  'check_continuity',
+  'write_shot_note',
+  'get_project_summary',
+  'run_shot_detection',
+  'get_detection_job',
+  'cancel_detection',
+  'apply_detection',
+  'write_shot_tags',
+  'get_shot_thumbnail',
+] as const;
 
 export class AiAccessService {
   private server: Server | null = null;
@@ -113,6 +141,20 @@ export class AiAccessService {
 
   getSnapshot(projectId: string): AiProjectSnapshot {
     return this.buildSnapshot(projectId);
+  }
+
+  /** S36-2a：探测 API Key 直连端点的原生视频能力。 */
+  async probeProvider(args?: { baseUrl?: string; apiKey?: string }): Promise<AiProviderProbeResult> {
+    const settings = this.deps.getSettings?.() ?? null;
+    const provider = createProviderFromSettings(
+      {
+        ...(settings?.ai ?? {}),
+        ...(args?.baseUrl ? { baseUrl: args.baseUrl } : {}),
+        ...(args?.apiKey ? { apiKey: args.apiKey } : {}),
+      },
+      { forceMock: process.env['SMOKE_AI_PROVIDER'] === 'mock' },
+    );
+    return provider.probeCapability();
   }
 
   respondMcpAuth(args: AiMcpAuthResponseArgs): { responded: boolean } {
@@ -223,15 +265,16 @@ export class AiAccessService {
 
   private async dispatchTool(payload: BridgeRequest): Promise<unknown> {
     const data = this.requireData();
-    const projectId = this.deps.getSessionState()?.projectId;
-    if (!projectId) throw new Error('当前没有打开的项目');
-    const snapshot = buildProjectSnapshot(data, projectId);
+    const sessionProjectId = this.deps.getSessionState()?.projectId ?? null;
+    const snapshot = sessionProjectId ? buildProjectSnapshot(data, sessionProjectId) : null;
+    const agentName = normalizeAgentName(payload.agentName);
 
     switch (payload.tool) {
-      case 'list_shots':
+      case 'list_shots': {
+        const current = this.requireSnapshot(snapshot);
         return {
-          project: snapshot.project,
-          shots: snapshot.shots.map((shot) => ({
+          project: current.project,
+          shots: current.shots.map((shot) => ({
             id: shot.id,
             index: shot.index,
             startMs: shot.startMs,
@@ -243,45 +286,186 @@ export class AiAccessService {
             noteLength: shot.noteLength,
           })),
         };
+      }
       case 'get_shot_detail': {
+        const current = this.requireSnapshot(snapshot);
         const shotId = String(payload.args?.shotId ?? '');
-        const shot = snapshot.shots.find((item) => item.id === shotId);
+        const shot = current.shots.find((item) => item.id === shotId);
         if (!shot) throw new Error('镜头不存在或不属于当前项目');
         return shot;
       }
       case 'check_continuity':
-        return { candidates: buildContinuityCandidates(snapshot) };
+        return { candidates: buildContinuityCandidates(this.requireSnapshot(snapshot)) };
       case 'get_project_summary':
-        return buildProjectSummary(snapshot);
+        return buildProjectSummary(this.requireSnapshot(snapshot));
       case 'write_shot_note': {
+        const current = this.requireSnapshot(snapshot);
         const shotId = String(payload.args?.shotId ?? '');
         const content = String(payload.args?.content ?? '');
-        const shot = snapshot.shots.find((item) => item.id === shotId);
+        const shot = current.shots.find((item) => item.id === shotId);
         if (!shot) throw new Error('镜头不存在或不属于当前项目');
-        const agentName = normalizeAgentName(payload.agentName);
-        const allowed =
-          this.isAgentAllowed(agentName) ||
-          (await this.requestAuthorization(
-            agentName,
-            '写入镜头笔记',
-            `镜头 ${String(shot.index).padStart(2, '0')}，${content.length} 个字符`,
-          ));
+        const allowed = await this.authorizeWrite(
+          agentName,
+          '写入镜头笔记',
+          `镜头 ${String(shot.index).padStart(2, '0')}，${content.length} 个字符`,
+        );
         if (!allowed) throw new Error('用户拒绝了 MCP 写入请求');
         const existing = data.notes.list({ shotId })[0];
         const note = data.notes.upsert({
           id: existing?.id,
-          projectId,
+          projectId: current.project.id,
           shotId,
           text: content,
         });
-        const changed: AiMcpDataChangedEvent = { projectId, shotId };
+        const changed: AiMcpDataChangedEvent = { projectId: current.project.id, shotId };
         const win = this.deps.getWindow();
         if (win && !win.isDestroyed()) win.webContents.send(IPC.AI_MCP_DATA_CHANGED, changed);
         return { written: true, note };
       }
+      case 'run_shot_detection': {
+        const targetProjectId = String(payload.args?.projectId ?? sessionProjectId ?? '');
+        if (!targetProjectId) throw new Error('当前没有打开的项目，请提供 projectId');
+        const project = data.projects.get(targetProjectId);
+        const allowed = await this.authorizeWrite(
+          agentName,
+          '启动 AI 镜头识别',
+          `项目 ${project.name}${payload.args?.rangeMs ? '（范围参数已接收）' : ''}`,
+        );
+        if (!allowed) throw new Error('用户拒绝了 MCP 写入请求');
+        const detect = this.requireDetect();
+        const { jobId } = detect.run({
+          projectId: targetProjectId,
+          options: defaultAiDetectOptions(),
+          dryRun: true,
+        });
+        return { jobId };
+      }
+      case 'get_detection_job': {
+        const jobId = String(payload.args?.jobId ?? '');
+        if (!jobId) throw new Error('缺少 jobId');
+        const job = this.requireDetect().getJob(jobId);
+        const usage: ShotDetectionUsage = job.usage ?? { seconds: 0, tokens: 0, cost: 0 };
+        const snapshot: AiJobSnapshot = {
+          jobId: job.jobId,
+          projectId: job.projectId,
+          status: job.status,
+          progress: job.progress,
+          currentSegment: job.currentSegment ?? 0,
+          segmentsTotal: job.segmentsTotal ?? 0,
+          error: job.error,
+          usage,
+        };
+        return snapshot;
+      }
+      case 'cancel_detection': {
+        const jobId = String(payload.args?.jobId ?? '');
+        if (!jobId) throw new Error('缺少 jobId');
+        const allowed = await this.authorizeWrite(agentName, '取消 AI 镜头识别', `任务 ${jobId}`);
+        if (!allowed) throw new Error('用户拒绝了 MCP 写入请求');
+        this.requireDetect().cancel(jobId);
+        return { cancelled: true };
+      }
+      case 'apply_detection': {
+        const jobId = String(payload.args?.jobId ?? '');
+        if (!jobId) throw new Error('缺少 jobId');
+        const allowed = await this.authorizeWrite(agentName, '应用 AI 镜头识别结果', `任务 ${jobId}`);
+        if (!allowed) throw new Error('用户拒绝了 MCP 写入请求');
+        const detect = this.requireDetect();
+        const shotIds = readStringArray(payload.args?.shotIds);
+        const sceneIds = readStringArray(payload.args?.sceneIds);
+        const job = detect.getJob(jobId);
+        const result = detect.applyByJob(jobId, shotIds, sceneIds);
+        const changed: AiMcpDataChangedEvent = { projectId: job.projectId, shotId: '' };
+        const win = this.deps.getWindow();
+        if (win && !win.isDestroyed()) win.webContents.send(IPC.AI_MCP_DATA_CHANGED, changed);
+        return result;
+      }
+      case 'write_shot_tags': {
+        const shotId = String(payload.args?.shotId ?? '');
+        const shot = data.shots.get(shotId);
+        const tagMap = readTagMap(payload.args?.tags);
+        const allowed = await this.authorizeWrite(
+          agentName,
+          '写入镜头标签',
+          `镜头 ${String(shot.index).padStart(2, '0')}，${Object.values(tagMap).flat().length} 个标签`,
+        );
+        if (!allowed) throw new Error('用户拒绝了 MCP 写入请求');
+        const existing = data.tags.list();
+        const tagIds: string[] = [];
+        let written = 0;
+        for (const [category, names] of Object.entries(tagMap)) {
+          for (const name of names) {
+            const trimmed = name.trim();
+            if (!trimmed) continue;
+            let tag = existing.find((item) => item.category === category && item.name === trimmed);
+            if (!tag) {
+              tag = data.tags.create({ category, name: trimmed });
+              existing.push(tag);
+            }
+            tagIds.push(tag.id);
+            written += 1;
+          }
+        }
+        const assigned = data.tags.assign(shotId, tagIds);
+        const changed: AiMcpDataChangedEvent = { projectId: shot.projectId, shotId };
+        const win = this.deps.getWindow();
+        if (win && !win.isDestroyed()) win.webContents.send(IPC.AI_MCP_DATA_CHANGED, changed);
+        return { written, tagIds: assigned };
+      }
+      case 'get_shot_thumbnail': {
+        const shotId = String(payload.args?.shotId ?? '');
+        const shot = data.shots.get(shotId);
+        if (shot.thumbnail && existsSync(shot.thumbnail)) {
+          return { thumbnailPath: shot.thumbnail };
+        }
+        const media = this.deps.getMedia?.() ?? null;
+        if (!media) throw new Error('媒体服务尚未就绪');
+        const project = data.projects.get(shot.projectId);
+        const sourcePath = project.media.proxyPath || project.source.path;
+        if (!sourcePath) throw new Error('项目没有可读取的视频路径');
+        const thumbsDir = join(resolveThumbCacheDir(), shot.projectId);
+        mkdirSync(thumbsDir, { recursive: true });
+        const stamp = Date.now();
+        const target = join(thumbsDir, `shot-${shot.index}-${stamp}.jpg`);
+        const sourceFrame = join(thumbsDir, `.shot-${shot.index}-${stamp}.src.jpg`);
+        const representativeTimeMs = Math.round((shot.startMs + shot.endMs) / 2);
+        try {
+          await media.extractFrame({
+            path: sourcePath,
+            timeMs: representativeTimeMs,
+            outputPath: sourceFrame,
+            format: 'jpg',
+            quality: 6,
+            timeoutMs: 60_000,
+          });
+          await media.createThumbnail(sourceFrame, target, 160, 8);
+          data.shots.setThumbnail(shot.id, target);
+        } finally {
+          rmSync(sourceFrame, { force: true });
+        }
+        return { thumbnailPath: target };
+      }
       default:
         throw new Error(`未知 MCP 工具：${payload.tool}`);
     }
+  }
+
+  private requireSnapshot(snapshot: AiProjectSnapshot | null): AiProjectSnapshot {
+    if (!snapshot) throw new Error('当前没有打开的项目');
+    return snapshot;
+  }
+
+  private requireDetect(): DetectService {
+    const detect = this.deps.getDetect?.() ?? null;
+    if (!detect) throw new Error('镜头识别服务尚未就绪');
+    return detect;
+  }
+
+  private async authorizeWrite(agentName: string, action: string, detail: string): Promise<boolean> {
+    return (
+      this.isAgentAllowed(agentName) ||
+      (await this.requestAuthorization(agentName, action, detail))
+    );
   }
 
   private async requestAuthorization(agentName: string, action: string, detail: string): Promise<boolean> {
@@ -383,6 +567,78 @@ export async function runMcpStdioServer(): Promise<void> {
       annotations: { readOnlyHint: true },
     },
     async () => text(await call('get_project_summary')),
+  );
+  server.registerTool(
+    'run_shot_detection',
+    {
+      title: '启动 AI 镜头识别',
+      description: '启动异步 AI 镜头识别；立即返回 jobId，用 get_detection_job 轮询。',
+      inputSchema: {
+        projectId: z.string().min(1).optional(),
+        rangeMs: z.tuple([z.number().min(0), z.number().min(0)]).optional(),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ projectId, rangeMs }) =>
+      text(await call('run_shot_detection', { projectId, rangeMs })),
+  );
+  server.registerTool(
+    'get_detection_job',
+    {
+      title: '读取识别任务',
+      description: '读取 AI 识别任务的状态、进度、分段、费用与错误。',
+      inputSchema: { jobId: z.string().min(1) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ jobId }) => text(await call('get_detection_job', { jobId })),
+  );
+  server.registerTool(
+    'cancel_detection',
+    {
+      title: '取消识别任务',
+      description: '取消运行中的 AI 识别任务；已完段结果保留。',
+      inputSchema: { jobId: z.string().min(1) },
+      annotations: { destructiveHint: true },
+    },
+    async ({ jobId }) => text(await call('cancel_detection', { jobId })),
+  );
+  server.registerTool(
+    'apply_detection',
+    {
+      title: '应用识别结果',
+      description: '把一个识别任务的预览镜头落库；locked / origin=manual 的镜头不会被覆盖。',
+      inputSchema: {
+        jobId: z.string().min(1),
+        shotIds: z.array(z.string().min(1)).optional(),
+        sceneIds: z.array(z.string().min(1)).optional(),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ jobId, shotIds, sceneIds }) =>
+      text(await call('apply_detection', { jobId, shotIds, sceneIds })),
+  );
+  server.registerTool(
+    'write_shot_tags',
+    {
+      title: '写入镜头标签',
+      description: '按 category→name[] 写入镜头标签；不存在的标签会自动创建。',
+      inputSchema: {
+        shotId: z.string().min(1),
+        tags: z.record(z.string(), z.array(z.string())),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ shotId, tags }) => text(await call('write_shot_tags', { shotId, tags })),
+  );
+  server.registerTool(
+    'get_shot_thumbnail',
+    {
+      title: '读取镜头封面',
+      description: '返回镜头封面路径；若尚无封面，按镜头中点精确抽帧生成 160px 缩略图。',
+      inputSchema: { shotId: z.string().min(1) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ shotId }) => text(await call('get_shot_thumbnail', { shotId })),
   );
 
   const transport = new StdioServerTransport(createFdReadable(0), createFdWritable(1));
@@ -492,6 +748,31 @@ function writeJsonAtomic(path: string, value: unknown): void {
 function normalizeAgentName(value: unknown): string {
   const text = typeof value === 'string' ? value.trim() : '';
   return text.slice(0, 100) || 'MCP Client';
+}
+
+function defaultAiDetectOptions(): DetectOptions {
+  return {
+    sensitivity: 0.5,
+    minShotSeconds: 1,
+    filterTransitions: false,
+    weights: { s: 0.15, c: 0.15, h: 0.25, hv: 0.2, edge: 0.1, grid: 0.15 },
+    engine: 'ai',
+  };
+}
+
+function readStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => String(item)).filter(Boolean);
+}
+
+function readTagMap(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, string[]> = {};
+  for (const [category, names] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(names)) continue;
+    result[String(category)] = names.map((item) => String(item)).filter(Boolean);
+  }
+  return result;
 }
 
 async function callBridge(tool: string, args: Record<string, unknown> | undefined, agentName: string): Promise<unknown> {

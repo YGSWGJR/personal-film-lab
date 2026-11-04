@@ -3,7 +3,10 @@ import { computed, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { AiMcpStatus, ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
 
-type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier' | 'confirmUserContent' | 'timeline'>;
+type PathKey = Exclude<
+  keyof SettingsSetArgs,
+  'proxyTier' | 'confirmUserContent' | 'timeline' | 'recognition' | 'ai'
+>;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 type SettingsDraft = Record<PathKey, string>;
 
@@ -39,6 +42,20 @@ const liveSettings = ref<Settings | null>(null);
 const proxyTier = ref<ProxyTier>('540p');
 /** S36-1b：删除用户内容前二次确认，默认开启（与主进程 defaultSettings 对齐） */
 const confirmUserContent = ref(true);
+/** S36-2：识别引擎与 AI 配置草稿 */
+const recognitionEngine = ref<'ai' | 'opencv'>('ai');
+const aiProvider = ref<'openai-compatible' | 'mock'>('openai-compatible');
+const aiBaseUrl = ref('');
+const aiApiKeyDraft = ref('');
+const clearAiKey = ref(false);
+const aiAgentEndpoint = ref('');
+const aiSegmentSeconds = ref(600);
+const aiTimeoutSeconds = ref(900);
+const aiMaxRetries = ref(3);
+const aiProbeState = ref<{ tone: 'idle' | 'busy' | 'success' | 'error'; text: string }>({
+  tone: 'idle',
+  text: '',
+});
 const proxyTierOptions = [
   { value: '360p', label: '360p', hint: '最快' },
   { value: '540p', label: '540p', hint: '均衡' },
@@ -142,6 +159,16 @@ function fillDraft(settings: Settings): void {
   draft.stillSubDir = settings.stillSubDir ?? '';
   proxyTier.value = settings.proxyTier ?? '540p';
   confirmUserContent.value = settings.confirmUserContent ?? true;
+  recognitionEngine.value = settings.recognition?.engine ?? 'ai';
+  aiProvider.value = settings.ai?.provider ?? 'openai-compatible';
+  aiBaseUrl.value = settings.ai?.baseUrl ?? '';
+  aiApiKeyDraft.value = '';
+  clearAiKey.value = false;
+  aiAgentEndpoint.value = settings.ai?.agentEndpoint ?? '';
+  aiSegmentSeconds.value = settings.ai?.segmentSeconds ?? 600;
+  aiTimeoutSeconds.value = settings.ai?.timeoutSeconds ?? 900;
+  aiMaxRetries.value = settings.ai?.maxRetriesPerSegment ?? 3;
+  aiProbeState.value = { tone: 'idle', text: '' };
 }
 
 function joinDisplayPath(base: string, ...parts: string[]): string {
@@ -201,6 +228,16 @@ async function resetDefaults(): Promise<void> {
     draft.stillSubDir = '';
     proxyTier.value = '540p';
     confirmUserContent.value = true;
+    recognitionEngine.value = 'ai';
+    aiProvider.value = 'openai-compatible';
+    aiBaseUrl.value = '';
+    aiApiKeyDraft.value = '';
+    clearAiKey.value = false;
+    aiAgentEndpoint.value = '';
+    aiSegmentSeconds.value = 600;
+    aiTimeoutSeconds.value = 900;
+    aiMaxRetries.value = 3;
+    aiProbeState.value = { tone: 'idle', text: '' };
     environmentCheck.value = null;
   } finally {
     resettingDefaults.value = false;
@@ -280,6 +317,30 @@ async function checkEnvironment(): Promise<void> {
   }
 }
 
+async function probeAiProvider(): Promise<void> {
+  if (aiProbeState.value.tone === 'busy') return;
+  aiProbeState.value = { tone: 'busy', text: '探测中…' };
+  const result = await window.api.ai.probeProvider({
+    baseUrl: aiBaseUrl.value.trim(),
+    apiKey: aiApiKeyDraft.value.trim() || undefined,
+  });
+  if (!result.ok) {
+    aiProbeState.value = { tone: 'error', text: result.error.message };
+    return;
+  }
+  if (result.data.ok && result.data.supportsNativeVideo) {
+    aiProbeState.value = {
+      tone: 'success',
+      text: `支持原生视频输入 · 模型 ${result.data.model ?? '未知'}`,
+    };
+  } else {
+    aiProbeState.value = {
+      tone: 'error',
+      text: result.data.error?.message ?? '端点不支持原生视频输入，请更换',
+    };
+  }
+}
+
 function submit(): void {
   if (props.saving || lockedByEnvironment.value) return;
   const rootPaths = {
@@ -292,6 +353,19 @@ function submit(): void {
   const value: SettingsSetArgs = { ...rootPaths };
   value.proxyTier = proxyTier.value;
   value.confirmUserContent = confirmUserContent.value;
+  value.recognition = { engine: recognitionEngine.value };
+  const aiValue: NonNullable<SettingsSetArgs['ai']> = {
+    provider: aiProvider.value,
+    baseUrl: aiBaseUrl.value.trim(),
+    agentEndpoint: aiAgentEndpoint.value.trim(),
+    segmentSeconds: Number(aiSegmentSeconds.value) || 600,
+    timeoutSeconds: Number(aiTimeoutSeconds.value) || 900,
+    maxRetriesPerSegment: Number(aiMaxRetries.value) || 3,
+    enabled: true,
+  };
+  if (clearAiKey.value) aiValue.apiKey = '';
+  else if (aiApiKeyDraft.value.trim()) aiValue.apiKey = aiApiKeyDraft.value.trim();
+  value.ai = aiValue;
   for (const key of [
     'proxyCacheDir',
     'frameCacheDir',
@@ -386,6 +460,93 @@ function submit(): void {
               <strong>{{ option.label }}</strong>
               <small>{{ option.hint }}</small>
             </button>
+          </div>
+        </section>
+
+        <section class="ai-section">
+          <div class="ai-head">
+            <strong>AI 镜头识别</strong>
+            <small>默认由大模型直接识别原生视频；OpenCV 仅作隐藏开关保留。</small>
+          </div>
+          <div class="ai-engine-row">
+            <span>识别引擎</span>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: recognitionEngine === 'ai' }"
+              :disabled="saving || resettingDefaults"
+              @click="recognitionEngine = 'ai'"
+            >
+              AI 全接管
+            </button>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: recognitionEngine === 'opencv' }"
+              :disabled="saving || resettingDefaults"
+              @click="recognitionEngine = 'opencv'"
+            >
+              OpenCV（旧）
+            </button>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: aiProvider === 'mock' }"
+              :disabled="saving || resettingDefaults"
+              @click="aiProvider = aiProvider === 'mock' ? 'openai-compatible' : 'mock'"
+            >
+              测试 Mock
+            </button>
+          </div>
+          <label class="ai-field">
+            <span>API 端点 baseUrl</span>
+            <input v-model="aiBaseUrl" spellcheck="false" placeholder="https://api.example.com/v1" />
+          </label>
+          <label class="ai-field">
+            <span>API Key（safeStorage 加密保存）</span>
+            <input
+              v-model="aiApiKeyDraft"
+              type="password"
+              spellcheck="false"
+              :placeholder="settings?.ai?.apiKey ? '已保存（留空保持不变）' : '未配置'"
+            />
+          </label>
+          <div class="ai-key-actions">
+            <button
+              type="button"
+              :disabled="saving || resettingDefaults"
+              @click="clearAiKey = true; aiApiKeyDraft = ''"
+            >
+              {{ clearAiKey ? '已标记清除（保存后生效）' : '清除已存 Key' }}
+            </button>
+          </div>
+          <label class="ai-field">
+            <span>Agent 端点（MCP 可选）</span>
+            <input v-model="aiAgentEndpoint" spellcheck="false" placeholder="MCP 工具集默认复用本机桥" />
+          </label>
+          <div class="ai-grid">
+            <label class="ai-field">
+              <span>分段秒数</span>
+              <input v-model.number="aiSegmentSeconds" type="number" min="30" max="3600" />
+            </label>
+            <label class="ai-field">
+              <span>超时秒数</span>
+              <input v-model.number="aiTimeoutSeconds" type="number" min="30" max="7200" />
+            </label>
+            <label class="ai-field">
+              <span>单段重发</span>
+              <input v-model.number="aiMaxRetries" type="number" min="0" max="10" />
+            </label>
+          </div>
+          <div class="ai-probe">
+            <button
+              type="button"
+              :disabled="aiProbeState.tone === 'busy' || saving"
+              @click="probeAiProvider"
+            >
+              {{ aiProbeState.tone === 'busy' ? '探测中…' : '探测原生视频能力' }}
+            </button>
+            <span v-if="aiProbeState.text" :class="aiProbeState.tone">{{ aiProbeState.text }}</span>
           </div>
         </section>
 
@@ -762,6 +923,137 @@ function submit(): void {
 
 .tier-options button.active strong {
   color: #fff;
+}
+
+.ai-section {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 7px;
+  margin: 10px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.ai-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-head strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.ai-head small {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.ai-engine-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-engine-row > span {
+  min-width: 58px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.ai-toggle {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.ai-toggle.active {
+  border-color: rgba(34, 197, 94, 0.42);
+  background: rgba(34, 197, 94, 0.1);
+  color: #86efac;
+}
+
+.ai-field {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-field > span {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.ai-field input {
+  height: 28px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: 0;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.ai-field input:focus {
+  border-color: var(--blue-hi);
+}
+
+.ai-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ai-grid .ai-field {
+  grid-template-columns: 1fr;
+}
+
+.ai-probe {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-key-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -2px;
+}
+
+.ai-probe button,
+.ai-key-actions button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.ai-probe span {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.ai-probe span.success {
+  color: #86efac;
+}
+
+.ai-probe span.error {
+  color: #fca5a5;
 }
 
 .settings-error {

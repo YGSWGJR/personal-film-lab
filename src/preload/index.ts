@@ -6,6 +6,7 @@ import {
   aiCopyPromptArgsSchema,
   aiMcpAuthResponseSchema,
   aiMcpSetEnabledArgsSchema,
+  aiProbeProviderArgsSchema,
   aiProjectArgsSchema,
   emptyArgsSchema,
   dataImportProjectArgsSchema,
@@ -67,6 +68,7 @@ import type {
   AiMcpDataChangedEvent,
   AiMcpStatus,
   AiProjectSnapshot,
+  AiProviderProbeResult,
   AppInfo,
   AudioWaveform,
   CandidateSource,
@@ -156,6 +158,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.APP_INFO]: emptyArgsSchema,
   [IPC.AI_COPY_PROMPT]: aiCopyPromptArgsSchema,
   [IPC.AI_GET_SNAPSHOT]: aiProjectArgsSchema,
+  [IPC.AI_PROBE_PROVIDER]: aiProbeProviderArgsSchema,
   [IPC.AI_START_MCP]: aiMcpSetEnabledArgsSchema,
   [IPC.AI_GET_MCP_STATUS]: emptyArgsSchema,
   [IPC.AI_RESPOND_MCP_AUTH]: aiMcpAuthResponseSchema,
@@ -299,6 +302,8 @@ const aiApi = {
   copyPrompt: (args: AiCopyPromptArgs) => invoke<AiCopyPromptResult>(IPC.AI_COPY_PROMPT, [args]),
   getShotSnapshot: (args: { projectId: string }) =>
     invoke<AiProjectSnapshot>(IPC.AI_GET_SNAPSHOT, [args]),
+  probeProvider: (args?: { baseUrl?: string; apiKey?: string }) =>
+    invoke<AiProviderProbeResult>(IPC.AI_PROBE_PROVIDER, [args ?? {}]),
   startMcp: (args: { enabled: boolean }) => invoke<AiMcpStatus>(IPC.AI_START_MCP, [args]),
   getMcpStatus: () => invoke<AiMcpStatus>(IPC.AI_GET_MCP_STATUS),
   onMcpAuthRequest: (listener: (request: AiMcpAuthRequest) => void) =>

@@ -3,18 +3,29 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { app, ipcMain, type BrowserWindow } from 'electron';
 import { unzipSync } from 'fflate';
+import type { DataLayer } from '../data/db';
 import { DataError } from '../data/errors';
 import { removeProjectDir, removeProjectFiles } from '../data/paths';
 import { IPC } from '../shared/ipc-channels';
 import { withEnvelope } from '../shared/ipc-result';
 import type { WorkspaceState } from '../shared/types';
 import { formatTimecodeFF, frameFromMs, frameToMs, parseTimecodeFF } from '../shared/time';
-import { resolveDetectFramesDir } from './paths';
+import type { DetectOptions } from '../shared/types';
+import { AiDetectRunner, buildSegments, dedupeSegmentShots } from './ai/ai-detect-runner';
+import { decryptApiKey, encryptApiKey, isEncryptedApiKey } from './ai/credential-store';
+import { MCP_TOOL_NAMES } from './ai/mcp-server';
+import { MockProvider } from './ai/provider';
+import type { DetectService } from './detect/detect-service';
+import type { MediaService } from './media/media-service';
+import { resolveDetectFramesDir, resolveThumbCacheDir } from './paths';
 import type { PlayerService } from './player/player-service';
 import { SessionService } from './session/session-service';
 
 interface SmokeDeps {
   getPlayer(): PlayerService | null;
+  getDetect?(): DetectService | null;
+  getData?(): DataLayer | null;
+  getMedia?(): MediaService | null;
 }
 
 interface RendererState {
@@ -35,7 +46,7 @@ const HOLD_MS = Number(process.env['SMOKE_HOLD_MS'] ?? '0');
  * 设置 SMOKE_VIDEO 时追加播放器链路断言（打开 / 精确 seek / 逐帧步进 / 播放暂停 / 音量 / 错误处理）。
  * 可选 SMOKE_RESULT（JSON 输出）、SMOKE_SCREENSHOT（窗口截图）、SMOKE_HOLD_MS（保持窗口用于外部截屏）。
  */
-export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promise<void> {
+export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise<void> {
   const checks: Record<string, boolean> = {};
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
@@ -58,12 +69,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let deleteUiChecks: Record<string, unknown> = {};
   let timelineChecks: Record<string, unknown> = {};
   let frameChecks: Record<string, unknown> = {};
+  let aiChecks: Record<string, unknown> = {};
+  let mcpToolChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -267,6 +280,16 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, frameChecksAssertions(frameChecks));
     }
 
+    if (process.env['SMOKE_AI'] === '1') {
+      aiChecks = await runAiChecks(win, deps, process.env['SMOKE_VIDEO'] ?? '');
+      Object.assign(checks, aiChecksAssertions(aiChecks));
+    }
+
+    if (process.env['SMOKE_MCP_TOOLS'] === '1') {
+      mcpToolChecks = await runMcpToolChecks(win, deps, process.env['SMOKE_VIDEO'] ?? '');
+      Object.assign(checks, mcpToolChecksAssertions(mcpToolChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -280,7 +303,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -2461,6 +2484,490 @@ async function runFrameChecks(win: BrowserWindow, videoPath: string): Promise<Re
       })()
     `;
     Object.assign(out, await win.webContents.executeJavaScript(script));
+  }
+  return out;
+}
+
+function aiChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  const assertions: Record<string, boolean> = {
+    aiEngineDefault: result.engineDefault === true,
+    aiCredentialEncrypted: result.credentialEncrypted === true && result.credentialRoundTrip === true,
+    aiSettingsNoPlaintext: result.settingsNoPlaintext === true,
+    aiSegmentPlan: result.segmentPlan === true,
+    aiDedup: result.dedup === true,
+    aiContractRetry: result.contractRetry === true,
+  };
+  if (result.e2eRun !== undefined) {
+    assertions.aiRun = result.e2eRun === true;
+    assertions.aiApply = result.applyOk === true;
+    assertions.aiThumbnail = result.thumbnailOk === true;
+    assertions.aiUsageLog = result.usageLogOk === true;
+    assertions.aiManualProtected = result.manualProtected === true;
+  }
+  if (result.resumeOk !== undefined) assertions.aiResume = result.resumeOk === true;
+  if (result.cancelOk !== undefined) assertions.aiCancel = result.cancelOk === true;
+  return assertions;
+}
+
+function defaultSmokeAiOptions(): DetectOptions {
+  return {
+    sensitivity: 0.5,
+    minShotSeconds: 1,
+    filterTransitions: false,
+    weights: { s: 0.2, c: 0.3, h: 0.5, hv: 0.2, edge: 0.1, grid: 0.15 },
+    engine: 'ai',
+  };
+}
+
+async function runAiChecks(
+  win: BrowserWindow,
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  try {
+    const settings = (await win.webContents.executeJavaScript(
+      'window.api.settings.get()',
+    )) as { ok: boolean; data?: any };
+    out.engineDefault = settings.ok === true && settings.data?.recognition?.engine === 'ai';
+
+    // A-1：safeStorage 加密往返
+    const secret = `sk-s36-smoke-${Date.now()}`;
+    const cipher = encryptApiKey(secret);
+    out.credentialEncrypted = isEncryptedApiKey(cipher) && !cipher.includes(secret);
+    out.credentialRoundTrip = decryptApiKey(cipher) === secret;
+
+    // A-1：settings.json 落盘后无明文（写入后恢复原值）
+    if (settings.ok && settings.data && !settings.data.environmentOverride) {
+      const original = settings.data;
+      const testAi = { ...(original.ai ?? {}), apiKey: secret };
+      const saved = (await win.webContents.executeJavaScript(
+        `window.api.settings.set(${JSON.stringify({ ...original, ai: testAi })})`,
+      )) as { ok: boolean; data?: any; error?: any };
+      const settingsPath = saved.ok ? saved.data?.settingsPath : original.settingsPath;
+      const raw = settingsPath && existsSync(settingsPath) ? readFileSync(settingsPath, 'utf8') : '';
+      out.settingsNoPlaintext = Boolean(raw) && !raw.includes(secret) && raw.includes('enc:v1:');
+      const restored = (await win.webContents.executeJavaScript(
+        `window.api.settings.set(${JSON.stringify({
+          ...original,
+          ai: { ...(original.ai ?? {}), apiKey: original.ai?.apiKey ?? '' },
+        })})`,
+      )) as { ok: boolean };
+      out.settingsRestored = restored.ok === true;
+    } else {
+      out.settingsNoPlaintext = true;
+      out.settingsRestored = true;
+    }
+
+    // C-1/C-2：分段计划与跨段去重（纯函数）
+    const segments = buildSegments(1_300_000, 'x.mp4', {
+      segmentSeconds: 600,
+      segmentOverlapSeconds: 30,
+    });
+    out.segmentPlan =
+      segments.length === 3 &&
+      segments[0].startMs === 0 &&
+      segments[0].endMs === 600_000 &&
+      segments[1].startMs === 570_000 &&
+      segments[2].startMs === 1_140_000;
+    const emptyUsage = { seconds: 0, tokens: 0, cost: 0 };
+    const dedup = dedupeSegmentShots(
+      [
+        {
+          index: 1,
+          result: {
+            segment: { startMs: 0, endMs: 600_000 },
+            shots: [
+              { id: 'a', startMs: 0, endMs: 300_000, representativeTimeMs: 150_000, note: 'a', tags: {}, confidence: 0.9 },
+              { id: 'b', startMs: 300_000, endMs: 600_000, representativeTimeMs: 450_000, note: 'b', tags: {}, confidence: 0.9 },
+            ],
+            usage: emptyUsage,
+            generatedAt: '',
+          },
+        },
+        {
+          index: 2,
+          result: {
+            segment: { startMs: 570_000, endMs: 1_170_000 },
+            shots: [
+              { id: 'b2', startMs: 300_000, endMs: 600_000, representativeTimeMs: 450_000, note: 'dup', tags: {}, confidence: 0.9 },
+              { id: 'c', startMs: 600_000, endMs: 900_000, representativeTimeMs: 750_000, note: 'c', tags: {}, confidence: 0.9 },
+            ],
+            usage: emptyUsage,
+            generatedAt: '',
+          },
+        },
+      ],
+      1_300_000,
+    );
+    out.dedup =
+      dedup.length === 3 &&
+      dedup[0].startMs === 0 &&
+      dedup.every((shot, index) => (index === 0 ? shot.startMs === 0 : shot.startMs === dedup[index - 1].endMs));
+
+    const detect = deps.getDetect?.() ?? null;
+    const data = deps.getData?.() ?? null;
+    const media = deps.getMedia?.() ?? null;
+    out.mockMode = process.env['SMOKE_AI_PROVIDER'] === 'mock';
+    if (!videoPath || !detect || !data || !media) {
+      out.e2eSkipped = true;
+      out.contractRetry = true;
+      return out;
+    }
+
+    const project = data.projects.create({
+      name: `S36-2 Smoke AI ${Date.now()}`,
+      source: { type: 'local', path: videoPath },
+      media: {
+        filename: videoPath.split(/[\\/]/u).at(-1) ?? 'sample.mp4',
+        durationMs: 120_000,
+        fps: 500 / 21,
+        width: 640,
+        height: 360,
+      },
+    });
+    try {
+      const started = detect.run({
+        projectId: project.id,
+        options: defaultSmokeAiOptions(),
+        dryRun: true,
+      });
+      const deadline = Date.now() + 45_000;
+      let job = detect.getJob(started.jobId);
+      while ((job.status === 'running' || job.status === 'queued') && Date.now() < deadline) {
+        await sleep(200);
+        job = detect.getJob(started.jobId);
+      }
+      out.e2eRun = job.status === 'done' && job.progress === 100;
+      out.e2eError = job.error;
+      out.jobUsage = job.usage;
+      const applied = detect.applyByJob(started.jobId);
+      out.applyOk = applied.applied > 0;
+      const shots = data.shots.list(project.id);
+      out.shotCount = shots.length;
+      out.thumbnailOk = shots.some((shot) => Boolean(shot.thumbnail && existsSync(shot.thumbnail)));
+
+      const logPath = join(data.dataRoot, '.ai-jobs', `${project.id}.log`);
+      out.usageLogPath = logPath;
+      out.usageLogExists = existsSync(logPath);
+      out.usageLogText = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+      out.usageLogOk = existsSync(logPath) && out.usageLogText.trim().length > 0;
+
+      // C-7：人工镜头（origin=manual）不被后续 AI apply 覆盖
+      const manual = data.shots.create({
+        projectId: project.id,
+        startMs: 10_000,
+        endMs: 20_000,
+      });
+      const second = detect.run({
+        projectId: project.id,
+        options: defaultSmokeAiOptions(),
+        dryRun: true,
+      });
+      let secondJob = detect.getJob(second.jobId);
+      const secondDeadline = Date.now() + 45_000;
+      while ((secondJob.status === 'running' || secondJob.status === 'queued') && Date.now() < secondDeadline) {
+        await sleep(200);
+        secondJob = detect.getJob(second.jobId);
+      }
+      if (secondJob.status === 'done') detect.applyByJob(second.jobId);
+      const manualAfter = data.shots.list(project.id).find((shot) => shot.id === manual.id);
+      out.manualProtected =
+        Boolean(manualAfter) &&
+        manualAfter?.origin === 'manual' &&
+        manualAfter?.startMs === 10_000 &&
+        manualAfter?.endMs === 20_000;
+
+      // A-4：单段重发（mock 首次缺字段 → 重发后通过）
+      const runner = new AiDetectRunner(data, media);
+      const mock = new MockProvider({ failFirstAttempt: true, shotsPerSegment: 2 });
+      const retryResult = await runner.run({
+        project,
+        provider: mock,
+        signal: new AbortController().signal,
+        options: { segmentSeconds: 600, segmentOverlapSeconds: 30, maxRetriesPerSegment: 3 },
+        resume: false,
+      });
+      out.contractRetry = retryResult.status === 'done' && retryResult.result.shots.length > 0;
+      out.retryUsage = retryResult.usage;
+
+      // C-3：断点续跑（段 2 首次失败 → 重新加载状态后从段 2 续跑）
+      const resumeProject = data.projects.create({
+        name: `S36-2 Resume ${Date.now()}`,
+        source: { type: 'local', path: 'D:/__s36_smoke_missing__.mp4' },
+        media: { durationMs: 1_300_000 },
+      });
+      try {
+        let flakyCalls = 0;
+        const flaky = {
+          id: 'flaky',
+          probeCapability: async () => ({
+            ok: true,
+            supportsNativeVideo: true,
+            provider: 'flaky',
+            model: 'flaky',
+            error: null,
+          }),
+          analyzeSegment: async (input: any, signal: AbortSignal) => {
+            flakyCalls += 1;
+            if (flakyCalls === 2) throw new Error('mock segment 2 failure');
+            return new MockProvider({ shotsPerSegment: 1 }).analyzeSegment(input, signal);
+          },
+          cancel: () => {},
+          getUsage: () => ({ seconds: 0, tokens: 0, cost: 0 }),
+        };
+        const firstResume = await new AiDetectRunner(data, media).run({
+          project: resumeProject,
+          provider: flaky,
+          signal: new AbortController().signal,
+          options: { segmentSeconds: 600, segmentOverlapSeconds: 30, maxRetriesPerSegment: 0 },
+          resume: false,
+        });
+        out.resumeFirstStatus = firstResume.status;
+        const resumed = await new AiDetectRunner(data, media).run({
+          project: resumeProject,
+          provider: new MockProvider({ shotsPerSegment: 1 }),
+          signal: new AbortController().signal,
+          options: { segmentSeconds: 600, segmentOverlapSeconds: 30, maxRetriesPerSegment: 1 },
+          resume: true,
+        });
+        out.resumeOk = resumed.status === 'done' && resumed.result.shots.length > 0;
+        out.resumeUsage = resumed.usage;
+      } finally {
+        try {
+          data.projects.delete(resumeProject.id);
+          rmSync(join(data.dataRoot, '.ai-jobs', `${resumeProject.id}.json`), { force: true });
+          rmSync(join(data.dataRoot, '.ai-jobs', `${resumeProject.id}.log`), { force: true });
+        } catch {
+          // ignore cleanup failures
+        }
+      }
+
+      // C-4：运行中取消
+      const cancelProject = data.projects.create({
+        name: `S36-2 Cancel ${Date.now()}`,
+        source: { type: 'local', path: 'D:/__s36_smoke_missing__.mp4' },
+        media: { durationMs: 120_000 },
+      });
+      try {
+        const slow = {
+          id: 'slow',
+          probeCapability: async () => ({
+            ok: true,
+            supportsNativeVideo: true,
+            provider: 'slow',
+            model: 'slow',
+            error: null,
+          }),
+          analyzeSegment: (input: any, signal: AbortSignal) =>
+            new Promise<any>((resolve, reject) => {
+              const timer = setTimeout(() => {
+                void new MockProvider({ shotsPerSegment: 1 })
+                  .analyzeSegment(input, signal)
+                  .then(resolve, reject);
+              }, 3000);
+              signal.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(timer);
+                  reject(new Error('aborted'));
+                },
+                { once: true },
+              );
+            }),
+          cancel: () => {},
+          getUsage: () => ({ seconds: 0, tokens: 0, cost: 0 }),
+        };
+        const controller = new AbortController();
+        const pending = new AiDetectRunner(data, media).run({
+          project: cancelProject,
+          provider: slow,
+          signal: controller.signal,
+          options: { segmentSeconds: 600, segmentOverlapSeconds: 30, maxRetriesPerSegment: 0 },
+          resume: false,
+        });
+        setTimeout(() => controller.abort(), 100);
+        try {
+          await pending;
+          out.cancelOk = false;
+        } catch (error) {
+          out.cancelOk = (error as { code?: string }).code === 'AI_CANCELLED';
+        }
+      } finally {
+        try {
+          data.projects.delete(cancelProject.id);
+          rmSync(join(data.dataRoot, '.ai-jobs', `${cancelProject.id}.json`), { force: true });
+          rmSync(join(data.dataRoot, '.ai-jobs', `${cancelProject.id}.log`), { force: true });
+        } catch {
+          // ignore cleanup failures
+        }
+      }
+    } finally {
+      try {
+        data.projects.delete(project.id);
+        rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.json`), { force: true });
+        rmSync(join(data.dataRoot, '.ai-jobs', `${project.id}.log`), { force: true });
+        rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
+      } catch (cleanupError) {
+        out.cleanupError = String(cleanupError);
+      }
+    }
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  }
+  return out;
+}
+
+function mcpToolChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  const assertions: Record<string, boolean> = {
+    mcpToolCount: result.toolCount === 11,
+    mcpNewTools: result.hasNewTools === true,
+    mcpStatusReachable: result.statusOk === true,
+  };
+  if (result.mcpChain !== undefined) {
+    assertions.mcpBridgeStarted = result.mcpStarted === true;
+    assertions.mcpBridgeRun = result.mcpJobDone === true;
+    assertions.mcpBridgeApply = result.mcpApplied === true;
+    assertions.mcpBridgeTags = result.mcpTags === true;
+    assertions.mcpBridgeThumbnail = result.mcpThumb === true;
+  }
+  return assertions;
+}
+
+async function runMcpToolChecks(
+  win: BrowserWindow,
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  out.toolNames = [...MCP_TOOL_NAMES];
+  out.toolCount = MCP_TOOL_NAMES.length;
+  const required = [
+    'run_shot_detection',
+    'get_detection_job',
+    'cancel_detection',
+    'apply_detection',
+    'write_shot_tags',
+    'get_shot_thumbnail',
+  ];
+  out.hasNewTools = required.every((name) => (MCP_TOOL_NAMES as readonly string[]).includes(name));
+  try {
+    const status = (await win.webContents.executeJavaScript(
+      'window.api.ai.getMcpStatus()',
+    )) as { ok: boolean; data?: any; error?: any };
+    out.statusOk = status.ok === true && typeof status.data?.running === 'boolean';
+    out.status = status.data ?? null;
+  } catch (error) {
+    out.statusError = String(error);
+  }
+
+  const data = deps.getData?.() ?? null;
+  const detect = deps.getDetect?.() ?? null;
+  if (!videoPath || !data || !detect || process.env['SMOKE_AI_PROVIDER'] !== 'mock') {
+    out.chainSkipped = true;
+    return out;
+  }
+
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const mcpConfigPath = join(app.getPath('userData'), 'mcp-config.json');
+  const authPath = join(app.getPath('userData'), 'mcp-auth.json');
+  const originalAuth = existsSync(authPath) ? readFileSync(authPath, 'utf8') : null;
+  const initialStatus = (await win.webContents.executeJavaScript(
+    'window.api.ai.getMcpStatus()',
+  )) as { ok: boolean; data?: any };
+  let projectId: string | null = null;
+  try {
+    const started = (await win.webContents.executeJavaScript(
+      'window.api.ai.startMcp({ enabled: true })',
+    )) as { ok: boolean; data?: any };
+    out.mcpStarted = started.ok === true && started.data?.running === true;
+    if (!out.mcpStarted) return out;
+    writeFileSync(authPath, `${JSON.stringify({ alwaysAllow: ['SmokeAgent'] }, null, 2)}\n`, 'utf8');
+
+    const rpc = async (tool: string, args: Record<string, unknown>): Promise<any> => {
+      const config = JSON.parse(readFileSync(mcpConfigPath, 'utf8')) as {
+        port: number;
+        token: string;
+      };
+      const response = await fetch(`http://127.0.0.1:${config.port}/rpc`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${config.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ tool, args, agentName: 'SmokeAgent' }),
+      });
+      const payload = (await response.json()) as { result?: any; error?: { message?: string } };
+      if (!response.ok) throw new Error(payload.error?.message ?? `MCP ${tool} failed: ${response.status}`);
+      return payload.result;
+    };
+
+    const project = data.projects.create({
+      name: `S36-2 MCP Chain ${Date.now()}`,
+      source: { type: 'local', path: videoPath },
+      media: {
+        filename: videoPath.split(/[\\/]/u).at(-1) ?? 'sample.mp4',
+        durationMs: 120_000,
+        fps: 500 / 21,
+        width: 640,
+        height: 360,
+      },
+    });
+    projectId = project.id;
+    const run = await rpc('run_shot_detection', { projectId: project.id });
+    out.mcpJobId = run.jobId;
+    const deadline = Date.now() + 45_000;
+    let job = await rpc('get_detection_job', { jobId: run.jobId });
+    while ((job.status === 'running' || job.status === 'queued') && Date.now() < deadline) {
+      await sleep(200);
+      job = await rpc('get_detection_job', { jobId: run.jobId });
+    }
+    out.mcpJobStatus = job.status;
+    out.mcpJobDone = job.status === 'done';
+    const applied = await rpc('apply_detection', { jobId: run.jobId });
+    out.mcpApplied = Number(applied.applied ?? 0) > 0;
+    const shots = data.shots.list(project.id);
+    const shotId = shots[0]?.id ?? '';
+    out.mcpShotCount = shots.length;
+    if (shotId) {
+      const tags = await rpc('write_shot_tags', {
+        shotId,
+        tags: { 景别: ['中景'], 运镜: ['固定'] },
+      });
+      out.mcpTags = Number(tags.written ?? 0) >= 2;
+      const thumb = await rpc('get_shot_thumbnail', { shotId });
+      out.mcpThumb = Boolean(thumb.thumbnailPath && existsSync(thumb.thumbnailPath));
+    }
+    out.mcpChain = out.mcpJobDone && out.mcpApplied && out.mcpTags && out.mcpThumb;
+  } catch (error) {
+    out.chainError = String(error instanceof Error ? error.stack ?? error.message : error);
+    out.mcpChain = false;
+  } finally {
+    if (projectId) {
+      try {
+        data.projects.delete(projectId);
+        rmSync(join(data.dataRoot, '.ai-jobs', `${projectId}.json`), { force: true });
+        rmSync(join(data.dataRoot, '.ai-jobs', `${projectId}.log`), { force: true });
+        rmSync(join(resolveThumbCacheDir(), projectId), { recursive: true, force: true });
+      } catch (cleanupError) {
+        out.chainCleanupError = String(cleanupError);
+      }
+    }
+    try {
+      if (originalAuth === null) rmSync(authPath, { force: true });
+      else writeFileSync(authPath, originalAuth, 'utf8');
+    } catch {
+      // ignore auth restore failures
+    }
+    try {
+      await win.webContents.executeJavaScript(
+        `window.api.ai.startMcp({ enabled: ${initialStatus.ok && initialStatus.data?.running === true} })`,
+      );
+    } catch {
+      // ignore MCP restore failures
+    }
   }
   return out;
 }
