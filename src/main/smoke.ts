@@ -495,6 +495,7 @@ function dataChecksAssertions(result: Record<string, any>): Record<string, boole
     dataTxGuard: result.txGuardOk === true,
     dataForeignKey: result.fkOk === true,
     dataSave: result.saveOk === true,
+    dataBuiltinTagPackage: result.builtinTagPackageOk === true,
     dataOpen: result.openOk === true,
     dataOpenShots: result.openShotsOk === true,
     dataOpenNotes: result.openNotesOk === true,
@@ -2181,10 +2182,22 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
         const smokeTagName = '冒烟标签-' + Date.now();
         const tag = await api.tag.create({ category: '景别', name: smokeTagName, color: '#e11d48' });
         out.tagCreateOk = tag.ok === true;
-        const assigned = await api.tag.assign({ shotId: shot1.data.id, tagIds: [tag.data.id] });
-        out.tagAssignOk = assigned.ok === true && assigned.data.tagIds.includes(tag.data.id);
         const tagList = await api.tag.list({ category: '景别' });
         out.tagListOk = tagList.ok === true && tagList.data.some((item) => item.id === tag.data.id);
+        const builtinMediumTag = tagList.ok
+          ? tagList.data.find((item) => item.builtin && item.name === '中景')
+          : undefined;
+        out.builtinTagFound = Boolean(builtinMediumTag);
+        out.tagAssignOk = false;
+        if (builtinMediumTag) {
+          const assigned = await api.tag.assign({
+            shotId: shot1.data.id,
+            tagIds: [tag.data.id, builtinMediumTag.id],
+          });
+          out.tagAssignOk = assigned.ok === true
+            && assigned.data.tagIds.includes(tag.data.id)
+            && assigned.data.tagIds.includes(builtinMediumTag.id);
+        }
 
         const note = await api.note.upsert({ projectId: project.id, shotId: shot1.data.id, text: '笔记内容' });
         out.noteSaveOk = note.ok === true;
@@ -2233,6 +2246,7 @@ async function runDataChecks(win: BrowserWindow, packagePath: string): Promise<R
 
         const saved = await api.project.save({ id: project.id, targetPath: ${JSON.stringify(pkg)} });
         out.saveOk = saved.ok === true && saved.data.sizeBytes > 0;
+        out.builtinTagPackageOk = out.saveOk && out.builtinTagFound;
         out.savedPath = saved.ok ? saved.data.path : null;
         out.saveError = saved.ok ? null : saved.error;
 

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$PythonVersion = "3.12.10",
     [string]$NumpyVersion = "2.5.4",

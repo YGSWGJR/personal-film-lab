@@ -227,7 +227,8 @@ export class ProjectPackageService {
         };
         copy('INSERT INTO projects SELECT * FROM src.projects WHERE id = ?', [projectId]);
         copy(
-          `INSERT INTO tags SELECT * FROM src.tags
+          `INSERT OR IGNORE INTO tags (id, category, name, color, builtin, sort_order, created_at)
+           SELECT id, category, name, color, builtin, sort_order, created_at FROM src.tags
            WHERE id IN (SELECT tag_id FROM src.shot_tags
                         WHERE shot_id IN (SELECT id FROM src.shots WHERE project_id = ?))`,
           [projectId],
@@ -237,8 +238,15 @@ export class ProjectPackageService {
         copy('INSERT INTO notes SELECT * FROM src.notes WHERE project_id = ?', [projectId]);
         copy('INSERT INTO scenes SELECT * FROM src.scenes WHERE project_id = ?', [projectId]);
         copy(
-          `INSERT INTO shot_tags SELECT * FROM src.shot_tags
-           WHERE shot_id IN (SELECT id FROM src.shots WHERE project_id = ?)`,
+          `INSERT OR IGNORE INTO shot_tags (shot_id, tag_id)
+           SELECT link.shot_id, target_tag.id
+           FROM src.shot_tags link
+           JOIN src.shots source_shot ON source_shot.id = link.shot_id
+           JOIN src.tags source_tag ON source_tag.id = link.tag_id
+           JOIN tags target_tag
+             ON target_tag.category = source_tag.category
+            AND target_tag.name = source_tag.name
+           WHERE source_shot.project_id = ?`,
           [projectId],
         );
       })();
