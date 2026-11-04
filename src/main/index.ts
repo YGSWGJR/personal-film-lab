@@ -420,6 +420,7 @@ app.whenReady().then(() => {
       getDetect: () => detectService,
       getData: () => dataLayer,
       getMedia: () => mediaService,
+      getSession: () => sessionService,
     });
   }
 

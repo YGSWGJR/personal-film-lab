@@ -26,6 +26,7 @@ interface SmokeDeps {
   getDetect?(): DetectService | null;
   getData?(): DataLayer | null;
   getMedia?(): MediaService | null;
+  getSession?(): SessionService | null;
 }
 
 interface RendererState {
@@ -71,12 +72,13 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let frameChecks: Record<string, unknown> = {};
   let aiChecks: Record<string, unknown> = {};
   let mcpToolChecks: Record<string, unknown> = {};
+  let detectBgChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -290,6 +292,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, mcpToolChecksAssertions(mcpToolChecks));
     }
 
+    if (process.env['SMOKE_DETECT_BG'] === '1') {
+      detectBgChecks = await runDetectBgChecks(win, deps, process.env['SMOKE_VIDEO'] ?? '');
+      Object.assign(checks, detectBgChecksAssertions(detectBgChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -303,7 +310,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -2970,4 +2977,201 @@ async function runMcpToolChecks(
     }
   }
   return out;
+}
+
+function detectBgChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    bgStart: result.startOk === true,
+    bgRunning: result.running === true,
+    bgLayerNormal: result.runningLayer === true,
+    bgOverlayNotOpen: result.runningOverlayOpen === true,
+    bgNoMask: result.runningNoMask === true,
+    bgChipVisible: result.chipVisible === true,
+    bgChipOutsideVideo: result.chipOutsideVideo === true,
+    bgLeftInteractive: result.leftInteractive === true,
+    bgRightInteractive: result.rightInteractive === true,
+    bgCollapseContinues: result.collapsedStillRunning === true,
+    bgDone: result.done === true,
+    bgDoneLayerNormal: result.doneLayer === true,
+    bgResultChip: result.resultChipVisible === true,
+    bgResultModal: result.resultModalOpen === true,
+    bgResultLayerHidden: result.resultLayerHidden === true,
+    bgRestoredNormal: result.restoredNormal === true,
+    bgCancelStopped: result.cancelStopped === true,
+    bgCancelStatus: result.cancelJobStatus === 'cancelled',
+  };
+}
+
+async function runDetectBgChecks(
+  win: BrowserWindow,
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!videoPath || !data) return { skipped: true, reason: 'missing video/data' };
+  const result = (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (check, timeoutMs = 15000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = await check();
+          if (value) return value;
+          await sleep(100);
+        }
+        return null;
+      };
+      const ui = () => window.__S36_DETECT_TEST__;
+      const state = () => ui()?.state?.() ?? null;
+      const layer = async () => {
+        const s = await window.api.player.getState();
+        return s.ok ? s.data.layer : null;
+      };
+      const centerProbe = (selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return { found: false, inside: false };
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return {
+          found: true,
+          inside: Boolean(hit && (el === hit || el.contains(hit))),
+          x,
+          y,
+          hitTag: hit?.tagName ?? null,
+          hitClass: hit?.className ? String(hit.className) : null,
+          rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+        };
+      };
+      const intersects = (a, b) =>
+        Boolean(a && b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top);
+      try {
+        if (!ui()) { out.exception = 'S36 detect test hook missing'; return out; }
+        const created = await window.api.project.create({
+          name: 'S36-6 BG Test ' + Date.now(),
+          source: { type: 'local', path: ${JSON.stringify(videoPath)} },
+          media: {
+            filename: 's36-bg-test.mp4',
+            durationMs: 120000,
+            fps: 500 / 21,
+            width: 640,
+            height: 360,
+          },
+        });
+        if (!created.ok) { out.createError = created.error; return out; }
+        const projectId = created.data.id;
+        out.projectId = projectId;
+        const started = await ui().start(projectId);
+        out.startOk = started?.ok === true;
+        const running = await waitFor(() => {
+          const s = state();
+          return s && s.detecting ? s : null;
+        }, 20000);
+        out.running = Boolean(running);
+        out.runningLayer = (await layer()) === 'normal';
+        out.runningOverlayOpen = running?.overlayOpen === false;
+        out.runningNoMask = !document.querySelector('.modal-mask');
+        const chip = document.querySelector('.detect-status-chip');
+        out.chipVisible = Boolean(chip);
+        if (chip) {
+          const chipRect = chip.getBoundingClientRect();
+          const videoRect = document.querySelector('.video-slot')?.getBoundingClientRect() ?? null;
+          out.chipOutsideVideo = !intersects(chipRect, videoRect);
+          out.chipRect = { x: chipRect.x, y: chipRect.y, width: chipRect.width, height: chipRect.height };
+          out.videoRect = videoRect
+            ? { x: videoRect.x, y: videoRect.y, width: videoRect.width, height: videoRect.height }
+            : null;
+        }
+        // 启动导入向导可能正在退场；等遮罩消失后再断言左右面板可交互。
+        await waitFor(() => !document.querySelector('.import-modal-mask'), 3000);
+        const leftProbe = centerProbe('.shot-panel');
+        const rightProbe = centerProbe('.detail-panel');
+        out.leftProbe = leftProbe;
+        out.rightProbe = rightProbe;
+        out.leftInteractive = leftProbe.inside === true;
+        out.rightInteractive = rightProbe.inside === true;
+
+        // 收起状态胶囊：任务继续，迷你胶囊出现
+        ui().collapse();
+        await sleep(250);
+        const collapsed = state();
+        out.collapsedStillRunning =
+          collapsed?.detecting === true &&
+          collapsed?.capsuleHidden === true &&
+          Boolean(document.querySelector('.detect-mini-chip'));
+
+        const done = await waitFor(() => {
+          const s = state();
+          return s && !s.detecting && s.resultReady ? s : null;
+        }, 30000);
+        out.done = Boolean(done);
+        out.doneLayer = (await layer()) === 'normal';
+        out.resultChipVisible = Boolean(document.querySelector('.detect-result-chip'));
+        out.resultCount = done?.resultCount ?? 0;
+
+        // 结果胶囊 → 模态结果弹窗 → 视频层 hidden
+        document.querySelector('.detect-result-chip')?.click();
+        await waitFor(() => state()?.detectionOpen === true, 5000);
+        await waitFor(async () => (await layer()) === 'hidden', 8000);
+        out.resultModalOpen = Boolean(document.querySelector('.detect-modal'));
+        out.resultLayerHidden = (await layer()) === 'hidden';
+        document.querySelector('.detect-modal .modal-head button[aria-label="关闭"]')?.click();
+        await waitFor(async () => (await layer()) === 'normal', 8000);
+        out.restoredNormal = (await layer()) === 'normal';
+
+        // 取消测试
+        await ui().start(projectId);
+        const secondRunning = await waitFor(() => {
+          const s = state();
+          return s && s.detecting ? s : null;
+        }, 20000);
+        out.secondRunning = Boolean(secondRunning);
+        const withJob = await waitFor(() => {
+          const s = state();
+          return s && s.detecting && s.jobId ? s : null;
+        }, 10000);
+        out.secondJobId = withJob?.jobId ?? null;
+        const cancelButton = document.querySelector('.detect-chip-cancel');
+        out.cancelButtonVisible = Boolean(cancelButton);
+        cancelButton?.click();
+        const stopped = await waitFor(() => {
+          const s = state();
+          return s && !s.detecting ? s : null;
+        }, 10000);
+        out.cancelStopped = Boolean(stopped);
+        out.jobId = stopped?.jobId ?? withJob?.jobId ?? secondRunning?.jobId ?? running?.jobId ?? null;
+        if (out.jobId) {
+          const deadline = Date.now() + 5000;
+          let status = null;
+          while (Date.now() < deadline) {
+            const job = await window.api.detect.getJob({ jobId: out.jobId });
+            status = job.ok ? job.data.status : null;
+            if (status && status !== 'running' && status !== 'queued') break;
+            await sleep(150);
+          }
+          out.cancelJobStatus = status;
+        }
+        out.layerAfterCancel = await layer();
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `)) as Record<string, any>;
+  const projectId = typeof result.projectId === 'string' ? result.projectId : null;
+  if (projectId) {
+    try {
+      data.projects.delete(projectId);
+      deps.getSession?.()?.clear();
+      rmSync(join(data.dataRoot, '.ai-jobs', `${projectId}.json`), { force: true });
+      rmSync(join(data.dataRoot, '.ai-jobs', `${projectId}.log`), { force: true });
+      rmSync(join(resolveThumbCacheDir(), projectId), { recursive: true, force: true });
+    } catch (cleanupError) {
+      result.cleanupError = String(cleanupError);
+    }
+  }
+  return result;
 }

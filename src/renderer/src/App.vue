@@ -108,6 +108,10 @@ const applyingDetection = ref(false);
 const detectionProgress = ref<DetectProgressEvent | null>(null);
 const detectionResult = ref<DetectResult | null>(null);
 const detectionError = ref<string | null>(null);
+/** S36-6 方案 A：检测中可收起状态胶囊，任务继续在后台运行。 */
+const detectionCapsuleHidden = ref(false);
+/** 用户在 run 返回 jobId 之前就点了取消时，等 jobId 到手后立即补发取消。 */
+const detectionCancelRequested = ref(false);
 const detectionJobId = ref<string | null>(null);
 interface ContextMenuItem {
   label: string;
@@ -253,9 +257,10 @@ const topTimecode = computed(
 const workbenchColumns = computed(
   () => `${leftCollapsed.value ? 0 : 260}px minmax(480px, 1fr) ${rightCollapsed.value ? 0 : 300}px`,
 );
+const detectionResultOpen = computed(() => detectionOpen.value && !detecting.value);
 const overlayOpen = computed(
   () =>
-    detectionOpen.value ||
+    detectionResultOpen.value ||
     exportOpen.value ||
     termEditorOpen.value ||
     settingsOpen.value ||
@@ -1663,7 +1668,11 @@ async function openDetection(): Promise<void> {
     }
   }
   detectionError.value = null;
-  detectionOpen.value = true;
+  detectionResult.value = null;
+  detectionCapsuleHidden.value = false;
+  // 方案 A：检测中不打开模态弹窗，改为视频区外的顶栏状态胶囊；
+  // 结果/错误弹窗只在检测结束后按需打开。
+  detectionOpen.value = false;
   void startDetection();
 }
 
@@ -2158,6 +2167,49 @@ async function handleToggleMute(): Promise<void> {
 
 window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
 
+/**
+ * S36-6 方案 A smoke hook：通过真实 App 检测流程启动临时项目任务，
+ * 供 SMOKE_DETECT_BG 采样视频层、状态胶囊与结果弹窗状态。
+ */
+(window as unknown as Record<string, unknown>).__S36_DETECT_TEST__ = {
+  start: async (projectId: string) => {
+    // 关闭启动导入向导等残留遮罩，确保测试只看检测本身。
+    settingsOpen.value = false;
+    statsOpen.value = false;
+    exportOpen.value = false;
+    termEditorOpen.value = false;
+    importWizardOpen.value = false;
+    aiMenuOpen.value = false;
+    aiAuthRequest.value = null;
+    contextMenu.visible = false;
+    detectionOpen.value = false;
+    const result = await window.api.project.get({ id: projectId });
+    if (!result.ok) return { ok: false, error: result.error.message };
+    await loadProject(result.data);
+    detectionError.value = null;
+    detectionResult.value = null;
+    detectionCapsuleHidden.value = false;
+    detectionOpen.value = false;
+    await openDetection();
+    return { ok: true };
+  },
+  state: () => ({
+    detecting: detecting.value,
+    detectionOpen: detectionOpen.value,
+    resultOpen: detectionResultOpen.value,
+    overlayOpen: overlayOpen.value,
+    resultReady: Boolean(detectionResult.value),
+    resultCount: detectionResult.value?.shots.length ?? 0,
+    capsuleHidden: detectionCapsuleHidden.value,
+    layer: player.layer,
+    progress: detectionProgress.value?.percent ?? 0,
+    jobId: detectionJobId.value,
+  }),
+  collapse: () => closeDetection(),
+  openResult: () => viewDetectionResult(),
+  cancel: () => cancelDetection(),
+};
+
 watch(
   [
     () => activeProject.value?.id,
@@ -2180,7 +2232,11 @@ async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
   const engine = settings.value?.recognition?.engine ?? 'ai';
   stopDetectionPolling();
+  // 清掉上一次任务的 jobId，避免第二次检测时 cancel/进度过滤命中旧任务。
+  detectionJobId.value = null;
   detecting.value = true;
+  detectionCapsuleHidden.value = false;
+  detectionCancelRequested.value = false;
   void syncTranscodeConcurrency();
   applyingDetection.value = false;
   detectionError.value = null;
@@ -2207,16 +2263,29 @@ async function startDetection(): Promise<void> {
   if (!started) {
     detecting.value = false;
     detectionError.value = '无法启动镜头检测';
+    detectionOpen.value = true;
     void syncTranscodeConcurrency();
     return;
   }
   detectionJobId.value = started.jobId;
+  if (detectionCancelRequested.value) {
+    detectionCancelRequested.value = false;
+    await window.api.detect.cancel({ jobId: started.jobId });
+    stopDetectionPolling();
+    detecting.value = false;
+    detectionOpen.value = false;
+    detectionResult.value = null;
+    void syncTranscodeConcurrency();
+    showToast('镜头检测已取消。');
+    return;
+  }
   detectionPollTimer = setInterval(async () => {
     if (!detectionJobId.value) return;
     const result = await window.api.detect.getJob({ jobId: detectionJobId.value });
     if (!result.ok) {
       detectionError.value = result.error.message;
       detecting.value = false;
+      detectionOpen.value = true;
       void syncTranscodeConcurrency();
       stopDetectionPolling();
       showToast(result.error.message, 'error', result.error.code);
@@ -2225,11 +2294,14 @@ async function startDetection(): Promise<void> {
     if (result.data.status === 'error') {
       detectionError.value = result.data.error ?? '镜头检测失败';
       detecting.value = false;
+      detectionOpen.value = true;
       void syncTranscodeConcurrency();
       stopDetectionPolling();
       showToast(detectionError.value, 'error', '镜头检测失败');
     } else if (result.data.status === 'cancelled') {
       detecting.value = false;
+      detectionOpen.value = false;
+      detectionResult.value = null;
       void syncTranscodeConcurrency();
       stopDetectionPolling();
     }
@@ -2237,10 +2309,22 @@ async function startDetection(): Promise<void> {
 }
 
 async function cancelDetection(): Promise<void> {
-  if (!detectionJobId.value) return;
+  if (!detectionJobId.value) {
+    // run 尚未返回 jobId：先记下取消意图，startDetection 拿到 jobId 后立即取消。
+    detectionCancelRequested.value = true;
+    detecting.value = false;
+    detectionOpen.value = false;
+    detectionResult.value = null;
+    detectionCapsuleHidden.value = false;
+    void syncTranscodeConcurrency();
+    showToast('正在取消镜头检测…');
+    return;
+  }
   unwrap(await window.api.detect.cancel({ jobId: detectionJobId.value }));
   stopDetectionPolling();
   detecting.value = false;
+  detectionResult.value = null;
+  detectionCapsuleHidden.value = false;
   void syncTranscodeConcurrency();
   detectionOpen.value = false;
   showToast('镜头检测已取消。');
@@ -2248,11 +2332,23 @@ async function cancelDetection(): Promise<void> {
 
 function closeDetection(): void {
   if (detecting.value) {
-    void cancelDetection();
+    // 方案 A：检测中「关闭/收起」只隐藏状态胶囊，任务继续后台运行。
+    detectionCapsuleHidden.value = true;
     return;
   }
-  stopDetectionPolling();
   detectionOpen.value = false;
+  detectionError.value = null;
+  detectionResult.value = null;
+  detectionCapsuleHidden.value = false;
+}
+
+function viewDetectionResult(): void {
+  if (!detectionResult.value && !detectionError.value) return;
+  detectionOpen.value = true;
+}
+
+function showDetectionCapsule(): void {
+  detectionCapsuleHidden.value = false;
 }
 
 async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<void> {
@@ -2269,6 +2365,8 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
     if (!result) return;
     const project = activeProject.value;
     detectionOpen.value = false;
+    detectionResult.value = null;
+    detectionCapsuleHidden.value = false;
     stopDetectionPolling();
     await loadProject(project);
     showToast(`已应用 ${result.applied} 个检测镜头。`, 'success');
@@ -2511,18 +2609,25 @@ onMounted(async () => {
       }
     }),
     api.detect.onProgress((event) => {
-      if (!detectionOpen.value || !detecting.value) return;
+      if (!detecting.value) return;
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
       detectionProgress.value = event;
     }),
     api.detect.onDone((event) => {
-      if (!detectionOpen.value || !detecting.value) return;
+      if (!detecting.value) return;
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
       detectionResult.value = event.result;
       detectionProgress.value = { jobId: event.jobId, stage: 'analyze', percent: 100 };
       detecting.value = false;
+      detectionCapsuleHidden.value = false;
+      detectionOpen.value = false;
       void syncTranscodeConcurrency();
       stopDetectionPolling();
+      showToast(
+        `检测完成，${event.result.shots.length} 个镜头待确认。`,
+        'success',
+        '镜头检测完成',
+      );
     }),
     api.still.onCreated((still) => upsertStill(still)),
     api.export.onProgress((event) => {
@@ -2623,6 +2728,31 @@ onBeforeUnmount(() => {
       </nav>
 
       <div class="topbar-right">
+        <div v-if="detecting && !detectionCapsuleHidden" class="detect-status-chip">
+          <span class="detect-chip-dot"></span>
+          <strong>检测中 {{ detectionProgress?.percent ?? 0 }}%</strong>
+          <div class="detect-chip-track">
+            <i :style="{ width: `${detectionProgress?.percent ?? 0}%` }"></i>
+          </div>
+          <button type="button" class="detect-chip-bg" @click="closeDetection">后台</button>
+          <button type="button" class="detect-chip-cancel" @click="cancelDetection">取消</button>
+        </div>
+        <button
+          v-else-if="detecting"
+          class="detect-mini-chip"
+          type="button"
+          @click="showDetectionCapsule"
+        >
+          检测中 {{ detectionProgress?.percent ?? 0 }}%
+        </button>
+        <button
+          v-else-if="detectionResult"
+          class="detect-result-chip"
+          type="button"
+          @click="viewDetectionResult"
+        >
+          检测完成 {{ detectionResult.shots.length }} 个镜头 · 查看
+        </button>
         <span class="project-clock">{{ topTimecode }}</span>
         <span class="topbar-divider"></span>
         <button
@@ -2937,7 +3067,7 @@ onBeforeUnmount(() => {
     />
 
     <DetectionModal
-      :open="detectionOpen"
+      :open="detectionResultOpen"
       :project-name="activeProject?.name ?? ''"
       :running="detecting"
       :applying="applyingDetection"

@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import emptyShotsImage from '../../../../assets/design/design_empty_shots_1024x768.png';
-import loadingImage from '../../../../assets/design/design_loading_02_1024x1024.png';
 import type { DetectProgressEvent, DetectResult } from '../../../shared/types';
 
 const props = defineProps<{
@@ -63,7 +62,19 @@ function applyResult(): void {
 
 <template>
   <transition name="modal">
-    <div v-if="open" class="modal-mask" @pointerdown.self="!running && emit('close')">
+    <div v-if="open && running" class="detect-capsule" role="status" aria-live="polite">
+      <span class="capsule-dot"></span>
+      <div class="capsule-copy">
+        <strong>检测中 {{ progress?.percent ?? 0 }}%</strong>
+        <div class="capsule-track"><i :style="{ width: `${progress?.percent ?? 0}%` }"></i></div>
+      </div>
+      <button type="button" class="capsule-close" title="收起，后台继续检测" @click="emit('close')">
+        收起
+      </button>
+      <button type="button" class="capsule-cancel" @click="emit('cancel')">取消</button>
+    </div>
+
+    <div v-else-if="open" class="modal-mask" @pointerdown.self="emit('close')">
       <section class="detect-modal">
         <header class="modal-head">
           <div>
@@ -71,36 +82,10 @@ function applyResult(): void {
             <h2>镜头检测</h2>
             <span>{{ projectName }} · {{ engine === 'ai' ? 'AI 全接管' : 'OpenCV（旧）' }}</span>
           </div>
-          <button type="button" :disabled="running" aria-label="关闭" @click="emit('close')">×</button>
+          <button type="button" aria-label="关闭" @click="emit('close')">×</button>
         </header>
 
-        <div v-if="running" class="detect-running">
-          <img :src="loadingImage" alt="" />
-          <div class="running-copy">
-            <span class="scan-label">
-              {{ engine === 'ai'
-                ? 'AI 正在分段识别原生视频'
-                : progress?.stage === 'extractFrames'
-                  ? '正在抽取检测帧'
-                  : '正在分析色彩变化' }}
-            </span>
-            <strong>{{ progress?.percent ?? 0 }}%</strong>
-            <div class="progress-track">
-              <i :style="{ width: `${progress?.percent ?? 0}%` }"></i>
-            </div>
-            <p>
-              {{ engine === 'ai'
-                ? '模型直接观看原生视频并返回 shot-detection JSON；本地只负责契约校验、去重与落库'
-                : progress?.stage === 'extractFrames'
-                  ? 'FFmpeg 正在建立可重建的采样帧序列'
-                  : 'OpenCV 正在计算饱和度、对比度与色调差异曲线' }}
-            </p>
-            <small class="gpu-status">{{ gpuLabel }}</small>
-          </div>
-          <button class="cancel-scan" type="button" @click="emit('cancel')">取消检测</button>
-        </div>
-
-        <div v-else-if="error" class="detect-error">
+        <div v-if="error" class="detect-error">
           <AppIcon name="more" :size="28" />
           <strong>检测未完成</strong>
           <p>{{ error }}</p>
@@ -155,6 +140,82 @@ function applyResult(): void {
 </template>
 
 <style scoped>
+.detect-capsule {
+  position: fixed;
+  top: 8px;
+  right: 16px;
+  z-index: 120;
+  display: flex;
+  max-width: min(460px, calc(100vw - 32px));
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.capsule-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: capsule-pulse 1s ease-in-out infinite;
+}
+
+.capsule-copy {
+  display: flex;
+  min-width: 120px;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.capsule-copy strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.capsule-track {
+  width: 140px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bg-raised);
+}
+
+.capsule-track i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--blue-hi);
+  transition: width 180ms ease;
+}
+
+.capsule-close,
+.capsule-cancel {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.capsule-cancel {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+@keyframes capsule-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .modal-mask {
   position: fixed;
   inset: 0;

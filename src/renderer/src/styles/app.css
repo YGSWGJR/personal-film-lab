@@ -235,6 +235,81 @@ select:focus-visible {
   gap: 8px;
 }
 
+.detect-status-chip {
+  display: flex;
+  height: 26px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 999px;
+  background: rgba(30, 58, 95, 0.35);
+  color: var(--text-secondary);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.detect-chip-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: detect-chip-pulse 1s ease-in-out infinite;
+}
+
+.detect-chip-track {
+  width: 64px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bg-raised);
+}
+
+.detect-chip-track i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--blue-hi);
+  transition: width 180ms ease;
+}
+
+.detect-chip-bg,
+.detect-chip-cancel,
+.detect-mini-chip,
+.detect-result-chip {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.detect-chip-cancel {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+.detect-mini-chip {
+  border-color: rgba(96, 165, 250, 0.3);
+  color: var(--blue-hi);
+}
+
+.detect-result-chip {
+  border-color: rgba(34, 197, 94, 0.38);
+  background: rgba(34, 197, 94, 0.1);
+  color: #86efac;
+}
+
+@keyframes detect-chip-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .project-clock {
   color: var(--text-muted);
   font-family: var(--mono);

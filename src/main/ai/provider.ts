@@ -222,6 +222,7 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
 interface MockProviderOptions {
   shotsPerSegment?: number;
   failFirstAttempt?: boolean;
+  delayMs?: number;
 }
 
 /** 确定性 mock provider：供 SMOKE_AI 与无网络自测使用。 */
@@ -232,10 +233,12 @@ export class MockProvider implements ShotDetectionProvider {
   private failedOnce = false;
   private readonly shotsPerSegment: number;
   private readonly failFirstAttempt: boolean;
+  private readonly delayMs: number;
 
   constructor(options: MockProviderOptions = {}) {
     this.shotsPerSegment = Math.max(1, options.shotsPerSegment ?? 2);
     this.failFirstAttempt = options.failFirstAttempt ?? false;
+    this.delayMs = Math.max(0, options.delayMs ?? 0);
   }
 
   async probeCapability(): Promise<AiProviderProbeResult> {
@@ -250,6 +253,10 @@ export class MockProvider implements ShotDetectionProvider {
 
   async analyzeSegment(input: ShotDetectionSegment, signal: AbortSignal): Promise<ShotDetectionResult> {
     if (this.aborted || signal.aborted) throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
+    if (this.delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, this.delayMs));
+      if (this.aborted || signal.aborted) throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
+    }
     if (this.failFirstAttempt && !this.failedOnce) {
       this.failedOnce = true;
       throw new ProviderError('CONTRACT_INVALID', 'mock：首次返回缺字段，触发单段重发');
@@ -310,7 +317,10 @@ export function createProviderFromSettings(
   options: { forceMock?: boolean } = {},
 ): ShotDetectionProvider {
   if (options.forceMock || settings?.provider === 'mock') {
-    return new MockProvider({ failFirstAttempt: false });
+    return new MockProvider({
+      failFirstAttempt: false,
+      delayMs: Math.max(0, Number(process.env['SMOKE_DETECT_BG_DELAY_MS'] ?? '0') || 0),
+    });
   }
   return new OpenAiCompatProvider({
     baseUrl: settings?.baseUrl ?? '',
