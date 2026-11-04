@@ -25,9 +25,34 @@ export interface RecognitionSettings {
   engine: RecognitionEngine;
 }
 
+/** S36-7：单个 AI 检测供应商配置。apiKey 为 safeStorage 密文。 */
+export interface AiProviderConfig {
+  id: string;
+  name: string;
+  note?: string;
+  homeUrl?: string;
+  baseUrl: string;
+  apiKey?: string;
+  /** 显式默认模型；空 = 探测自动选 */
+  model?: string;
+  /** 获取/手动添加的模型列表 */
+  models?: string[];
+}
+
+export interface AiListModelsResult {
+  ok: boolean;
+  models?: string[];
+  error?: { code: string; message: string };
+}
+
 /** S36-2：AI 识别配置（apiKey 在 settings.json 中为 safeStorage 密文）。 */
 export interface AiSettings {
   provider?: 'openai-compatible' | 'mock';
+  /** S36-7：多供应商列表（mock 不进此列表） */
+  providers?: AiProviderConfig[];
+  /** S36-7：当前激活供应商 id */
+  activeProviderId?: string;
+  /** legacy 兼容字段；保存 providers 后清空 */
   baseUrl?: string;
   apiKey?: string;
   agentEndpoint?: string;
@@ -201,7 +226,9 @@ export interface AiApi {
   copyPrompt(args: AiCopyPromptArgs): Promise<IpcResult<AiCopyPromptResult>>;
   getShotSnapshot(args: { projectId: string }): Promise<IpcResult<AiProjectSnapshot>>;
   /** S36-2a：探测 API 端点能力（是否支持原生视频输入）。 */
-  probeProvider(args?: { baseUrl?: string; apiKey?: string }): Promise<IpcResult<AiProviderProbeResult>>;
+  probeProvider(args?: { baseUrl?: string; apiKey?: string; providerId?: string }): Promise<IpcResult<AiProviderProbeResult>>;
+  /** S36-7：获取供应商端点模型列表。 */
+  listModels(args: { providerId?: string; baseUrl?: string; apiKey?: string }): Promise<IpcResult<AiListModelsResult>>;
   startMcp(args: { enabled: boolean }): Promise<IpcResult<AiMcpStatus>>;
   getMcpStatus(): Promise<IpcResult<AiMcpStatus>>;
   onMcpAuthRequest(listener: (request: AiMcpAuthRequest) => void): () => void;

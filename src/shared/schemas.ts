@@ -12,6 +12,17 @@ export const appInfoArgsSchema = emptyArgsSchema;
 
 const settingsDirectorySchema = z.string().trim().min(1).max(2000);
 
+const aiProviderConfigSchema = z.object({
+  id: z.string().min(1).max(100),
+  name: z.string().min(1).max(100),
+  note: z.string().max(500).optional(),
+  homeUrl: z.string().max(2000).optional(),
+  baseUrl: z.string().max(2000),
+  apiKey: z.string().max(4000).optional(),
+  model: z.string().max(200).optional(),
+  models: z.array(z.string().max(200)).max(500).optional(),
+});
+
 export const settingsSchema = z.object({
   dataRoot: settingsDirectorySchema,
   cacheDir: settingsDirectorySchema,
@@ -39,6 +50,8 @@ export const settingsSchema = z.object({
   ai: z
     .object({
       provider: z.enum(['openai-compatible', 'mock']).optional(),
+      providers: z.array(aiProviderConfigSchema).max(50).optional(),
+      activeProviderId: z.string().max(100).optional(),
       baseUrl: z.string().max(2000).optional(),
       apiKey: z.string().max(4000).optional(),
       agentEndpoint: z.string().max(2000).optional(),
@@ -78,10 +91,18 @@ export const aiProjectArgsSchema = z.object({
 /** S36-2a：AI 端点能力探测（可临时覆盖 baseUrl/apiKey）。 */
 export const aiProbeProviderArgsSchema = z
   .object({
+    providerId: z.string().max(100).optional(),
     baseUrl: z.string().max(2000).optional(),
     apiKey: z.string().max(4000).optional(),
   })
   .optional();
+
+/** S36-7：获取供应商模型列表。 */
+export const aiListModelsArgsSchema = z.object({
+  providerId: z.string().max(100).optional(),
+  baseUrl: z.string().max(2000).optional(),
+  apiKey: z.string().max(4000).optional(),
+});
 
 export const aiMcpSetEnabledArgsSchema = z.object({
   enabled: z.boolean(),

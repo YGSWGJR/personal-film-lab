@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
-import type { AiMcpStatus, ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
+import type {
+  AiMcpStatus,
+  AiProviderConfig,
+  ProxyTier,
+  Settings,
+  SettingsSetArgs,
+} from '../../../shared/types';
 
 type PathKey = Exclude<
   keyof SettingsSetArgs,
@@ -45,9 +51,14 @@ const confirmUserContent = ref(true);
 /** S36-2：识别引擎与 AI 配置草稿 */
 const recognitionEngine = ref<'ai' | 'opencv'>('ai');
 const aiProvider = ref<'openai-compatible' | 'mock'>('openai-compatible');
-const aiBaseUrl = ref('');
-const aiApiKeyDraft = ref('');
-const clearAiKey = ref(false);
+const aiProviders = ref<AiProviderConfig[]>([]);
+const activeProviderId = ref('');
+const providerKeyDrafts = reactive<Record<string, string>>({});
+const providerClearKeys = reactive<Record<string, boolean>>({});
+const manualModelDraft = ref('');
+const activeProvider = computed(
+  () => aiProviders.value.find((item) => item.id === activeProviderId.value) ?? null,
+);
 const aiAgentEndpoint = ref('');
 const aiSegmentSeconds = ref(600);
 const aiTimeoutSeconds = ref(900);
@@ -161,9 +172,31 @@ function fillDraft(settings: Settings): void {
   confirmUserContent.value = settings.confirmUserContent ?? true;
   recognitionEngine.value = settings.recognition?.engine ?? 'ai';
   aiProvider.value = settings.ai?.provider ?? 'openai-compatible';
-  aiBaseUrl.value = settings.ai?.baseUrl ?? '';
-  aiApiKeyDraft.value = '';
-  clearAiKey.value = false;
+  const sourceProviders = (settings.ai?.providers ?? []).map((item) => ({
+    ...item,
+    models: [...(item.models ?? [])],
+  }));
+  if (sourceProviders.length === 0 && (settings.ai?.baseUrl || settings.ai?.apiKey)) {
+    sourceProviders.push({
+      id: 'legacy',
+      name: '默认供应商',
+      note: '由旧配置自动迁移',
+      baseUrl: settings.ai?.baseUrl ?? '',
+      apiKey: settings.ai?.apiKey ?? '',
+      models: [],
+    });
+  }
+  aiProviders.value = sourceProviders;
+  activeProviderId.value = sourceProviders.some(
+    (item) => item.id === settings.ai?.activeProviderId,
+  )
+    ? settings.ai?.activeProviderId ?? ''
+    : sourceProviders[0]?.id ?? '';
+  for (const provider of sourceProviders) {
+    providerKeyDrafts[provider.id] = '';
+    providerClearKeys[provider.id] = false;
+  }
+  manualModelDraft.value = '';
   aiAgentEndpoint.value = settings.ai?.agentEndpoint ?? '';
   aiSegmentSeconds.value = settings.ai?.segmentSeconds ?? 600;
   aiTimeoutSeconds.value = settings.ai?.timeoutSeconds ?? 900;
@@ -230,9 +263,11 @@ async function resetDefaults(): Promise<void> {
     confirmUserContent.value = true;
     recognitionEngine.value = 'ai';
     aiProvider.value = 'openai-compatible';
-    aiBaseUrl.value = '';
-    aiApiKeyDraft.value = '';
-    clearAiKey.value = false;
+    aiProviders.value = [];
+    activeProviderId.value = '';
+    for (const key of Object.keys(providerKeyDrafts)) delete providerKeyDrafts[key];
+    for (const key of Object.keys(providerClearKeys)) delete providerClearKeys[key];
+    manualModelDraft.value = '';
     aiAgentEndpoint.value = '';
     aiSegmentSeconds.value = 600;
     aiTimeoutSeconds.value = 900;
@@ -317,12 +352,104 @@ async function checkEnvironment(): Promise<void> {
   }
 }
 
+function addProvider(): void {
+  const id = `prov-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  aiProviders.value = [
+    ...aiProviders.value,
+    {
+      id,
+      name: `供应商 ${aiProviders.value.length + 1}`,
+      baseUrl: '',
+      apiKey: '',
+      models: [],
+      model: '',
+    },
+  ];
+  activeProviderId.value = id;
+  providerKeyDrafts[id] = '';
+  providerClearKeys[id] = false;
+  manualModelDraft.value = '';
+  aiProbeState.value = { tone: 'idle', text: '' };
+}
+
+function selectProvider(id: string): void {
+  activeProviderId.value = id;
+  manualModelDraft.value = '';
+  aiProbeState.value = { tone: 'idle', text: '' };
+}
+
+function removeProvider(id: string): void {
+  const index = aiProviders.value.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  aiProviders.value = aiProviders.value.filter((item) => item.id !== id);
+  delete providerKeyDrafts[id];
+  delete providerClearKeys[id];
+  if (activeProviderId.value === id) {
+    activeProviderId.value = aiProviders.value[0]?.id ?? '';
+  }
+  manualModelDraft.value = '';
+}
+
+function currentProviderKeyDraft(provider: AiProviderConfig): string {
+  return providerKeyDrafts[provider.id]?.trim() ?? '';
+}
+
+async function fetchModels(): Promise<void> {
+  const provider = activeProvider.value;
+  if (!provider || aiProbeState.value.tone === 'busy') return;
+  aiProbeState.value = { tone: 'busy', text: '获取模型列表…' };
+  const result = await window.api.ai.listModels({
+    providerId: provider.id,
+    baseUrl: provider.baseUrl.trim(),
+    apiKey: currentProviderKeyDraft(provider) || undefined,
+  });
+  if (!result.ok) {
+    aiProbeState.value = { tone: 'error', text: result.error.message };
+    return;
+  }
+  if (!result.data.ok) {
+    aiProbeState.value = {
+      tone: 'error',
+      text: result.data.error?.message ?? '获取模型列表失败',
+    };
+    return;
+  }
+  const merged = [...new Set([...(provider.models ?? []), ...(result.data.models ?? [])])];
+  provider.models = merged;
+  aiProbeState.value = {
+    tone: 'success',
+    text: `已获取 ${result.data.models?.length ?? 0} 个模型`,
+  };
+}
+
+function addManualModel(): void {
+  const provider = activeProvider.value;
+  const model = manualModelDraft.value.trim();
+  if (!provider || !model) return;
+  provider.models = [...new Set([...(provider.models ?? []), model])];
+  if (!provider.model) provider.model = model;
+  manualModelDraft.value = '';
+}
+
+function removeModel(model: string): void {
+  const provider = activeProvider.value;
+  if (!provider) return;
+  provider.models = (provider.models ?? []).filter((item) => item !== model);
+  if (provider.model === model) provider.model = '';
+}
+
 async function probeAiProvider(): Promise<void> {
+  const provider = activeProvider.value;
+  if (!provider) {
+    aiProbeState.value = { tone: 'error', text: '请先添加供应商' };
+    return;
+  }
   if (aiProbeState.value.tone === 'busy') return;
   aiProbeState.value = { tone: 'busy', text: '探测中…' };
   const result = await window.api.ai.probeProvider({
-    baseUrl: aiBaseUrl.value.trim(),
-    apiKey: aiApiKeyDraft.value.trim() || undefined,
+    providerId: provider.id,
+    baseUrl: provider.baseUrl.trim(),
+    apiKey: currentProviderKeyDraft(provider) || undefined,
   });
   if (!result.ok) {
     aiProbeState.value = { tone: 'error', text: result.error.message };
@@ -354,17 +481,40 @@ function submit(): void {
   value.proxyTier = proxyTier.value;
   value.confirmUserContent = confirmUserContent.value;
   value.recognition = { engine: recognitionEngine.value };
+  const providers = aiProviders.value.map((provider) => {
+    const draft = currentProviderKeyDraft(provider);
+    const clear = providerClearKeys[provider.id] === true;
+    const apiKey = clear ? '' : draft || provider.apiKey;
+    const note = provider.note?.trim() ?? '';
+    const homeUrl = provider.homeUrl?.trim() ?? '';
+    const model = provider.model?.trim() ?? '';
+    return {
+      id: provider.id,
+      name: provider.name.trim(),
+      ...(note ? { note } : {}),
+      ...(homeUrl ? { homeUrl } : {}),
+      baseUrl: provider.baseUrl.trim(),
+      ...(apiKey ? { apiKey } : {}),
+      ...(model ? { model } : {}),
+      models: [...new Set((provider.models ?? []).map((item) => item.trim()).filter(Boolean))],
+    };
+  });
+  if (providers.some((provider) => !provider.name || !provider.baseUrl)) {
+    browseError.value = '请填写供应商名称和 API 请求地址';
+    return;
+  }
   const aiValue: NonNullable<SettingsSetArgs['ai']> = {
     provider: aiProvider.value,
-    baseUrl: aiBaseUrl.value.trim(),
+    providers,
+    activeProviderId: providers.some((provider) => provider.id === activeProviderId.value)
+      ? activeProviderId.value
+      : providers[0]?.id ?? '',
     agentEndpoint: aiAgentEndpoint.value.trim(),
     segmentSeconds: Number(aiSegmentSeconds.value) || 600,
     timeoutSeconds: Number(aiTimeoutSeconds.value) || 900,
     maxRetriesPerSegment: Number(aiMaxRetries.value) || 3,
     enabled: true,
   };
-  if (clearAiKey.value) aiValue.apiKey = '';
-  else if (aiApiKeyDraft.value.trim()) aiValue.apiKey = aiApiKeyDraft.value.trim();
   value.ai = aiValue;
   for (const key of [
     'proxyCacheDir',
@@ -466,7 +616,7 @@ function submit(): void {
         <section class="ai-section">
           <div class="ai-head">
             <strong>AI 镜头识别</strong>
-            <small>默认由大模型直接识别原生视频；OpenCV 仅作隐藏开关保留。</small>
+            <small>可维护多个供应商；同一时间一个激活供应商生效。Mock 仅用于自测，不进列表。</small>
           </div>
           <div class="ai-engine-row">
             <span>识别引擎</span>
@@ -498,28 +648,138 @@ function submit(): void {
               测试 Mock
             </button>
           </div>
-          <label class="ai-field">
-            <span>API 端点 baseUrl</span>
-            <input v-model="aiBaseUrl" spellcheck="false" placeholder="https://api.example.com/v1" />
-          </label>
-          <label class="ai-field">
-            <span>API Key（safeStorage 加密保存）</span>
-            <input
-              v-model="aiApiKeyDraft"
-              type="password"
-              spellcheck="false"
-              :placeholder="settings?.ai?.apiKey ? '已保存（留空保持不变）' : '未配置'"
-            />
-          </label>
-          <div class="ai-key-actions">
+
+          <div class="provider-list">
             <button
+              v-for="provider in aiProviders"
+              :key="provider.id"
+              type="button"
+              class="provider-chip"
+              :class="{ active: provider.id === activeProviderId }"
+              :disabled="saving || resettingDefaults"
+              @click="selectProvider(provider.id)"
+            >
+              <span>{{ provider.name || '未命名供应商' }}</span>
+              <em v-if="provider.id === activeProviderId">当前</em>
+            </button>
+            <button
+              class="provider-add"
               type="button"
               :disabled="saving || resettingDefaults"
-              @click="clearAiKey = true; aiApiKeyDraft = ''"
+              @click="addProvider"
             >
-              {{ clearAiKey ? '已标记清除（保存后生效）' : '清除已存 Key' }}
+              + 添加供应商
             </button>
           </div>
+
+          <template v-if="activeProvider">
+            <label class="ai-field">
+              <span>名称 *</span>
+              <input v-model="activeProvider.name" spellcheck="false" placeholder="例如：豆包方舟 / 公司账号" />
+            </label>
+            <label class="ai-field">
+              <span>备注</span>
+              <input v-model="activeProvider.note" spellcheck="false" placeholder="例如：公司专用账号" />
+            </label>
+            <label class="ai-field">
+              <span>官网链接</span>
+              <input v-model="activeProvider.homeUrl" spellcheck="false" placeholder="https://example.com (可选)" />
+            </label>
+            <label class="ai-field">
+              <span>API Key（safeStorage 加密保存）</span>
+              <input
+                v-model="providerKeyDrafts[activeProvider.id]"
+                type="password"
+                spellcheck="false"
+                :placeholder="activeProvider.apiKey ? '已保存（留空保持不变）' : '未配置'"
+              />
+            </label>
+            <div class="ai-key-actions">
+              <button
+                type="button"
+                :disabled="saving || resettingDefaults"
+                @click="providerClearKeys[activeProvider.id] = true; providerKeyDrafts[activeProvider.id] = ''"
+              >
+                {{ providerClearKeys[activeProvider.id] ? '已标记清除（保存后生效）' : '清除已存 Key' }}
+              </button>
+            </div>
+            <label class="ai-field">
+              <span>API 请求地址 *</span>
+              <input
+                v-model="activeProvider.baseUrl"
+                spellcheck="false"
+                placeholder="https://your-api-endpoint.com/v1"
+              />
+            </label>
+
+            <div class="ai-models">
+              <div class="ai-models-head">
+                <strong>模型列表</strong>
+                <button
+                  type="button"
+                  :disabled="saving || aiProbeState.tone === 'busy'"
+                  @click="fetchModels"
+                >
+                  获取模型列表
+                </button>
+              </div>
+              <div class="ai-model-add">
+                <input
+                  v-model="manualModelDraft"
+                  spellcheck="false"
+                  placeholder="手动输入模型 id，如 doubao-seed-2-1-pro-260915"
+                  @keydown.enter.prevent="addManualModel"
+                />
+                <button type="button" :disabled="saving" @click="addManualModel">手动添加</button>
+              </div>
+              <div v-if="(activeProvider.models ?? []).length" class="ai-model-list">
+                <span v-for="model in activeProvider.models ?? []" :key="model" class="ai-model-item">
+                  {{ model }}
+                  <button type="button" :disabled="saving" @click="removeModel(model)">×</button>
+                </span>
+              </div>
+              <p v-else class="ai-model-empty">还没有模型；可获取或手动添加。</p>
+              <label class="ai-field">
+                <span>默认模型</span>
+                <select v-model="activeProvider.model">
+                  <option value="">自动（探测）</option>
+                  <option v-for="model in activeProvider.models ?? []" :key="model" :value="model">
+                    {{ model }}
+                  </option>
+                  <option
+                    v-if="activeProvider.model && !(activeProvider.models ?? []).includes(activeProvider.model)"
+                    :value="activeProvider.model"
+                  >
+                    {{ activeProvider.model }}
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <div class="ai-probe">
+              <button
+                type="button"
+                :disabled="aiProbeState.tone === 'busy' || saving"
+                @click="probeAiProvider"
+              >
+                {{ aiProbeState.tone === 'busy' ? '探测中…' : '探测原生视频能力' }}
+              </button>
+              <button
+                type="button"
+                class="ai-danger"
+                :disabled="saving || resettingDefaults"
+                @click="removeProvider(activeProvider.id)"
+              >
+                删除供应商
+              </button>
+              <span v-if="aiProbeState.text" :class="aiProbeState.tone">{{ aiProbeState.text }}</span>
+            </div>
+            <small class="ai-hint">保存后下次检测生效。</small>
+          </template>
+          <div v-else class="ai-empty">
+            还没有供应商。点击「+ 添加供应商」配置任意 OpenAI 兼容端点与模型。
+          </div>
+
           <label class="ai-field">
             <span>Agent 端点（MCP 可选）</span>
             <input v-model="aiAgentEndpoint" spellcheck="false" placeholder="MCP 工具集默认复用本机桥" />
@@ -537,16 +797,6 @@ function submit(): void {
               <span>单段重发</span>
               <input v-model.number="aiMaxRetries" type="number" min="0" max="10" />
             </label>
-          </div>
-          <div class="ai-probe">
-            <button
-              type="button"
-              :disabled="aiProbeState.tone === 'busy' || saving"
-              @click="probeAiProvider"
-            >
-              {{ aiProbeState.tone === 'busy' ? '探测中…' : '探测原生视频能力' }}
-            </button>
-            <span v-if="aiProbeState.text" :class="aiProbeState.tone">{{ aiProbeState.text }}</span>
           </div>
         </section>
 
@@ -1054,6 +1304,164 @@ function submit(): void {
 
 .ai-probe span.error {
   color: #fca5a5;
+}
+
+.provider-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.provider-chip {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.provider-chip.active {
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(30, 58, 95, 0.45);
+  color: var(--blue-hi);
+}
+
+.provider-chip em {
+  color: #86efac;
+  font-size: 8px;
+  font-style: normal;
+}
+
+.provider-add {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.ai-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.ai-models-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-models-head strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.ai-models-head button,
+.ai-model-add button {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.ai-model-add {
+  display: flex;
+  gap: 6px;
+}
+
+.ai-model-add input {
+  height: 27px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: 0;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.ai-model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ai-model-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.ai-model-item button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.ai-model-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.ai-field select {
+  height: 28px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: 0;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.ai-probe .ai-danger {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+.ai-hint {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.ai-empty {
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-faint);
+  font-size: 9px;
+  text-align: center;
 }
 
 .settings-error {

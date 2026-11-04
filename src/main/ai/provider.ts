@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { extname } from 'node:path';
 import type {
+  AiListModelsResult,
   AiProviderProbeResult,
+  AiProviderConfig,
   AiSettings,
   ShotDetectionResult,
   ShotDetectionSegment,
@@ -25,6 +27,7 @@ export class ProviderError extends Error {
 export interface ShotDetectionProvider {
   readonly id: string;
   probeCapability(): Promise<AiProviderProbeResult>;
+  listModels(): Promise<AiListModelsResult>;
   analyzeSegment(input: ShotDetectionSegment, signal: AbortSignal): Promise<ShotDetectionResult>;
   cancel(): void;
   getUsage(): ShotDetectionUsage;
@@ -38,7 +41,12 @@ interface OpenAiCompatOptions {
 }
 
 const VIDEO_MODEL_PATTERN =
-  /(video|omni|gpt-4o|gpt-4\.1|gemini|qwen[-_.]?vl|qwen[-_.]?omni|claude-3|claude-4|vision)/iu;
+  /(video|omni|gpt-4o|gpt-4\.1|gemini|qwen[-_.]?vl|qwen[-_.]?omni|claude-3|claude-4|vision|doubao[-_.]?seed|doubao)/iu;
+
+/** S36-7：显式模型/探测共用原生视频能力判定（含豆包）。 */
+export function isNativeVideoModel(model: string): boolean {
+  return VIDEO_MODEL_PATTERN.test(model);
+}
 const CONTRACT_PROMPT = [
   '你是影视镜头切分助手。直接观看输入的原生视频（不要依赖本地抽帧）。',
   '只输出 JSON 对象，不要 Markdown。结构必须是：',
@@ -112,9 +120,9 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
             .filter(Boolean)
         : [];
       if (!this.model) {
-        this.model = models.find((id) => VIDEO_MODEL_PATTERN.test(id)) ?? models[0] ?? null;
+        this.model = models.find((id) => isNativeVideoModel(id)) ?? models[0] ?? null;
       }
-      const supportsNativeVideo = Boolean(this.model && VIDEO_MODEL_PATTERN.test(this.model));
+      const supportsNativeVideo = Boolean(this.model && isNativeVideoModel(this.model));
       return {
         ok: true,
         supportsNativeVideo,
@@ -135,6 +143,56 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
         model: this.model,
         error: {
           code: 'PROVIDER_PROBE_FAILED',
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async listModels(): Promise<AiListModelsResult> {
+    if (!this.baseUrl) {
+      return {
+        ok: false,
+        error: { code: 'PROVIDER_BASE_URL_MISSING', message: '未配置 API 端点 baseUrl' },
+      };
+    }
+    if (!this.apiKey) {
+      return {
+        ok: false,
+        error: { code: 'PROVIDER_API_KEY_MISSING', message: '未配置 API Key' },
+      };
+    }
+    try {
+      const response = await fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(Math.min(this.timeoutMs, 20_000)),
+      });
+      if (!response.ok) {
+        const code =
+          response.status === 401 || response.status === 403
+            ? 'PROVIDER_AUTH_FAILED'
+            : response.status === 404
+              ? 'PROVIDER_MODELS_NOT_FOUND'
+              : 'PROVIDER_MODELS_HTTP';
+        return { ok: false, error: { code, message: `获取模型列表失败：HTTP ${response.status}` } };
+      }
+      const payload = (await response.json()) as { data?: Array<{ id?: unknown }> };
+      const models = Array.isArray(payload.data)
+        ? [
+            ...new Set(
+              payload.data
+                .map((item) => (typeof item.id === 'string' ? item.id.trim() : ''))
+                .filter(Boolean),
+            ),
+          ]
+        : [];
+      return { ok: true, models };
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: 'PROVIDER_MODELS_FAILED',
           message: error instanceof Error ? error.message : String(error),
         },
       };
@@ -251,6 +309,10 @@ export class MockProvider implements ShotDetectionProvider {
     };
   }
 
+  async listModels(): Promise<AiListModelsResult> {
+    return { ok: true, models: ['mock-video-v1', 'mock-video-v2'] };
+  }
+
   async analyzeSegment(input: ShotDetectionSegment, signal: AbortSignal): Promise<ShotDetectionResult> {
     if (this.aborted || signal.aborted) throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
     if (this.delayMs > 0) {
@@ -322,11 +384,19 @@ export function createProviderFromSettings(
       delayMs: Math.max(0, Number(process.env['SMOKE_DETECT_BG_DELAY_MS'] ?? '0') || 0),
     });
   }
+  const active = resolveActiveProvider(settings);
   return new OpenAiCompatProvider({
-    baseUrl: settings?.baseUrl ?? '',
-    apiKey: decryptApiKey(settings?.apiKey),
+    baseUrl: active?.baseUrl ?? settings?.baseUrl ?? '',
+    apiKey: decryptApiKey(active?.apiKey ?? settings?.apiKey),
+    model: active?.model ?? undefined,
     timeoutMs: Math.max(30, settings?.timeoutSeconds ?? 900) * 1000,
   });
+}
+
+/** S36-7：解析当前激活供应商；未命中回落到第一个；无列表回落 legacy。 */
+export function resolveActiveProvider(settings: AiSettings | undefined): AiProviderConfig | null {
+  const providers = settings?.providers ?? [];
+  return providers.find((item) => item.id === settings?.activeProviderId) ?? providers[0] ?? null;
 }
 
 function buildVideoDataUrl(videoPath: string): string {

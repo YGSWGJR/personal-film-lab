@@ -6,6 +6,7 @@ import type {
   AiCopyPromptResult,
   AiMcpAuthResponseArgs,
   AiMcpStatus,
+  AiListModelsResult,
   AiProjectSnapshot,
   AiProviderProbeResult,
   AppInfo,
@@ -203,8 +204,14 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.AI_PROBE_PROVIDER,
-    withEnvelope((args: { baseUrl?: string; apiKey?: string }): Promise<AiProviderProbeResult> =>
+    withEnvelope((args: { baseUrl?: string; apiKey?: string; providerId?: string }): Promise<AiProviderProbeResult> =>
       requireAi().probeProvider(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.AI_LIST_MODELS,
+    withEnvelope((args: { providerId?: string; baseUrl?: string; apiKey?: string }): Promise<AiListModelsResult> =>
+      requireAi().listModels(args),
     ),
   );
   ipcMain.handle(

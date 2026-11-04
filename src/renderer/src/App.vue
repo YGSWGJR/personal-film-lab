@@ -2078,6 +2078,25 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
   }
 }
 
+/** S36-7：AI 菜单快速切换当前检测供应商并持久化。 */
+async function switchAiProvider(id: string): Promise<void> {
+  const current = settings.value;
+  if (!current?.ai) return;
+  const providers = current.ai.providers ?? [];
+  if (id && !providers.some((provider) => provider.id === id)) return;
+  const result = await window.api.settings.set({
+    ...current,
+    ai: { ...current.ai, activeProviderId: id },
+  });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  settings.value = result.data;
+  const name = providers.find((provider) => provider.id === id)?.name ?? '未命名供应商';
+  showToast(`已切换检测供应商：${name}`, 'success', '供应商已切换');
+}
+
 function workspaceStateSnapshot(): WorkspaceState {
   return {
     projectId: demoMode.value ? null : activeProject.value?.id ?? null,
@@ -2718,12 +2737,16 @@ onBeforeUnmount(() => {
           :mcp-busy="aiMcpBusy"
           :copying="aiCopying"
           :auth-request="aiAuthRequest"
+          :providers="settings?.ai?.providers ?? []"
+          :active-provider-id="settings?.ai?.activeProviderId ?? ''"
+          :provider-kind="settings?.ai?.provider ?? 'openai-compatible'"
           @toggle="aiMenuOpen = !aiMenuOpen"
           @close="aiMenuOpen = false"
           @copy-prompt="copyAiPrompt"
           @copy-snapshot="copyAiPrompt([])"
           @toggle-mcp="toggleAiMcp"
           @respond-auth="respondAiMcpAuth"
+          @switch-provider="switchAiProvider"
         />
       </nav>
 

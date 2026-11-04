@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { app, ipcMain, type BrowserWindow } from 'electron';
@@ -14,12 +15,18 @@ import type { DetectOptions } from '../shared/types';
 import { AiDetectRunner, buildSegments, dedupeSegmentShots } from './ai/ai-detect-runner';
 import { decryptApiKey, encryptApiKey, isEncryptedApiKey } from './ai/credential-store';
 import { MCP_TOOL_NAMES } from './ai/mcp-server';
-import { MockProvider } from './ai/provider';
+import {
+  isNativeVideoModel,
+  MockProvider,
+  OpenAiCompatProvider,
+  resolveActiveProvider,
+} from './ai/provider';
 import type { DetectService } from './detect/detect-service';
 import type { MediaService } from './media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from './paths';
 import type { PlayerService } from './player/player-service';
 import { SessionService } from './session/session-service';
+import { migrateLegacyAiSettings } from './settings/settings-service';
 
 interface SmokeDeps {
   getPlayer(): PlayerService | null;
@@ -73,12 +80,13 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let aiChecks: Record<string, unknown> = {};
   let mcpToolChecks: Record<string, unknown> = {};
   let detectBgChecks: Record<string, unknown> = {};
+  let aiProviderChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -297,6 +305,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, detectBgChecksAssertions(detectBgChecks));
     }
 
+    if (process.env['SMOKE_AI_PROVIDERS'] === '1') {
+      aiProviderChecks = await runAiProvidersChecks(win);
+      Object.assign(checks, aiProviderChecksAssertions(aiProviderChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -310,7 +323,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -2717,6 +2730,7 @@ async function runAiChecks(
             model: 'flaky',
             error: null,
           }),
+          listModels: async () => ({ ok: true, models: ['flaky-video-v1'] }),
           analyzeSegment: async (input: any, signal: AbortSignal) => {
             flakyCalls += 1;
             if (flakyCalls === 2) throw new Error('mock segment 2 failure');
@@ -2768,6 +2782,7 @@ async function runAiChecks(
             model: 'slow',
             error: null,
           }),
+          listModels: async () => ({ ok: true, models: ['slow-video-v1'] }),
           analyzeSegment: (input: any, signal: AbortSignal) =>
             new Promise<any>((resolve, reject) => {
               const timer = setTimeout(() => {
@@ -3174,4 +3189,237 @@ async function runDetectBgChecks(
     }
   }
   return result;
+}
+
+function aiProviderChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    providerLegacyMigration: result.p1 === true,
+    providerKeysEncrypted: result.p2Keys === true,
+    providerMultiSave: result.p2 === true,
+    providerLegacyCleared: result.p2Cleared === true,
+    providerSwitchResolve: result.p3 === true,
+    providerModelListMock: result.p4Mock === true,
+    providerModelListError: result.p4Error === true,
+    providerModelListServer: result.p4ServerList === true,
+    providerExplicitModel: result.p4Explicit === true,
+    providerDoubaoRegex: result.p5Regex === true,
+    providerDoubaoProbe: result.p5Probe === true,
+    providerDeleteFallback: result.p6 === true,
+  };
+}
+
+async function runAiProvidersChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  try {
+    // P-1：旧扁平配置 → legacy provider（纯函数，不写文件）
+    const migrated = migrateLegacyAiSettings({
+      provider: 'openai-compatible',
+      baseUrl: 'https://legacy.example/v1',
+      apiKey: 'sk-legacy-plain',
+    });
+    const legacy = migrated.providers?.[0];
+    out.p1 =
+      migrated.activeProviderId === 'legacy' &&
+      legacy?.id === 'legacy' &&
+      legacy?.baseUrl === 'https://legacy.example/v1' &&
+      migrated.baseUrl === 'https://legacy.example/v1';
+    out.p1KeyEncrypted = Boolean(legacy?.apiKey?.startsWith('enc:v1:'));
+
+    // P-2：多供应商保存/回读 + key 加密 + legacy 字段清空
+    const settings = (await win.webContents.executeJavaScript(
+      'window.api.settings.get()',
+    )) as { ok: boolean; data?: any };
+    if (!settings.ok || !settings.data) {
+      out.settingsError = settings;
+      return out;
+    }
+    const original = settings.data;
+    const testProviders = [
+      {
+        id: 'legacy',
+        name: '默认供应商',
+        note: '旧配置',
+        homeUrl: 'https://legacy.example.com',
+        baseUrl: 'https://legacy.example/v1',
+        apiKey: 'sk-legacy-test',
+        model: 'legacy-video-v1',
+        models: ['legacy-video-v1'],
+      },
+      {
+        id: 'prov-b',
+        name: '测试二',
+        note: '方舟',
+        homeUrl: 'https://ark.cn-beijing.volces.com',
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+        apiKey: 'sk-b-test',
+        model: 'doubao-seed-2-1-pro-260915',
+        models: ['doubao-seed-2-1-pro-260915', 'doubao-seed-1-6'],
+      },
+    ];
+    try {
+      const saved = (await win.webContents.executeJavaScript(
+        `window.api.settings.set(${JSON.stringify({
+          ...original,
+          ai: { ...(original.ai ?? {}), providers: testProviders, activeProviderId: 'prov-b' },
+        })})`,
+      )) as { ok: boolean; data?: any; error?: any };
+      if (saved.ok && saved.data?.ai) {
+        out.p2 =
+          saved.data.ai.providers?.length === 2 && saved.data.ai.activeProviderId === 'prov-b';
+        out.p2Keys = saved.data.ai.providers.every(
+          (provider: any) => !provider.apiKey || String(provider.apiKey).startsWith('enc:v1:'),
+        );
+        out.p2Cleared = saved.data.ai.baseUrl === '' && saved.data.ai.apiKey === '';
+        const switched = (await win.webContents.executeJavaScript(
+          `window.api.settings.set(${JSON.stringify({
+            ...saved.data,
+            ai: { ...saved.data.ai, activeProviderId: 'legacy' },
+          })})`,
+        )) as { ok: boolean; data?: any };
+        out.p2Switch = switched.ok && switched.data?.ai?.activeProviderId === 'legacy';
+      } else {
+        out.p2Error = saved.error ?? saved;
+      }
+    } finally {
+      try {
+        await win.webContents.executeJavaScript(
+          `window.api.settings.set(${JSON.stringify(original)})`,
+        );
+      } catch {
+        // restore best effort
+      }
+    }
+
+    // P-3：activeProviderId 切换解析
+    const twoProviders = {
+      providers: [
+        { id: 'a', name: 'A', baseUrl: 'https://a.example/v1' },
+        { id: 'b', name: 'B', baseUrl: 'https://b.example/v1' },
+      ],
+      activeProviderId: 'b',
+    };
+    out.p3 =
+      resolveActiveProvider(twoProviders)?.baseUrl === 'https://b.example/v1' &&
+      resolveActiveProvider({ ...twoProviders, activeProviderId: 'a' })?.baseUrl ===
+        'https://a.example/v1';
+
+    // P-4：模型列表（Mock / 错误端点 / 本地服务）
+    const mockModels = await new MockProvider().listModels();
+    const missing = await new OpenAiCompatProvider({ baseUrl: '', apiKey: '' }).listModels();
+    out.p4Mock = mockModels.ok === true && (mockModels.models?.length ?? 0) === 2;
+    out.p4Error =
+      missing.ok === false && missing.error?.code === 'PROVIDER_BASE_URL_MISSING';
+
+    let capturedModel: string | null = null;
+    const server = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        if (request.method === 'GET' && request.url === '/models') {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(
+            JSON.stringify({
+              data: [
+                { id: 'doubao-seed-2-1-pro-260915' },
+                { id: 'doubao-seed-1-6' },
+                { id: 'other-model' },
+              ],
+            }),
+          );
+          return;
+        }
+        if (request.method === 'POST' && request.url === '/chat/completions') {
+          try {
+            capturedModel = JSON.parse(body).model ?? null;
+          } catch {
+            capturedModel = null;
+          }
+          const result = {
+            segment: { startMs: 0, endMs: 1000 },
+            shots: [
+              {
+                id: 's1',
+                startMs: 0,
+                endMs: 1000,
+                representativeTimeMs: 500,
+                note: '中景 · 固定 · 测试主体 · 自然光 · 静止',
+                tags: {},
+                confidence: 0.9,
+              },
+            ],
+            usage: { seconds: 1, tokens: 10, cost: 0 },
+            generatedAt: '2026-11-04T00:00:00Z',
+          };
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(
+            JSON.stringify({
+              choices: [{ message: { content: JSON.stringify(result) } }],
+              usage: { prompt_tokens: 5, completion_tokens: 5 },
+            }),
+          );
+          return;
+        }
+        response.writeHead(404, { 'content-type': 'application/json' });
+        response.end('{}');
+      });
+    });
+    try {
+      await new Promise<void>((resolveListen) =>
+        server.listen(0, '127.0.0.1', () => resolveListen()),
+      );
+      const address = server.address();
+      const port = address && typeof address === 'object' ? address.port : 0;
+      const provider = new OpenAiCompatProvider({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-test',
+        model: 'doubao-seed-2-1-pro-260915',
+        timeoutMs: 5000,
+      });
+      const list = await provider.listModels();
+      out.p4ServerList = list.ok === true && (list.models?.length ?? 0) === 3;
+      const probe = await provider.probeCapability();
+      out.p5Probe =
+        probe.ok === true &&
+        probe.supportsNativeVideo === true &&
+        probe.model === 'doubao-seed-2-1-pro-260915';
+      const analysis = await provider.analyzeSegment(
+        {
+          videoPath: `http://127.0.0.1:${port}/video.mp4`,
+          startMs: 0,
+          endMs: 1000,
+        },
+        new AbortController().signal,
+      );
+      out.p4Explicit =
+        capturedModel === 'doubao-seed-2-1-pro-260915' && analysis.shots.length === 1;
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    }
+
+    // P-5：豆包正则
+    out.p5Regex =
+      isNativeVideoModel('doubao-seed-2-1-pro-260915') === true &&
+      isNativeVideoModel('doubao-seed-1-6') === true &&
+      isNativeVideoModel('plain-text-model') === false;
+
+    // P-6：删除激活供应商后回落到第一个
+    const p6Before = migrateLegacyAiSettings({
+      providers: [
+        { id: 'a', name: 'A', baseUrl: 'https://a.example/v1' },
+        { id: 'b', name: 'B', baseUrl: 'https://b.example/v1' },
+      ],
+      activeProviderId: 'b',
+    });
+    const p6After = migrateLegacyAiSettings({
+      ...p6Before,
+      providers: (p6Before.providers ?? []).filter((item) => item.id !== 'b'),
+      activeProviderId: 'b',
+    });
+    out.p6 = p6Before.activeProviderId === 'b' && p6After.activeProviderId === 'a';
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  }
+  return out;
 }

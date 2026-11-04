@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type {
   AiMcpAuthRequest,
   AiMcpStatus,
+  AiProviderConfig,
   AiTaskId,
 } from '../../../shared/types';
 
@@ -15,6 +16,9 @@ const props = defineProps<{
   mcpBusy: boolean;
   copying: boolean;
   authRequest: AiMcpAuthRequest | null;
+  providers: AiProviderConfig[];
+  activeProviderId: string;
+  providerKind: 'openai-compatible' | 'mock';
 }>();
 
 const emit = defineEmits<{
@@ -24,6 +28,7 @@ const emit = defineEmits<{
   copySnapshot: [];
   toggleMcp: [];
   respondAuth: [value: { allowed: boolean; remember: boolean }];
+  switchProvider: [id: string];
 }>();
 
 const tasks: Array<{ id: AiTaskId; label: string; hint: string }> = [
@@ -35,6 +40,10 @@ const tasks: Array<{ id: AiTaskId; label: string; hint: string }> = [
 ];
 const selectedTasks = ref<AiTaskId[]>(['continuity']);
 const rememberAuth = ref(false);
+const activeProviderName = computed(() => {
+  if (props.providerKind === 'mock') return 'Mock（自测）';
+  return props.providers.find((item) => item.id === props.activeProviderId)?.name ?? '未配置';
+});
 
 watch(
   () => props.authRequest,
@@ -47,6 +56,10 @@ function toggleTask(id: AiTaskId): void {
   selectedTasks.value = selectedTasks.value.includes(id)
     ? selectedTasks.value.filter((item) => item !== id)
     : [...selectedTasks.value, id];
+}
+
+function onProviderChange(event: Event): void {
+  emit('switchProvider', (event.target as HTMLSelectElement).value);
 }
 </script>
 
@@ -69,6 +82,25 @@ function toggleTask(id: AiTaskId): void {
         </header>
 
         <div class="ai-menu-body">
+          <section class="ai-section provider-switch">
+            <div class="ai-section-head">
+              <strong>检测供应商</strong>
+              <span>{{ activeProviderName }}</span>
+            </div>
+            <select
+              class="provider-switch-select"
+              :value="activeProviderId"
+              :disabled="providerKind === 'mock' || providers.length === 0"
+              @change="onProviderChange"
+            >
+              <option v-if="providers.length === 0" value="">未配置供应商</option>
+              <option v-for="provider in providers" :key="provider.id" :value="provider.id">
+                {{ provider.name }}
+              </option>
+            </select>
+            <small>切换后保存到 settings，下次检测生效；Mock 模式不参与列表切换。</small>
+          </section>
+
           <section class="ai-section">
             <div class="ai-section-head">
               <strong>选择任务</strong>
@@ -268,6 +300,28 @@ function toggleTask(id: AiTaskId): void {
 
 .ai-section-head span.on {
   color: var(--green);
+}
+
+.provider-switch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.provider-switch-select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.provider-switch small {
+  color: var(--text-faint);
+  font-size: 9px;
 }
 
 .task-list {

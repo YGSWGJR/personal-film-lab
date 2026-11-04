@@ -28,6 +28,8 @@ export function defaultRecognitionSettings(): RecognitionSettings {
 export function defaultAiSettings(): AiSettings {
   return {
     provider: 'openai-compatible',
+    providers: [],
+    activeProviderId: '',
     baseUrl: '',
     apiKey: '',
     agentEndpoint: '',

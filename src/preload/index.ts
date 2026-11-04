@@ -4,6 +4,7 @@ import { IPC } from '../shared/ipc-channels';
 import { fail } from '../shared/ipc-result';
 import {
   aiCopyPromptArgsSchema,
+  aiListModelsArgsSchema,
   aiMcpAuthResponseSchema,
   aiMcpSetEnabledArgsSchema,
   aiProbeProviderArgsSchema,
@@ -67,6 +68,7 @@ import type {
   AiMcpAuthResponseArgs,
   AiMcpDataChangedEvent,
   AiMcpStatus,
+  AiListModelsResult,
   AiProjectSnapshot,
   AiProviderProbeResult,
   AppInfo,
@@ -159,6 +161,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.AI_COPY_PROMPT]: aiCopyPromptArgsSchema,
   [IPC.AI_GET_SNAPSHOT]: aiProjectArgsSchema,
   [IPC.AI_PROBE_PROVIDER]: aiProbeProviderArgsSchema,
+  [IPC.AI_LIST_MODELS]: aiListModelsArgsSchema,
   [IPC.AI_START_MCP]: aiMcpSetEnabledArgsSchema,
   [IPC.AI_GET_MCP_STATUS]: emptyArgsSchema,
   [IPC.AI_RESPOND_MCP_AUTH]: aiMcpAuthResponseSchema,
@@ -302,8 +305,10 @@ const aiApi = {
   copyPrompt: (args: AiCopyPromptArgs) => invoke<AiCopyPromptResult>(IPC.AI_COPY_PROMPT, [args]),
   getShotSnapshot: (args: { projectId: string }) =>
     invoke<AiProjectSnapshot>(IPC.AI_GET_SNAPSHOT, [args]),
-  probeProvider: (args?: { baseUrl?: string; apiKey?: string }) =>
+  probeProvider: (args?: { baseUrl?: string; apiKey?: string; providerId?: string }) =>
     invoke<AiProviderProbeResult>(IPC.AI_PROBE_PROVIDER, [args ?? {}]),
+  listModels: (args: { providerId?: string; baseUrl?: string; apiKey?: string }) =>
+    invoke<AiListModelsResult>(IPC.AI_LIST_MODELS, [args]),
   startMcp: (args: { enabled: boolean }) => invoke<AiMcpStatus>(IPC.AI_START_MCP, [args]),
   getMcpStatus: () => invoke<AiMcpStatus>(IPC.AI_GET_MCP_STATUS),
   onMcpAuthRequest: (listener: (request: AiMcpAuthRequest) => void) =>

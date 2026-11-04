@@ -22,6 +22,7 @@ import type {
   AiCopyPromptArgs,
   AiCopyPromptResult,
   AiJobSnapshot,
+  AiListModelsResult,
   AiMcpAuthRequest,
   AiMcpAuthResponseArgs,
   AiMcpDataChangedEvent,
@@ -37,7 +38,13 @@ import type { DetectService } from '../detect/detect-service';
 import type { MediaService } from '../media/media-service';
 import { resolveThumbCacheDir } from '../paths';
 import { buildAiPrompt, buildSnapshotOnlyPrompt } from './ai-prompts';
-import { createProviderFromSettings } from './provider';
+import { decryptApiKey } from './credential-store';
+import {
+  createProviderFromSettings,
+  OpenAiCompatProvider,
+  resolveActiveProvider,
+  type ShotDetectionProvider,
+} from './provider';
 import {
   buildContinuityCandidates,
   buildProjectSnapshot,
@@ -144,17 +151,53 @@ export class AiAccessService {
   }
 
   /** S36-2a：探测 API Key 直连端点的原生视频能力。 */
-  async probeProvider(args?: { baseUrl?: string; apiKey?: string }): Promise<AiProviderProbeResult> {
-    const settings = this.deps.getSettings?.() ?? null;
-    const provider = createProviderFromSettings(
-      {
-        ...(settings?.ai ?? {}),
-        ...(args?.baseUrl ? { baseUrl: args.baseUrl } : {}),
-        ...(args?.apiKey ? { apiKey: args.apiKey } : {}),
-      },
-      { forceMock: process.env['SMOKE_AI_PROVIDER'] === 'mock' },
-    );
-    return provider.probeCapability();
+  async probeProvider(args?: {
+    baseUrl?: string;
+    apiKey?: string;
+    providerId?: string;
+  }): Promise<AiProviderProbeResult> {
+    return this.buildProviderForArgs(args).probeCapability();
+  }
+
+  /** S36-7：获取供应商模型列表（支持 providerId 或草稿 baseUrl/apiKey）。 */
+  async listModels(args: {
+    providerId?: string;
+    baseUrl?: string;
+    apiKey?: string;
+  }): Promise<AiListModelsResult> {
+    return this.buildProviderForArgs(args).listModels();
+  }
+
+  private buildProviderForArgs(args?: {
+    providerId?: string;
+    baseUrl?: string;
+    apiKey?: string;
+  }): ShotDetectionProvider {
+    const settings = this.deps.getSettings?.()?.ai;
+    const forceMock = process.env['SMOKE_AI_PROVIDER'] === 'mock';
+    if (forceMock || (settings?.provider === 'mock' && !args?.baseUrl && !args?.providerId)) {
+      return createProviderFromSettings(settings, { forceMock: true });
+    }
+    if (args?.baseUrl || args?.apiKey) {
+      return new OpenAiCompatProvider({
+        baseUrl: (args.baseUrl ?? '').trim(),
+        apiKey: (args.apiKey ?? '').trim(),
+        model: resolveActiveProvider(settings)?.model,
+        timeoutMs: Math.max(30, settings?.timeoutSeconds ?? 900) * 1000,
+      });
+    }
+    if (args?.providerId) {
+      const config = settings?.providers?.find((item) => item.id === args.providerId);
+      if (config) {
+        return new OpenAiCompatProvider({
+          baseUrl: config.baseUrl,
+          apiKey: decryptApiKey(config.apiKey),
+          model: config.model,
+          timeoutMs: Math.max(30, settings?.timeoutSeconds ?? 900) * 1000,
+        });
+      }
+    }
+    return createProviderFromSettings(settings);
   }
 
   respondMcpAuth(args: AiMcpAuthResponseArgs): { responded: boolean } {

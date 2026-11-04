@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { app, dialog, type BrowserWindow } from 'electron';
 import { settingsSetArgsSchema } from '../../shared/schemas';
 import type {
+  AiProviderConfig,
   AiSettings,
   RecognitionSettings,
   Settings,
@@ -96,7 +97,7 @@ export class SettingsService {
     const current = this.get();
     // 设置面板可能只提交部分键（如仅路径）；用当前已存值兜底，
     // 避免保存设置时把 timeline / recognition / ai 重置为默认。
-    const normalized = normalizeSettings(args, this.stored ?? undefined);
+    const normalized = normalizeSettings(args, this.stored ?? undefined, true);
     for (const key of SETTINGS_PATH_FIELDS) {
       const path = normalized[key];
       if (path) mkdirSync(path, { recursive: true });
@@ -196,6 +197,8 @@ export function verifyStoredSettings(
       stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond &&
       stored.recognition?.engine === expected.recognition?.engine &&
       stored.ai?.provider === expected.ai?.provider &&
+      stored.ai?.activeProviderId === expected.ai?.activeProviderId &&
+      JSON.stringify(stored.ai?.providers ?? []) === JSON.stringify(expected.ai?.providers ?? []) &&
       stored.ai?.baseUrl === expected.ai?.baseUrl &&
       stored.ai?.apiKey === expected.ai?.apiKey &&
       stored.ai?.agentEndpoint === expected.ai?.agentEndpoint &&
@@ -213,6 +216,7 @@ export function verifyStoredSettings(
 function normalizeSettings(
   args: SettingsSetArgs,
   fallback?: SettingsSetArgs,
+  forWrite = false,
 ): SettingsSetArgs {
   return {
     dataRoot: normalizePath(args.dataRoot),
@@ -229,7 +233,7 @@ function normalizeSettings(
     confirmUserContent: args.confirmUserContent ?? true,
     timeline: normalizeTimeline(args.timeline ?? fallback?.timeline),
     recognition: normalizeRecognition(args.recognition ?? fallback?.recognition),
-    ai: normalizeAi(args.ai, fallback?.ai),
+    ai: normalizeAi(args.ai, fallback?.ai, forWrite),
   };
 }
 
@@ -248,8 +252,25 @@ function normalizeRecognition(value: RecognitionSettings | undefined): Recogniti
   return { engine: value?.engine === 'opencv' ? 'opencv' : 'ai' };
 }
 
-function normalizeAi(value: AiSettings | undefined, fallback: AiSettings | undefined): AiSettings {
+/**
+ * 读取时把旧扁平配置迁移为 legacy provider（纯函数，不写回；smoke 复用）。
+ */
+export function migrateLegacyAiSettings(value: AiSettings | undefined): AiSettings {
+  return normalizeAi(value, undefined, false);
+}
+
+function normalizeAi(
+  value: AiSettings | undefined,
+  fallback: AiSettings | undefined,
+  forWrite = false,
+): AiSettings {
   const defaults = defaultAiSettings();
+  const fallbackProviders = fallback?.providers ?? [];
+  const hasProvidersField = Array.isArray(value?.providers);
+  const providers = hasProvidersField
+    ? normalizeProviders(value?.providers ?? [], fallbackProviders)
+    : normalizeProviders(fallbackProviders, []);
+  const legacyBaseUrl = (value?.baseUrl ?? fallback?.baseUrl ?? defaults.baseUrl ?? '').trim();
   // 显式传入 apiKey（含空串）= 覆盖/清除；未传 apiKey = 保留已存值。
   const keyProvided = value !== undefined && Object.prototype.hasOwnProperty.call(value, 'apiKey');
   const keySource = keyProvided
@@ -257,14 +278,35 @@ function normalizeAi(value: AiSettings | undefined, fallback: AiSettings | undef
       ? value.apiKey
       : ''
     : fallback?.apiKey ?? defaults.apiKey ?? '';
+  const legacyKey = encryptApiKey(keySource);
+  const migratedProviders =
+    !hasProvidersField && providers.length === 0 && (legacyBaseUrl || legacyKey)
+      ? [
+          {
+            id: 'legacy',
+            name: '默认供应商',
+            note: '由旧配置自动迁移',
+            baseUrl: legacyBaseUrl,
+            apiKey: legacyKey,
+            models: [],
+          } satisfies AiProviderConfig,
+        ]
+      : providers;
+  const activeCandidate = value?.activeProviderId ?? fallback?.activeProviderId ?? '';
+  const activeProviderId = migratedProviders.some((item) => item.id === activeCandidate)
+    ? activeCandidate
+    : migratedProviders[0]?.id ?? '';
+  const clearLegacy = forWrite && migratedProviders.length > 0;
   return {
     provider:
       value?.provider === 'mock' || fallback?.provider === 'mock'
         ? 'mock'
         : 'openai-compatible',
-    baseUrl: (value?.baseUrl ?? fallback?.baseUrl ?? defaults.baseUrl ?? '').trim(),
+    providers: migratedProviders,
+    activeProviderId,
+    baseUrl: clearLegacy ? '' : legacyBaseUrl,
     // 落盘前加密（已加密则幂等保留）；settings.json 不得出现明文 Key。
-    apiKey: encryptApiKey(keySource),
+    apiKey: clearLegacy ? '' : legacyKey,
     agentEndpoint: (value?.agentEndpoint ?? fallback?.agentEndpoint ?? defaults.agentEndpoint ?? '').trim(),
     segmentSeconds: clampInt(value?.segmentSeconds ?? fallback?.segmentSeconds, 600, 30, 3600),
     segmentOverlapSeconds: clampInt(
@@ -282,6 +324,41 @@ function normalizeAi(value: AiSettings | undefined, fallback: AiSettings | undef
     ),
     enabled: value?.enabled ?? fallback?.enabled ?? true,
   };
+}
+
+function normalizeProviders(
+  list: AiProviderConfig[],
+  fallbackList: AiProviderConfig[],
+): AiProviderConfig[] {
+  const fallbackById = new Map(fallbackList.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const result: AiProviderConfig[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = String(raw.id ?? '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const fallback = fallbackById.get(id);
+    const keyProvided = Object.prototype.hasOwnProperty.call(raw, 'apiKey');
+    const keySource = keyProvided ? raw.apiKey : fallback?.apiKey;
+    const key = keySource && String(keySource).trim() ? String(keySource) : '';
+    const modelsSource = raw.models !== undefined ? raw.models : fallback?.models ?? [];
+    const models = [...new Set(modelsSource.map((item) => String(item).trim()).filter(Boolean))];
+    const model = String(raw.model ?? fallback?.model ?? '').trim();
+    const note = String(raw.note ?? fallback?.note ?? '').trim();
+    const homeUrl = String(raw.homeUrl ?? fallback?.homeUrl ?? '').trim();
+    result.push({
+      id,
+      name: String(raw.name ?? fallback?.name ?? '').trim() || '未命名供应商',
+      ...(note ? { note } : {}),
+      ...(homeUrl ? { homeUrl } : {}),
+      baseUrl: String(raw.baseUrl ?? '').trim(),
+      ...(key ? { apiKey: encryptApiKey(key) } : {}),
+      ...(model ? { model } : {}),
+      models,
+    });
+  }
+  return result;
 }
 
 function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
