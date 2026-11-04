@@ -10,6 +10,7 @@ import type {
   RenderBounds,
 } from '../../../shared/types';
 import { PLAYBACK_SPEEDS } from '../../../shared/types';
+import { formatTimecodeFF, frameFromMs, parseTimecodeFF } from '../../../shared/time';
 
 const props = defineProps<{
   player: PlayerState;
@@ -22,6 +23,10 @@ const props = defineProps<{
   busy: boolean;
   audioWaveform: AudioWaveform | null;
   audioLoading: boolean;
+  trackHeight: number;
+  pxPerSecond: number;
+  inPointMs: number | null;
+  outPointMs: number | null;
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +43,8 @@ const emit = defineEmits<{
   setVolume: [volume: number];
   setSpeed: [rate: number];
   toggleMute: [];
+  updateTrackHeight: [value: number];
+  updatePxPerSecond: [value: number];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
@@ -46,14 +53,16 @@ const volumeOpen = ref(false);
 const volumeDragging = ref(false);
 const volumeEditing = ref(false);
 const volumeDraft = ref('0');
+const timecodeEditing = ref(false);
+const timecodeDraft = ref('');
 let volumeWheelCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
-const timecode = computed(() => formatTimecode(props.displayTimeMs));
-const durationText = computed(() => formatTimecode(props.displayDurationMs));
+const fpsValue = computed(() => (props.player.hasFile ? props.player.fps : 500 / 21));
+const timecode = computed(() => formatTimecodeFF(props.displayTimeMs, fpsValue.value));
+const durationText = computed(() => formatTimecodeFF(props.displayDurationMs, fpsValue.value));
 const frameNumber = computed(() => {
-  const fps = props.player.hasFile ? props.player.fps : 500 / 21;
-  return String(Math.round((props.displayTimeMs / 1000) * fps));
+  return String(frameFromMs(props.displayTimeMs, fpsValue.value));
 });
 const resolutionText = computed(() => {
   if (!props.player.hasFile) return '1920 × 1080';
@@ -128,14 +137,21 @@ function onVolumeWheel(event: WheelEvent): void {
   }, 900);
 }
 
-function formatTimecode(ms: number): string {
-  const safeMs = Math.max(0, Math.floor(ms));
-  const totalSeconds = Math.floor(safeMs / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const frames = Math.floor((safeMs % 1000) / (1000 / 24));
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
+function beginTimecodeInput(): void {
+  timecodeDraft.value = timecode.value;
+  timecodeEditing.value = true;
+}
+
+function commitTimecodeInput(): void {
+  if (!timecodeEditing.value) return;
+  const parsed = parseTimecodeFF(timecodeDraft.value, fpsValue.value);
+  timecodeEditing.value = false;
+  if (parsed === null) return;
+  emit('seek', parsed);
+}
+
+function cancelTimecodeInput(): void {
+  timecodeEditing.value = false;
 }
 
 function pushBounds(): void {
@@ -232,10 +248,16 @@ onBeforeUnmount(() => {
       :fps="player.hasFile ? player.fps : 500 / 21"
       :audio-waveform="audioWaveform"
       :audio-loading="audioLoading"
+      :track-height="trackHeight"
+      :px-per-second="pxPerSecond"
+      :in-point-ms="inPointMs"
+      :out-point-ms="outPointMs"
       @seek="emit('seek', $event)"
       @select="emit('selectShot', $event)"
       @boundary-change="emit('boundaryChange', $event)"
       @boundary-commit="emit('boundaryCommit', $event)"
+      @update-track-height="emit('updateTrackHeight', $event)"
+      @update-px-per-second="emit('updatePxPerSecond', $event)"
     />
 
     <div v-show="controlsVisible" class="transport">
@@ -323,7 +345,27 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="time-readout">
-        <strong>{{ timecode }}</strong>
+        <button
+          v-if="!timecodeEditing"
+          class="timecode-value"
+          type="button"
+          title="点击输入时间码（HH:MM:SS:FF 或帧号，Enter 确认，Esc 取消）"
+          @click="beginTimecodeInput"
+        >
+          {{ timecode }}
+        </button>
+        <input
+          v-else
+          v-model="timecodeDraft"
+          class="timecode-input"
+          type="text"
+          spellcheck="false"
+          aria-label="输入时间码或帧号"
+          autofocus
+          @keydown.enter.prevent="commitTimecodeInput"
+          @keydown.esc.prevent="cancelTimecodeInput"
+          @blur="commitTimecodeInput"
+        />
         <span>/ {{ durationText }}</span>
         <i></i>
         <span>FRAME {{ frameNumber }}</span>
@@ -907,6 +949,41 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.5px;
+}
+
+.timecode-value {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: text;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.timecode-value:hover {
+  color: var(--blue-hi);
+}
+
+.timecode-input {
+  width: 96px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: 0;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+}
+
+.timecode-input:focus {
+  border-color: var(--blue-hi);
 }
 
 .time-readout i {

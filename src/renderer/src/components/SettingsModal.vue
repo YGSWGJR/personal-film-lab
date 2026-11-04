@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { AiMcpStatus, ProxyTier, Settings, SettingsSetArgs } from '../../../shared/types';
 
-type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier' | 'confirmUserContent'>;
+type PathKey = Exclude<keyof SettingsSetArgs, 'proxyTier' | 'confirmUserContent' | 'timeline'>;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 type SettingsDraft = Record<PathKey, string>;
 

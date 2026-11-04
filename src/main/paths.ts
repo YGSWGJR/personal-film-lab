@@ -1,11 +1,16 @@
 import { app } from 'electron';
 import { join, resolve } from 'node:path';
-import type { Settings, SettingsSetArgs } from '../shared/types';
+import type { Settings, SettingsSetArgs, TimelineSettings } from '../shared/types';
 
 let settingsProvider: (() => Settings) | null = null;
 
 export function bindSettingsProvider(provider: () => Settings): void {
   settingsProvider = provider;
+}
+
+/** 时间线轨道缩放默认档（S36-3）：轨高 96px / 密度 96px/s。 */
+export function defaultTimelineSettings(): TimelineSettings {
+  return { trackHeight: 96, pxPerSecond: 96 };
 }
 
 export function defaultSettings(): SettingsSetArgs {
@@ -23,6 +28,7 @@ export function defaultSettings(): SettingsSetArgs {
     stillSubDir: undefined,
     proxyTier: '540p',
     confirmUserContent: true,
+    timeline: defaultTimelineSettings(),
   };
 }
 

@@ -25,6 +25,12 @@ export const settingsSchema = z.object({
   stillSubDir: settingsDirectorySchema.optional(),
   proxyTier: z.enum(['360p', '540p', '720p']).optional(),
   confirmUserContent: z.boolean().optional(),
+  timeline: z
+    .object({
+      trackHeight: z.number().finite().min(1),
+      pxPerSecond: z.number().finite().min(1),
+    })
+    .optional(),
 });
 
 export const settingsSetArgsSchema = settingsSchema;

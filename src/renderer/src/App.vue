@@ -59,9 +59,11 @@ import type {
   StoryboardExportArgs,
   Tag,
   Term,
+  TimelineSettings,
   WorkspaceState,
 } from '../../shared/types';
-import { PLAYBACK_SPEEDS } from '../../shared/types';
+import { PLAYBACK_SPEEDS, PX_PER_SEC_LEVELS } from '../../shared/types';
+import { frameToMs } from '../../shared/time';
 
 const info = ref<AppInfo | null>(null);
 const bridgeReady = ref(false);
@@ -144,6 +146,13 @@ const confirmState = reactive({
 });
 /** 删除用户内容前是否二次确认，由设置 confirmUserContent 驱动，缺省开启 */
 const needDeleteConfirm = computed(() => settings.value?.confirmUserContent ?? true);
+
+/** S36-3：时间线轨道缩放状态，由 settings.timeline 持久化（默认轨高 96px / 密度 96px/s）。 */
+const timelineSettings = ref<TimelineSettings>({ trackHeight: 96, pxPerSecond: 96 });
+let timelinePersistTimer: ReturnType<typeof setTimeout> | null = null;
+/** S36-4b：入点 / 出点（仅时间线选区，不做导出与循环联动）。 */
+const inPointMs = ref<number | null>(null);
+const outPointMs = ref<number | null>(null);
 
 /**
  * 弹出删除确认弹窗并等待用户选择。
@@ -770,6 +779,186 @@ async function stepFrame(dir: 1 | -1): Promise<void> {
     player.timeMs = frame.timeMs;
     previewTimeMs.value = frame.timeMs;
   }
+}
+
+function applyTimelineSettings(next: TimelineSettings): void {
+  timelineSettings.value = next;
+  if (timelinePersistTimer) clearTimeout(timelinePersistTimer);
+  timelinePersistTimer = setTimeout(() => void persistTimelineSettings(), 400);
+}
+
+async function persistTimelineSettings(): Promise<void> {
+  const current = settings.value;
+  if (!current || current.environmentOverride) return;
+  const result = await window.api.settings.set({ ...current, timeline: timelineSettings.value });
+  if (result.ok) {
+    settings.value = result.data;
+  } else {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
+function onTrackHeightChange(value: number): void {
+  if (value !== timelineSettings.value.trackHeight) {
+    applyTimelineSettings({ ...timelineSettings.value, trackHeight: value });
+  }
+}
+
+function onPxPerSecondChange(value: number): void {
+  if (value !== timelineSettings.value.pxPerSecond) {
+    applyTimelineSettings({ ...timelineSettings.value, pxPerSecond: value });
+  }
+}
+
+function stepPxPerSecond(direction: 1 | -1): void {
+  const index = PX_PER_SEC_LEVELS.indexOf(timelineSettings.value.pxPerSecond);
+  const base = index >= 0 ? index : PX_PER_SEC_LEVELS.indexOf(96);
+  const next = PX_PER_SEC_LEVELS[
+    Math.max(0, Math.min(PX_PER_SEC_LEVELS.length - 1, base + direction))
+  ];
+  if (next !== timelineSettings.value.pxPerSecond) {
+    applyTimelineSettings({ ...timelineSettings.value, pxPerSecond: next });
+  }
+}
+
+/** ↑/↓：优先跳上/下一个标记点或镜头边界，无点可跳时回退镜头切换。 */
+function jumpToAdjacentPoint(direction: 1 | -1): void {
+  const points = new Set<number>();
+  for (const marker of markers.value) points.add(Math.round(marker.timeMs));
+  for (const shot of shots.value) {
+    if (shot.startMs > 0) points.add(shot.startMs);
+    if (shot.endMs < displayDurationMs.value) points.add(shot.endMs);
+  }
+  const sorted = [...points].sort((left, right) => left - right);
+  const current = Math.round(displayTimeMs.value);
+  if (direction === 1) {
+    const next = sorted.find((timeMs) => timeMs > current + 1);
+    if (next !== undefined) {
+      void seekTo(next);
+      return;
+    }
+  } else {
+    const previous = [...sorted].reverse().find((timeMs) => timeMs < current - 1);
+    if (previous !== undefined) {
+      void seekTo(previous);
+      return;
+    }
+  }
+  const currentIndex = Math.max(0, shots.value.findIndex((shot) => shot.id === selectedId.value));
+  const nextIndex = Math.max(0, Math.min(shots.value.length - 1, currentIndex + direction));
+  const nextShot = shots.value[nextIndex];
+  if (nextShot) void selectShot(nextShot);
+}
+
+/** Shift+←/→：选中/最近标记或镜头边界 ±1 帧微调并回写；无目标则回退 ±1 帧 seek。 */
+async function nudgeSelectedByFrame(direction: 1 | -1): Promise<void> {
+  const fps = player.hasFile ? player.fps : 500 / 21;
+  const frameMs = frameToMs(1, fps);
+  const threshold = Math.max(500, frameMs * 4);
+  const current = Math.round(displayTimeMs.value);
+
+  let nearestMarker: TimelineMarker | null = null;
+  let nearestMarkerDist = Number.POSITIVE_INFINITY;
+  for (const marker of markers.value) {
+    const dist = Math.abs(marker.timeMs - current);
+    if (dist < nearestMarkerDist) {
+      nearestMarker = marker;
+      nearestMarkerDist = dist;
+    }
+  }
+
+  let nearestBoundaryIndex = -1;
+  let nearestBoundaryDist = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < shots.value.length - 1; index += 1) {
+    const dist = Math.abs(shots.value[index].endMs - current);
+    if (dist < nearestBoundaryDist) {
+      nearestBoundaryIndex = index;
+      nearestBoundaryDist = dist;
+    }
+  }
+
+  const useMarker =
+    nearestMarker !== null &&
+    nearestMarkerDist <= threshold &&
+    nearestMarkerDist <= nearestBoundaryDist;
+  if (useMarker && nearestMarker) {
+    if (await nudgeMarkerByFrame(nearestMarker, direction)) {
+      void seekTo(nearestMarker.timeMs);
+      return;
+    }
+  }
+  if (nearestBoundaryIndex >= 0 && nearestBoundaryDist <= threshold) {
+    await nudgeBoundaryByFrame(nearestBoundaryIndex, direction);
+    return;
+  }
+  void seekTo(current + direction * frameMs);
+}
+
+async function nudgeMarkerByFrame(marker: TimelineMarker, direction: 1 | -1): Promise<boolean> {
+  if (!marker.id.startsWith('still-')) return false;
+  const stillId = marker.id.slice('still-'.length);
+  const fps = player.hasFile ? player.fps : 500 / 21;
+  const frameMs = frameToMs(1, fps);
+  const nextTime = Math.max(
+    0,
+    Math.min(displayDurationMs.value, Math.round(marker.timeMs + direction * frameMs)),
+  );
+  if (demoMode.value) {
+    marker.timeMs = nextTime;
+    return true;
+  }
+  const result = await window.api.still.update({ id: stillId, patch: { timeMs: nextTime } });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return false;
+  }
+  marker.timeMs = result.data.timeMs;
+  const still = projectStills.value.find((item) => item.id === stillId);
+  if (still) still.timeMs = result.data.timeMs;
+  return true;
+}
+
+async function nudgeBoundaryByFrame(index: number, direction: 1 | -1): Promise<void> {
+  const shot = shots.value[index];
+  const next = shots.value[index + 1];
+  if (!shot || !next) {
+    void seekTo(displayTimeMs.value + direction * frameToMs(1, player.hasFile ? player.fps : 500 / 21));
+    return;
+  }
+  const fps = player.hasFile ? player.fps : 500 / 21;
+  const frameMs = frameToMs(1, fps);
+  const nextTime = Math.max(shot.startMs + 1, Math.min(next.endMs - 1, Math.round(shot.endMs + direction * frameMs)));
+  const change: BoundaryChange = { index, timeMs: nextTime };
+  updateBoundary(change);
+  await commitBoundary(change);
+  void seekTo(nextTime);
+}
+
+function handleJKey(): void {
+  // libmpv 未接负速：J 回退为逐帧后退；按住靠系统 key repeat 连续。
+  if (!player.hasFile) return;
+  void stepFrame(-1);
+}
+
+function handleKKey(): void {
+  if (!player.hasFile || player.paused) return;
+  void togglePlayback();
+}
+
+async function handleLKey(): Promise<void> {
+  if (!player.hasFile) return;
+  const index = PLAYBACK_SPEEDS.indexOf(player.speed);
+  const next = PLAYBACK_SPEEDS[Math.min(index + 1, PLAYBACK_SPEEDS.length - 1)];
+  await handleSetSpeed(next);
+  if (player.paused) await togglePlayback();
+}
+
+function toggleInPoint(): void {
+  inPointMs.value = inPointMs.value === null ? Math.round(displayTimeMs.value) : null;
+}
+
+function toggleOutPoint(): void {
+  outPointMs.value = outPointMs.value === null ? Math.round(displayTimeMs.value) : null;
 }
 
 async function seekTo(timeMs: number): Promise<void> {
@@ -1722,6 +1911,7 @@ async function loadSettings(): Promise<void> {
   const result = await window.api.settings.get();
   if (result.ok) {
     settings.value = result.data;
+    timelineSettings.value = result.data.timeline ?? { trackHeight: 96, pxPerSecond: 96 };
   } else {
     settingsError.value = result.error.message;
     console.warn(`[settings] ${result.error.code} ${result.error.message}`);
@@ -2117,6 +2307,40 @@ function handleKeydown(event: KeyboardEvent): void {
     cyclePlaybackSpeed(event.key === ']' ? 1 : -1);
     return;
   }
+  if (
+    !event.ctrlKey &&
+    !event.metaKey &&
+    (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '_')
+  ) {
+    event.preventDefault();
+    stepPxPerSecond(event.key === '-' || event.key === '_' ? -1 : 1);
+    return;
+  }
+  if (event.key.toLowerCase() === 'j' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    handleJKey();
+    return;
+  }
+  if (event.key.toLowerCase() === 'k' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    handleKKey();
+    return;
+  }
+  if (event.key.toLowerCase() === 'l' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    void handleLKey();
+    return;
+  }
+  if (event.key.toLowerCase() === 'i' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    toggleInPoint();
+    return;
+  }
+  if (event.key.toLowerCase() === 'o' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    toggleOutPoint();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
     event.preventDefault();
     const step = event.shiftKey ? 0.1 : 0.01;
@@ -2137,13 +2361,7 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
     if (shots.value.length === 0) return;
     event.preventDefault();
-    const currentIndex = Math.max(0, shots.value.findIndex((shot) => shot.id === selectedId.value));
-    const delta = event.key === 'ArrowDown' ? 1 : -1;
-    const nextIndex = Math.max(0, Math.min(shots.value.length - 1, currentIndex + delta));
-    const nextShot = shots.value[nextIndex];
-    if (nextShot) {
-      void selectShot(nextShot);
-    }
+    jumpToAdjacentPoint(event.key === 'ArrowDown' ? 1 : -1);
     return;
   }
   if (event.key === 'Enter' && selectedShot.value) {
@@ -2154,7 +2372,7 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
     event.preventDefault();
     const dir: 1 | -1 = event.key === 'ArrowLeft' ? -1 : 1;
-    if (event.shiftKey) void seekTo(displayTimeMs.value + dir * 1000);
+    if (event.shiftKey) void nudgeSelectedByFrame(dir);
     else void stepFrame(dir);
   }
 }
@@ -2313,6 +2531,7 @@ onBeforeUnmount(() => {
   if (gpuPollTimer) clearInterval(gpuPollTimer);
   stopDetectionPolling();
   audioGeneration += 1;
+  if (timelinePersistTimer) clearTimeout(timelinePersistTimer);
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
 });
 </script>
@@ -2425,6 +2644,10 @@ onBeforeUnmount(() => {
         :busy="busy"
         :audio-waveform="audioWaveform"
         :audio-loading="audioLoading"
+        :track-height="timelineSettings.trackHeight"
+        :px-per-second="timelineSettings.pxPerSecond"
+        :in-point-ms="inPointMs"
+        :out-point-ms="outPointMs"
         @open="openVideo"
         @toggle="togglePlayback"
         @step="stepFrame"
@@ -2438,6 +2661,8 @@ onBeforeUnmount(() => {
         @set-volume="handleSetVolume"
         @set-speed="handleSetSpeed"
         @toggle-mute="handleToggleMute"
+        @update-track-height="onTrackHeightChange"
+        @update-px-per-second="onPxPerSecondChange"
       />
 
       <ShotDetailPanel

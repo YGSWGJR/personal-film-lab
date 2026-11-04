@@ -12,6 +12,28 @@ export interface AppInfo {
 
 export type ProxyTier = '360p' | '540p' | '720p';
 
+/** 时间线轨道缩放档位（S36-3）：轨道高度 px 与横向密度 px/s。 */
+export interface TimelineSettings {
+  trackHeight: number;
+  pxPerSecond: number;
+}
+
+/** S36-3a：轨道高度 5 档（px）。 */
+export const TRACK_HEIGHT_LEVELS: readonly number[] = [48, 96, 144, 192, 240];
+
+/** S36-3b：横向时间密度 6 档（px/s）。 */
+export const PX_PER_SEC_LEVELS: readonly number[] = [24, 48, 96, 192, 384, 768];
+
+/** 将任意值吸附到最近档位（纯函数，供时间线组件与主进程设置规范化共用）。 */
+export function snapToLevel(value: number, levels: readonly number[]): number {
+  if (levels.length === 0) return value;
+  let nearest = levels[0];
+  for (const level of levels) {
+    if (Math.abs(level - value) < Math.abs(nearest - value)) nearest = level;
+  }
+  return nearest;
+}
+
 export interface Settings {
   dataRoot: string;
   cacheDir: string;
@@ -30,6 +52,8 @@ export interface Settings {
   proxyTier?: ProxyTier;
   /** 删除用户内容（镜头/静帧/标签/术语）前是否二次确认，默认 true（S36-1） */
   confirmUserContent?: boolean;
+  /** 时间线轨道缩放（S36-3），缺省走 defaultSettings 默认档 */
+  timeline?: TimelineSettings;
 }
 
 export interface SettingsSetArgs {
@@ -46,6 +70,8 @@ export interface SettingsSetArgs {
   proxyTier?: ProxyTier;
   /** 删除用户内容前是否二次确认，缺省 true（S36-1） */
   confirmUserContent?: boolean;
+  /** 时间线轨道缩放（S36-3），缺省走 defaultSettings 默认档 */
+  timeline?: TimelineSettings;
 }
 
 export interface SettingsChooseDirectoryArgs {

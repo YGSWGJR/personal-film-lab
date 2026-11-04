@@ -6,8 +6,14 @@ import type {
   Settings,
   SettingsChooseDirectoryArgs,
   SettingsSetArgs,
+  TimelineSettings,
 } from '../../shared/types';
-import { defaultSettings, environmentDataRoot } from '../paths';
+import {
+  PX_PER_SEC_LEVELS,
+  TRACK_HEIGHT_LEVELS,
+  snapToLevel,
+} from '../../shared/types';
+import { defaultSettings, defaultTimelineSettings, environmentDataRoot } from '../paths';
 
 const SETTINGS_PATH_FIELDS = [
   'dataRoot',
@@ -57,6 +63,7 @@ export class SettingsService {
         stillDir: join(envRoot, 'projects'),
         proxyTier: '540p',
         confirmUserContent: this.stored?.confirmUserContent ?? true,
+        timeline: this.stored?.timeline ?? defaultTimelineSettings(),
         settingsPath: this.settingsPath,
         environmentOverride: true,
       };
@@ -76,7 +83,9 @@ export class SettingsService {
       );
     }
     const current = this.get();
-    const normalized = normalizeSettings(args);
+    // 设置面板只提交路径/代理/删除确认等键，不含 timeline；
+    // 这里用当前已存值兜底，避免保存设置时把时间线档位重置为默认。
+    const normalized = normalizeSettings(args, this.stored?.timeline);
     for (const key of SETTINGS_PATH_FIELDS) {
       const path = normalized[key];
       if (path) mkdirSync(path, { recursive: true });
@@ -171,14 +180,19 @@ export function verifyStoredSettings(
     return (
       SETTINGS_PATH_FIELDS.every((key) => stored[key] === expected[key]) &&
       stored.proxyTier === expected.proxyTier &&
-      stored.confirmUserContent === expected.confirmUserContent
+      stored.confirmUserContent === expected.confirmUserContent &&
+      stored.timeline?.trackHeight === expected.timeline?.trackHeight &&
+      stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond
     );
   } catch {
     return false;
   }
 }
 
-function normalizeSettings(args: SettingsSetArgs): SettingsSetArgs {
+function normalizeSettings(
+  args: SettingsSetArgs,
+  fallbackTimeline?: TimelineSettings,
+): SettingsSetArgs {
   return {
     dataRoot: normalizePath(args.dataRoot),
     cacheDir: normalizePath(args.cacheDir),
@@ -192,7 +206,19 @@ function normalizeSettings(args: SettingsSetArgs): SettingsSetArgs {
     stillSubDir: normalizeOptionalPath(args.stillSubDir),
     proxyTier: args.proxyTier ?? '540p',
     confirmUserContent: args.confirmUserContent ?? true,
+    timeline: normalizeTimeline(args.timeline ?? fallbackTimeline),
   };
+}
+
+function normalizeTimeline(value: TimelineSettings | undefined): TimelineSettings {
+  const source = value ?? defaultTimelineSettings();
+  const trackHeight = Number.isFinite(source.trackHeight) && source.trackHeight > 0
+    ? snapToLevel(source.trackHeight, TRACK_HEIGHT_LEVELS)
+    : defaultTimelineSettings().trackHeight;
+  const pxPerSecond = Number.isFinite(source.pxPerSecond) && source.pxPerSecond > 0
+    ? snapToLevel(source.pxPerSecond, PX_PER_SEC_LEVELS)
+    : defaultTimelineSettings().pxPerSecond;
+  return { trackHeight, pxPerSecond };
 }
 
 function normalizeOptionalPath(value: string | undefined): string | undefined {

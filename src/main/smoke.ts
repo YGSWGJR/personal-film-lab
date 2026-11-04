@@ -8,6 +8,7 @@ import { removeProjectDir, removeProjectFiles } from '../data/paths';
 import { IPC } from '../shared/ipc-channels';
 import { withEnvelope } from '../shared/ipc-result';
 import type { WorkspaceState } from '../shared/types';
+import { formatTimecodeFF, frameFromMs, frameToMs, parseTimecodeFF } from '../shared/time';
 import { resolveDetectFramesDir } from './paths';
 import type { PlayerService } from './player/player-service';
 import { SessionService } from './session/session-service';
@@ -55,12 +56,14 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
   let overlayLayerChecks: Record<string, unknown> = {};
   let detectionClickChecks: Record<string, unknown> = {};
   let deleteUiChecks: Record<string, unknown> = {};
+  let timelineChecks: Record<string, unknown> = {};
+  let frameChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -254,6 +257,16 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       Object.assign(checks, deleteUiChecksAssertions(deleteUiChecks));
     }
 
+    if (process.env['SMOKE_TIMELINE'] === '1') {
+      timelineChecks = await runTimelineChecks(win);
+      Object.assign(checks, timelineChecksAssertions(timelineChecks));
+    }
+
+    if (process.env['SMOKE_FRAME'] === '1') {
+      frameChecks = await runFrameChecks(win, process.env['SMOKE_VIDEO'] ?? '');
+      Object.assign(checks, frameChecksAssertions(frameChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -267,7 +280,7 @@ export async function runSmokeTest(win: BrowserWindow, _deps: SmokeDeps): Promis
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, frameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -2334,4 +2347,120 @@ async function runPlayerChecks(win: BrowserWindow, videoPath: string): Promise<R
     })()
   `;
   return (await win.webContents.executeJavaScript(script)) as Record<string, any>;
+}
+
+function timelineChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    timelineSettingsGet: result.getOk === true,
+    timelinePersistHigh: result.set144_192 === true,
+    timelinePersistLow: result.set48_24 === true,
+    timelineSnap: result.snapOk === true,
+    timelineRestore: result.restoreOk === true && result.restoreValueOk === true,
+  };
+}
+
+async function runTimelineChecks(win: BrowserWindow): Promise<Record<string, any>> {
+  const script = `
+    (async () => {
+      const out = {};
+      try {
+        const initial = await window.api.settings.get();
+        out.getOk = initial.ok === true && Boolean(initial.data && initial.data.timeline);
+        out.initialTimeline = initial.ok && initial.data.timeline ? initial.data.timeline : null;
+        if (!initial.ok) return out;
+        if (initial.data.environmentOverride) { out.locked = true; return out; }
+        const original = initial.data.timeline ?? { trackHeight: 96, pxPerSecond: 96 };
+        const base = initial.data;
+        const setAndRead = async (timeline) => {
+          const setResult = await window.api.settings.set({ ...base, timeline });
+          const read = await window.api.settings.get();
+          return {
+            setOk: setResult.ok === true,
+            read,
+          };
+        };
+        const a = await setAndRead({ trackHeight: 144, pxPerSecond: 192 });
+        out.set144_192 = a.setOk
+          && a.read.ok
+          && a.read.data.timeline.trackHeight === 144
+          && a.read.data.timeline.pxPerSecond === 192;
+        const b = await setAndRead({ trackHeight: 48, pxPerSecond: 24 });
+        out.set48_24 = b.setOk
+          && b.read.ok
+          && b.read.data.timeline.trackHeight === 48
+          && b.read.data.timeline.pxPerSecond === 24;
+        const c = await setAndRead({ trackHeight: 100, pxPerSecond: 100 });
+        out.snapOk = c.setOk
+          && c.read.ok
+          && c.read.data.timeline.trackHeight === 96
+          && c.read.data.timeline.pxPerSecond === 96;
+        const restore = await window.api.settings.set({ ...base, timeline: original });
+        out.restoreOk = restore.ok === true;
+        const finalRead = await window.api.settings.get();
+        out.restoreValueOk = finalRead.ok
+          && finalRead.data.timeline.trackHeight === original.trackHeight
+          && finalRead.data.timeline.pxPerSecond === original.pxPerSecond;
+        return out;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()
+  `;
+  return (await win.webContents.executeJavaScript(script)) as Record<string, any>;
+}
+
+function frameChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  const assertions: Record<string, boolean> = {
+    frameTimecode: result.formatFrame0 === true && result.formatFrame1s === true,
+    frameRoundCaliber: result.frameRound === true,
+    frameToMsTool: result.frameToMs === true,
+    frameInputParse:
+      result.parseFrameNumber === true &&
+      result.parseTc === true &&
+      result.parseTcRound === true,
+  };
+  if (result.frameMatch !== undefined) assertions.framePrecision = result.frameMatch === true;
+  if (result.inputFrameOk !== undefined) assertions.frameInputSeek = result.inputFrameOk === true;
+  return assertions;
+}
+
+async function runFrameChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  const fps = 24;
+  out.formatFrame0 = formatTimecodeFF(0, fps) === '00:00:00:00';
+  out.formatFrame1s = formatTimecodeFF(1000, fps) === '00:00:01:00';
+  out.frameRound =
+    frameFromMs(0, fps) === 0 && frameFromMs(41, fps) === 1 && frameFromMs(1000, fps) === 24;
+  out.frameToMs = frameToMs(1, 24) === 42 && frameToMs(100, 25) === 4000;
+  out.parseFrameNumber = parseTimecodeFF('100', 25) === 4000;
+  out.parseTc = parseTimecodeFF('00:00:01:00', 24) === 1000;
+  out.parseTcRound = parseTimecodeFF('00:00:00:23', 24) === 958;
+
+  if (videoPath) {
+    const script = `
+      (async () => {
+        const o = {};
+        try {
+          const open = await window.api.player.open({ mediaPath: ${JSON.stringify(videoPath)} });
+          if (!open.ok) { o.openError = open.error; return o; }
+          const seek = await window.api.player.seek({ timeMs: 2000 });
+          const frame = await window.api.player.getFrame();
+          if (!frame.ok) { o.frameError = frame.error; return o; }
+          const expected = Math.round((frame.data.timeMs / 1000) * frame.data.fps);
+          o.frameMatch = frame.data.frame === expected;
+          const targetMs = Math.round((120 / frame.data.fps) * 1000);
+          await window.api.player.seek({ timeMs: targetMs });
+          const after = await window.api.player.getFrame();
+          o.inputFrameOk = after.ok === true && after.data.frame === 120;
+          return o;
+        } catch (error) {
+          o.exception = String(error && error.stack ? error.stack : error);
+          return o;
+        }
+      })()
+    `;
+    Object.assign(out, await win.webContents.executeJavaScript(script));
+  }
+  return out;
 }
