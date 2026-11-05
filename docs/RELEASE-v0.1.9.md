@@ -7,10 +7,10 @@
 
 发布资产包含：
 
-- `个人拉片工作台 Setup 0.1.9.exe`
-- `个人拉片工作台卸载工具-0.1.9.exe`
-- `个人拉片工作台使用说明-v0.1.9.docx`
-- `个人拉片工作台-0.1.9-local-ai.7z.part.001` 等分卷
+- `PersonalFilmLab-Setup-0.1.9.exe`
+- `PersonalFilmLab-Uninstaller-0.1.9.exe`
+- `PersonalFilmLab-User-Guide-0.1.9.docx`
+- `PersonalFilmLab-local-ai-0.1.9.7z.part.001` 等分卷
 - `SHA256SUMS.txt`
 
 可使用脚本一次下载、合并分卷并校验：
@@ -32,6 +32,8 @@
 | 使用说明 0.1.9 | `F68ADBD95E543D81C5F5B9D80981CA1AC52C1824DC500F9C69B115AF240DD14F` |
 
 `local-ai.7z` 共 7 个分卷，每个不超过 1.7 GiB。下载脚本会按编号合并并以表中哈希校验最终文件。
+
+发布资产采用 ASCII 文件名，避免 GitHub 对中文文件名的清洗。下载脚本会恢复安装器所需的本地中文文件名。
 
 ## 修复
 

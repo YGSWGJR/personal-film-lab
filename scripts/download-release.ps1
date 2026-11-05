@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [string]$Tag = "v0.1.9",
   [string]$Destination = ".\downloads"
@@ -13,26 +13,27 @@ $release = Invoke-RestMethod -Uri $releaseUri -Headers @{ "User-Agent" = "Person
 $Destination = [System.IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 
-$wantedNames = @(
-  "个人拉片工作台 Setup 0.1.9.exe",
-  "个人拉片工作台卸载工具-0.1.9.exe",
-  "个人拉片工作台使用说明-v0.1.9.docx",
-  "个人拉片工作台-0.1.9-安装说明.txt",
-  "SHA256SUMS.txt"
+$downloads = @(
+  @{ Asset = "PersonalFilmLab-Setup-0.1.9.exe"; Local = "个人拉片工作台 Setup 0.1.9.exe" },
+  @{ Asset = "PersonalFilmLab-Uninstaller-0.1.9.exe"; Local = "个人拉片工作台卸载工具-0.1.9.exe" },
+  @{ Asset = "PersonalFilmLab-User-Guide-0.1.9.docx"; Local = "个人拉片工作台使用说明-0.1.9.docx" },
+  @{ Asset = "PersonalFilmLab-0.1.9-Install-zh-CN.txt"; Local = "个人拉片工作台-0.1.9-安装说明.txt" },
+  @{ Asset = "SHA256SUMS.txt"; Local = "SHA256SUMS.txt" }
 )
 
-foreach ($name in $wantedNames) {
-  $asset = $release.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+foreach ($entry in $downloads) {
+  $asset = $release.assets | Where-Object { $_.name -eq $entry.Asset } | Select-Object -First 1
   if (-not $asset) {
-    Write-Warning "发布中未找到：$name"
+    Write-Warning "发布中未找到：$($entry.Asset)"
     continue
   }
-  $target = Join-Path $Destination $name
-  Write-Host "下载 $name"
+  $target = Join-Path $Destination $entry.Local
+  Write-Host "下载 $($entry.Asset)"
   Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing
 }
 
-$parts = @($release.assets | Where-Object { $_.name -match '^个人拉片工作台-0\.1\.9-local-ai\.7z\.part\.\d{3}$' } | Sort-Object name)
+$parts = @($release.assets | Where-Object { $_.name -match '^PersonalFilmLab-local-ai-0\.1\.9\.7z\.part\.\d{3}$' } | Sort-Object name)
+$localArchiveName = "个人拉片工作台-0.1.9-local-ai.7z"
 if ($parts.Count -gt 0) {
   $localParts = @()
   foreach ($part in $parts) {
@@ -42,7 +43,7 @@ if ($parts.Count -gt 0) {
     $localParts += $target
   }
 
-  $archive = Join-Path $Destination "个人拉片工作台-0.1.9-local-ai.7z"
+  $archive = Join-Path $Destination $localArchiveName
   if (Test-Path -LiteralPath $archive) {
     Remove-Item -LiteralPath $archive -Force
   }
@@ -60,9 +61,9 @@ if ($parts.Count -gt 0) {
     $output.Dispose()
   }
 } else {
-  $single = $release.assets | Where-Object { $_.name -eq "个人拉片工作台-0.1.9-local-ai.7z" } | Select-Object -First 1
+  $single = $release.assets | Where-Object { $_.name -eq "PersonalFilmLab-local-ai-$Tag.7z" } | Select-Object -First 1
   if ($single) {
-    Invoke-WebRequest -Uri $single.browser_download_url -OutFile (Join-Path $Destination $single.name) -UseBasicParsing
+    Invoke-WebRequest -Uri $single.browser_download_url -OutFile (Join-Path $Destination $localArchiveName) -UseBasicParsing
   } else {
     Write-Warning "发布中未找到本地 AI 资源包或分卷。"
   }
@@ -75,11 +76,12 @@ if (Test-Path -LiteralPath $checksums) {
     if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+)$') {
       $expected = $matches[1].ToUpperInvariant()
       $file = Join-Path $Destination $matches[2].Trim()
-      if (Test-Path -LiteralPath $file) {
-        $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-        if ($actual -ne $expected) {
-          throw "SHA-256 校验失败：$file"
-        }
+      if (-not (Test-Path -LiteralPath $file)) {
+        throw "校验清单中的文件不存在：$file"
+      }
+      $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+      if ($actual -ne $expected) {
+        throw "SHA-256 校验失败：$file"
       }
     }
   }

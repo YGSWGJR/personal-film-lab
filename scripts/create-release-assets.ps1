@@ -28,17 +28,18 @@ foreach ($path in @($LocalAiArchive, $SetupPath, $UninstallerPath, $ManualPath, 
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $outputFiles = @(
-  (Join-Path $OutputDir "个人拉片工作台 Setup $Version.exe"),
-  (Join-Path $OutputDir "个人拉片工作台卸载工具-$Version.exe"),
-  (Join-Path $OutputDir "个人拉片工作台使用说明-$Version.docx"),
-  (Join-Path $OutputDir "个人拉片工作台-$Version-安装说明.txt")
+  (Join-Path $OutputDir "PersonalFilmLab-Setup-$Version.exe"),
+  (Join-Path $OutputDir "PersonalFilmLab-Uninstaller-$Version.exe"),
+  (Join-Path $OutputDir "PersonalFilmLab-User-Guide-$Version.docx"),
+  (Join-Path $OutputDir "PersonalFilmLab-$Version-Install-zh-CN.txt")
 )
 Copy-Item -LiteralPath $SetupPath -Destination $outputFiles[0] -Force
 Copy-Item -LiteralPath $UninstallerPath -Destination $outputFiles[1] -Force
 Copy-Item -LiteralPath $ManualPath -Destination $outputFiles[2] -Force
 Copy-Item -LiteralPath $InstallNotePath -Destination $outputFiles[3] -Force
 
-$localAiName = "个人拉片工作台-$Version-local-ai.7z"
+$localAiName = "PersonalFilmLab-local-ai-$Version.7z"
+$localAiLocalName = "个人拉片工作台-$Version-local-ai.7z"
 $chunkSize = [int64]$PartSizeMiB * 1MB
 $input = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($LocalAiArchive))
 try {
@@ -67,14 +68,20 @@ try {
   $input.Dispose()
 }
 
+$localNames = @(
+  "个人拉片工作台 Setup $Version.exe",
+  "个人拉片工作台卸载工具-$Version.exe",
+  "个人拉片工作台使用说明-$Version.docx",
+  "个人拉片工作台-$Version-安装说明.txt"
+)
 $checksumLines = @()
-foreach ($file in $outputFiles) {
-  $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-  $checksumLines += "$hash  $([System.IO.Path]::GetFileName($file))"
+for ($index = 0; $index -lt $outputFiles.Count; $index += 1) {
+  $hash = (Get-FileHash -LiteralPath $outputFiles[$index] -Algorithm SHA256).Hash
+  $checksumLines += "$hash  $($localNames[$index])"
 }
 $localAiHash = (Get-FileHash -LiteralPath $LocalAiArchive -Algorithm SHA256).Hash
-$checksumLines += "$localAiHash  $localAiName"
-$checksumLines += "# $localAiName 由发布页中的 .part.001、.part.002 等分卷按名称顺序合并得到。"
+$checksumLines += "$localAiHash  $localAiLocalName"
+$checksumLines += "# $localAiLocalName 由发布页中的 .part.001、.part.002 等分卷按名称顺序合并得到。"
 [System.IO.File]::WriteAllLines(
   (Join-Path $OutputDir "SHA256SUMS.txt"),
   $checksumLines,
