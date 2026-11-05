@@ -1,5 +1,27 @@
 # 个人拉片工作台 v0.1.9
 
+本版本同时作为公开开源发布：原创源码采用 MIT License，使用手册、完整功能清单、
+开发指南、第三方许可说明和运行时资源准备脚本均已加入仓库。
+
+## 下载与校验
+
+发布资产包含：
+
+- `个人拉片工作台 Setup 0.1.9.exe`
+- `个人拉片工作台卸载工具-0.1.9.exe`
+- `个人拉片工作台使用说明-v0.1.9.docx`
+- `个人拉片工作台-0.1.9-local-ai.7z.part.001` 等分卷
+- `SHA256SUMS.txt`
+
+可使用脚本一次下载、合并分卷并校验：
+
+```powershell
+.\scripts\download-release.ps1 -Tag v0.1.9 -Destination .\downloads
+```
+
+将 `个人拉片工作台 Setup 0.1.9.exe` 与合并后的
+`个人拉片工作台-0.1.9-local-ai.7z` 放在同一目录后运行 Setup。
+
 ## 修复
 
 - 修复项目包含内置标签时，保存项目包触发 `SQLITE_CONSTRAINT_UNIQUE` 的问题。

@@ -1,5 +1,8 @@
 # 人工智能工具协作规范（AI Collaboration Guide）
 
+> 本文保留 2026-10-25 的三方 AI 协作历史记录。当前公开贡献流程、构建命令和代码边界请优先阅读
+> [`CONTRIBUTING.md`](CONTRIBUTING.md)；当前架构以 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 和源码为准。
+
 本文件是**当前三方协作体系的唯一规范**：说明各 AI 工具的角色、任务编号体系、文件所有权、
 产物卫生硬规则与协作流程。历史阶段（S01–S25）的说明保留在文末「历史阶段」小节。
 

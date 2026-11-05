@@ -1675,10 +1675,6 @@ async function openDetection(): Promise<void> {
   void startDetection();
 }
 
-function showUrlImportPending(): void {
-  showToast('B 站 / YouTube 链接导入将在后续版本接入，当前请使用本地文件。');
-}
-
 function openImportWizard(
   mode: 'startup' | 'session' | 'settings',
   sources: CandidateSource[],
@@ -2698,10 +2694,6 @@ onBeforeUnmount(() => {
         <button class="nav-item primary" type="button" :disabled="busy" @click="openVideo">
           <AppIcon name="folder" :size="16" />
           导入影片
-        </button>
-        <button class="nav-item" type="button" @click="showUrlImportPending">
-          <AppIcon name="link" :size="15" />
-          链接导入
         </button>
         <button class="nav-item" type="button" @click="toggleDemoWorkspace">
           {{ demoMode ? '最近项目' : '示例模式' }}
