@@ -5,6 +5,9 @@ import { dirname, join } from 'node:path';
 import type { DataLayer } from '../../data/db';
 import { ensureProjectDirs } from '../../data/paths';
 import type {
+  BoundaryAppliedEvent,
+  BoundaryAppliedResult,
+  BoundaryDetectRunArgs,
   DetectApplyArgs,
   DetectApplyResult,
   DetectDoneEvent,
@@ -12,15 +15,23 @@ import type {
   DetectJobSnapshot,
   DetectJobStatus,
   DetectOptions,
+  DetectPipeline,
   DetectProgressEvent,
   DetectResult,
   DetectRunArgs,
   DetectRunResult,
   DetectWeights,
+  LabelApplyArgs,
+  LabelApplyResult,
+  LabelDetectRunArgs,
+  LabelPreviewResult,
+  LabelShotPrediction,
+  LabelsDoneEvent,
   Project,
   RecognitionEngine,
   Scene,
   Settings,
+  Shot,
   ShotBoundaryEngine,
   ShotDetectionUsage,
   ShotPreview,
@@ -45,6 +56,7 @@ interface InternalDetectJob {
   jobId: string;
   projectId: string;
   engine: RecognitionEngine;
+  pipeline: DetectPipeline;
   status: DetectJobStatus;
   progress: number;
   error: string | null;
@@ -58,6 +70,13 @@ interface InternalDetectJob {
   boundaryEngine: ShotBoundaryEngine | null;
   boundaryFallback: boolean;
   boundaryWarning: string | null;
+  applied?: number;
+}
+
+/** S41：标签预览缓存（几何版本快照用于应用时校验 stale） */
+interface LabelPreviewEntry {
+  preview: LabelPreviewResult;
+  geometry: Map<string, { startMs: number; endMs: number }>;
 }
 
 interface AiDetectDeps {
@@ -94,31 +113,29 @@ interface ResolvedBoundaryPlan {
 }
 
 /**
- * DetectService（S01 §5.4 / §8.2）：
- * MediaService 抽帧 → Python JSON-RPC 分析 → 预览结果缓存 → 用户确认后写库。
+ * DetectService（S01 §5.4 / §8.2；S41 分阶段改造）：
+ * 边界任务：抽帧 → Python 边界分析 → 缩略图 → 事务化落库 → boundary-applied 事件。
+ * 标签任务：读取已落库镜头 → 代表帧 → Qwen 分析 → 预览缓存 → 用户按策略应用。
  */
 export class DetectService {
   private readonly jobs = new Map<string, InternalDetectJob>();
   private readonly latestByProject = new Map<string, DetectResult>();
+  private readonly labelPreviews = new Map<string, LabelPreviewEntry>();
 
   constructor(
     private readonly data: DataLayer,
     private readonly media: MediaService,
     private readonly emitProgress: (event: DetectProgressEvent) => void,
     private readonly emitDone: (event: DetectDoneEvent) => void,
+    private readonly emitBoundaryApplied: (event: BoundaryAppliedEvent) => void,
+    private readonly emitLabelsDone: (event: LabelsDoneEvent) => void,
     private readonly ai?: AiDetectDeps,
     private readonly localVision?: LocalVisionService,
   ) {}
 
   run(args: DetectRunArgs): DetectRunResult {
     const project = getDetectProject(this.data, args.projectId);
-    for (const job of this.jobs.values()) {
-      if (job.projectId === args.projectId && job.status === 'running') {
-        throw new DetectError('DETECT_ALREADY_RUNNING', '该项目已有检测任务正在运行', {
-          jobId: job.jobId,
-        });
-      }
-    }
+    this.assertNoRunningJob(args.projectId);
     const engine: RecognitionEngine =
       args.options.engine ?? this.ai?.getSettings().recognition?.engine ?? 'ai';
     if (engine === 'ai') {
@@ -133,11 +150,95 @@ export class DetectService {
     }
     const options = normalizeOptions(args.options);
 
+    const job = this.createJob(args.projectId, engine, engine === 'ai' ? 'labels' : 'boundary');
+    void this.runJob(job, options, { dryRun: Boolean(args.dryRun), annotate: engine === 'ai' });
+    return { jobId: job.jobId };
+  }
+
+  /**
+   * S41 边界任务：只做 TransNetV2/OpenCV 切分 + 缩略图，完成后事务化落库并自动应用。
+   * 不调用 Qwen；Qwen 缺失与否不影响本任务。
+   */
+  runBoundary(args: BoundaryDetectRunArgs): DetectRunResult {
+    const project = getDetectProject(this.data, args.projectId);
+    this.assertNoRunningJob(args.projectId);
+    resolveDetectSource(project);
+    const options = normalizeOptions(args.options);
+    const job = this.createJob(args.projectId, 'opencv', 'boundary');
+    void this.runJob(job, options, { dryRun: false, annotate: false, autoApply: true });
+    return { jobId: job.jobId };
+  }
+
+  /** S41 标签任务：对已落库镜头做 Qwen 识别，仅生成预览，不写库。 */
+  runLabels(args: LabelDetectRunArgs): DetectRunResult {
+    getDetectProject(this.data, args.projectId);
+    this.assertNoRunningJob(args.projectId);
+    if (!this.localVision) {
+      throw new DetectError('LABEL_ENGINE_DISABLED', '本地视觉识别服务尚未初始化');
+    }
+    const settings = this.ai?.getSettings();
+    if (settings?.recognition?.engine && settings.recognition.engine !== 'ai') {
+      throw new DetectError('LABEL_ENGINE_DISABLED', '识别引擎未启用 AI 模式');
+    }
+    if (settings?.ai?.enabled === false) {
+      throw new DetectError('LABEL_ENGINE_DISABLED', '本地视觉识别已在设置中关闭');
+    }
+    const allShots = this.data.shots.list(args.projectId);
+    const shots =
+      args.shotIds && args.shotIds.length > 0
+        ? allShots.filter((shot) => args.shotIds?.includes(shot.id))
+        : allShots;
+    if (shots.length === 0) {
+      throw new DetectError('LABEL_SHOTS_EMPTY', '当前项目没有可识别的镜头', {
+        projectId: args.projectId,
+      });
+    }
+    const job = this.createJob(args.projectId, 'ai', 'labels');
+    void this.runLabelJob(job, shots);
+    return { jobId: job.jobId };
+  }
+
+  /** S41：按策略应用标签预览（唯一写库入口）。 */
+  applyLabels(args: LabelApplyArgs): LabelApplyResult {
+    const entry = this.labelPreviews.get(args.jobId);
+    if (!entry) {
+      throw new DetectError('LABEL_PREVIEW_NOT_FOUND', `标签预览不存在或已失效：${args.jobId}`, {
+        jobId: args.jobId,
+      });
+    }
+    if (!args.shotIds || args.shotIds.length === 0) {
+      throw new DetectError('LABEL_APPLY_EMPTY', '没有选择要应用的镜头', { jobId: args.jobId });
+    }
+    const selectedIds = new Set(args.shotIds);
+    const predictions = entry.preview.shots.filter((prediction) => selectedIds.has(prediction.shotId));
+    if (predictions.length !== selectedIds.size) {
+      throw new DetectError('LABEL_PREVIEW_STALE', '部分预览镜头已失效，请重新识别', {
+        jobId: args.jobId,
+      });
+    }
+    const result = this.data.shots.applyLabelUpdates(
+      entry.preview.projectId,
+      predictions.map((prediction) => ({
+        shotId: prediction.shotId,
+        startMs: prediction.startMs,
+        endMs: prediction.endMs,
+        shotSize: prediction.predicted.shotSize,
+        cameraMethod: prediction.predicted.cameraMethod,
+        remark: prediction.predicted.remark,
+        tags: prediction.predicted.tags,
+      })),
+      args.policy,
+    );
+    return result;
+  }
+
+  private createJob(projectId: string, engine: RecognitionEngine, pipeline: DetectPipeline): InternalDetectJob {
     const jobId = `detect-${randomUUID()}`;
     const job: InternalDetectJob = {
       jobId,
-      projectId: args.projectId,
+      projectId,
       engine,
+      pipeline,
       status: 'queued',
       progress: 0,
       error: null,
@@ -153,8 +254,17 @@ export class DetectService {
       boundaryWarning: null,
     };
     this.jobs.set(jobId, job);
-    void this.runJob(job, options, Boolean(args.dryRun));
-    return { jobId };
+    return job;
+  }
+
+  private assertNoRunningJob(projectId: string): void {
+    for (const job of this.jobs.values()) {
+      if (job.projectId === projectId && job.status === 'running') {
+        throw new DetectError('DETECT_ALREADY_RUNNING', '该项目已有检测任务正在运行', {
+          jobId: job.jobId,
+        });
+      }
+    }
   }
 
   cancel(jobId: string): void {
@@ -179,6 +289,8 @@ export class DetectService {
       progress: job.progress,
       error: job.error,
       engine: job.engine,
+      pipeline: job.pipeline,
+      applied: job.applied,
       currentSegment: job.currentSegment,
       segmentsTotal: job.segmentsTotal,
       usage: job.usage ?? undefined,
@@ -237,7 +349,7 @@ export class DetectService {
     if (selectedSceneIds && selectedScenes.length !== selectedSceneIds.size) {
       throw new DetectError('DETECT_PREVIEW_STALE', '部分预览场景已失效，请重新检测');
     }
-    const applied = this.data.shots.applyDetected(projectId, selectedShots);
+    const { applied } = this.data.shots.applyDetected(projectId, selectedShots);
     this.data.scenes.replace(
       projectId,
       selectedScenes.map((scene, index) => ({ ...scene, index: index + 1 })),
@@ -280,15 +392,15 @@ export class DetectService {
   private async runJob(
     job: InternalDetectJob,
     options: ResolvedDetectOptions,
-    dryRun: boolean,
+    opts: { dryRun: boolean; annotate: boolean; autoApply?: boolean },
   ): Promise<void> {
-    await this.runOpenCvJob(job, options, dryRun);
+    await this.runOpenCvJob(job, options, opts);
   }
 
   private async runOpenCvJob(
     job: InternalDetectJob,
     options: ResolvedDetectOptions,
-    dryRun: boolean,
+    opts: { dryRun: boolean; annotate: boolean; autoApply?: boolean },
   ): Promise<void> {
     let framesDir: string | null = null;
     try {
@@ -310,7 +422,8 @@ export class DetectService {
       // S37：每个检测 job 独立帧目录，避免旧任务失败/取消后的异步 cleanup
       // 删掉新任务刚抽出的帧（detect000001.jpg 丢失）。
       framesDir = join(resolveDetectFramesDir(project.id), job.jobId);
-      const thumbsDir = join(resolveThumbCacheDir(), project.id);
+      // S41：缩略图按 job 隔离，禁止清空整个项目 thumbs 目录。
+      const thumbsDir = join(resolveThumbCacheDir(), project.id, 'detect', job.jobId);
       const fps = project.media.fps && project.media.fps > 0 ? project.media.fps : 25;
       const durationMs = project.media.durationMs;
       const intervalMs = resolveIntervalMs(options, fps, durationMs);
@@ -386,7 +499,7 @@ export class DetectService {
       const result = this.toPreview(job, project.id, analysis, project.media.durationMs);
       await this.createShotThumbnails(job, project, result.shots, sourcePath, thumbsDir, extraction.frames);
       this.assertActive(job);
-      if (job.engine === 'ai') {
+      if (opts.annotate && job.engine === 'ai') {
         await this.annotateWithLocalVision(job, result.shots, extraction.frames);
       }
       this.assertActive(job);
@@ -394,11 +507,147 @@ export class DetectService {
       job.progress = 100;
       job.result = result;
       this.latestByProject.set(project.id, result);
-      this.emitProgress({ jobId: job.jobId, stage: 'analyze', percent: 100 });
-      this.emitDone({ jobId: job.jobId, result });
-      if (dryRun) {
+      this.emitProgress({ jobId: job.jobId, stage: 'analyze', percent: 100, pipeline: job.pipeline });
+      if (opts.autoApply) {
+        // S41：切分完成后立即事务化落库，用户无需第二次确认。
+        const { applied, skippedProtected } = this.data.shots.applyDetected(project.id, result.shots);
+        this.data.scenes.replace(
+          project.id,
+          result.scenes.map((scene, index) => ({ ...scene, index: index + 1 })),
+        );
+        job.applied = applied;
+        const appliedResult: BoundaryAppliedResult = {
+          jobId: job.jobId,
+          applied,
+          skippedProtected,
+          shots: this.data.shots.list(project.id),
+          scenes: this.data.scenes.list(project.id),
+          boundaryEngine: job.boundaryEngine ?? options.boundaryEngine,
+          boundaryFallback: job.boundaryFallback,
+          boundaryWarning: job.boundaryWarning,
+        };
+        if (applied === 0 && result.shots.length > 0) {
+          console.warn(
+            `[detect] boundary apply applied=0 skippedProtected=${skippedProtected} (全部候选被人工镜头保护跳过)`,
+          );
+        }
+        this.emitDone({ jobId: job.jobId, result });
+        this.emitBoundaryApplied({ jobId: job.jobId, result: appliedResult });
+      } else {
+        this.emitDone({ jobId: job.jobId, result });
         // 预览仍缓存在内存，供确认后 detect:apply 使用。
       }
+    } catch (error) {
+      if (job.status === 'cancelled' || job.controller.signal.aborted) {
+        job.status = 'cancelled';
+        return;
+      }
+      job.status = 'error';
+      job.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.cleanupDetectFrames(framesDir);
+    }
+  }
+
+  /**
+   * S41 标签任务：读取数据库中真实镜头，逐镜头抽取代表帧后交给 Qwen 分析。
+   * 结果只缓存为预览（含几何版本快照），不写库。
+   */
+  private async runLabelJob(job: InternalDetectJob, shots: Shot[]): Promise<void> {
+    let framesDir: string | null = null;
+    try {
+      job.status = 'running';
+      const project = getDetectProject(this.data, job.projectId);
+      const sourcePath = resolveDetectSource(project);
+      ensureProjectDirs(this.data.dataRoot, project.id);
+      framesDir = join(resolveDetectFramesDir(project.id), job.jobId);
+      mkdirSync(framesDir, { recursive: true });
+      const localVision = this.localVision;
+      if (!localVision) {
+        throw new DetectError('LABEL_ENGINE_DISABLED', '本地视觉识别服务尚未初始化');
+      }
+      const items: Array<{
+        id: string;
+        index: number;
+        startMs: number;
+        endMs: number;
+        imagePath: string;
+      }> = [];
+      for (const shot of shots) {
+        this.assertActive(job);
+        const timeMs = shot.startMs + Math.floor(shot.durationMs / 2);
+        const framePath = join(framesDir, `label-${String(shot.index).padStart(4, '0')}.jpg`);
+        try {
+          await this.media.extractFrame({
+            path: sourcePath,
+            timeMs,
+            outputPath: framePath,
+            format: 'jpg',
+            quality: 6,
+          });
+        } catch (error) {
+          console.warn(
+            `[labels] shot ${shot.id} 代表帧抽取失败，改用缩略图：${(error as Error).message}`,
+          );
+        }
+        const imagePath = existsSync(framePath)
+          ? framePath
+          : (shot.thumbnail ?? null);
+        if (!imagePath || !existsSync(imagePath)) continue;
+        items.push({
+          id: shot.id,
+          index: shot.index,
+          startMs: shot.startMs,
+          endMs: shot.endMs,
+          imagePath,
+        });
+      }
+      if (items.length === 0) {
+        throw new DetectError('LOCAL_AI_IMAGES_MISSING', '没有可用的镜头代表帧');
+      }
+      job.segmentsTotal = items.length;
+      this.setProgress(job, 45, 'analyze');
+      const analyses = await localVision.analyze(items, {
+        signal: job.controller.signal,
+        onProgress: (completed, _total, percent) => {
+          job.currentSegment = completed;
+          this.setProgress(job, 45 + Math.round(percent * 0.5), 'analyze');
+        },
+      });
+      this.assertActive(job);
+      const byId = new Map(analyses.map((analysis) => [analysis.id, analysis]));
+      const geometry = new Map<string, { startMs: number; endMs: number }>();
+      const predictions: LabelShotPrediction[] = [];
+      for (const shot of shots) {
+        geometry.set(shot.id, { startMs: shot.startMs, endMs: shot.endMs });
+        const analysis = byId.get(shot.id);
+        if (!analysis) continue;
+        predictions.push({
+          shotId: shot.id,
+          index: shot.index,
+          startMs: shot.startMs,
+          endMs: shot.endMs,
+          predicted: {
+            shotSize: analysis.shotSize,
+            cameraMethod: analysis.cameraMethod,
+            remark: analysis.remark,
+            tags: analysis.tags,
+          },
+          confidence: analysis.confidence,
+        });
+      }
+      job.currentSegment = analyses.length;
+      const preview: LabelPreviewResult = {
+        jobId: job.jobId,
+        projectId: project.id,
+        shots: predictions,
+      };
+      this.labelPreviews.set(job.jobId, { preview, geometry });
+      job.status = 'done';
+      job.progress = 100;
+      this.setProgress(job, 100, 'analyze');
+      this.emitDone({ jobId: job.jobId, result: { shots: [], scenes: [] } });
+      this.emitLabelsDone({ jobId: job.jobId, result: preview });
     } catch (error) {
       if (job.status === 'cancelled' || job.controller.signal.aborted) {
         job.status = 'cancelled';
@@ -760,7 +1009,12 @@ export class DetectService {
   ): void {
     if (job.status === 'cancelled') return;
     job.progress = Math.max(job.progress, Math.min(100, Math.round(percent)));
-    this.emitProgress({ jobId: job.jobId, stage, percent: job.progress });
+    this.emitProgress({
+      jobId: job.jobId,
+      stage,
+      percent: job.progress,
+      pipeline: job.pipeline,
+    });
   }
 
   private assertActive(job: InternalDetectJob): void {

@@ -289,6 +289,22 @@ export const detectApplyArgsSchema = z.object({
   sceneIds: z.array(z.string().min(1)).max(10_000).optional(),
 });
 
+/** S41：边界任务（切分 + 自动落库），不调用 Qwen */
+export const boundaryDetectRunArgsSchema = detectRunArgsSchema.omit({ dryRun: true });
+
+/** S41：标签任务（对已落库镜头识别，仅生成预览） */
+export const labelDetectRunArgsSchema = z.object({
+  projectId: z.string().min(1),
+  shotIds: z.array(z.string().min(1)).min(1).max(100_000).optional(),
+});
+
+/** S41：标签应用（按策略写库） */
+export const labelApplyArgsSchema = z.object({
+  jobId: z.string().min(1),
+  shotIds: z.array(z.string().min(1)).min(1).max(100_000),
+  policy: z.enum(['overwrite-all', 'preserve-manual']),
+});
+
 /** S36-2：shot-detection 契约（字段完整率 100% 的机检点）。 */
 export const shotDetectionResultSchema = z.object({
   segment: z.object({

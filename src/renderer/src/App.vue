@@ -1376,6 +1376,7 @@ async function addShotAtPlayhead(): Promise<void> {
       tagIds: [],
       origin: 'manual',
       locked: false,
+      manualFields: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       thumbnail: DEMO_THUMBNAILS[shots.value.length % DEMO_THUMBNAILS.length],
@@ -2518,6 +2519,7 @@ async function startDetection(): Promise<void> {
     jobId: '',
     stage: engine === 'ai' ? 'analyze' : 'extractFrames',
     percent: 0,
+    pipeline: engine === 'ai' ? 'labels' : 'boundary',
   };
   const started = unwrap(
     await window.api.detect.run({
@@ -2938,7 +2940,12 @@ onMounted(async () => {
       const snapshot = await window.api.detect.getJob({ jobId: event.jobId });
       if (snapshot.ok) updateDetectionBoundaryState(snapshot.data);
       detectionResult.value = event.result;
-      detectionProgress.value = { jobId: event.jobId, stage: 'analyze', percent: 100 };
+      detectionProgress.value = {
+        jobId: event.jobId,
+        stage: 'analyze',
+        percent: 100,
+        pipeline: 'boundary',
+      };
       detecting.value = false;
       detectionCapsuleHidden.value = false;
       detectionOpen.value = false;

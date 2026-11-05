@@ -81,6 +81,12 @@ export const IPC = {
   DETECT_APPLY: 'detect:apply',
   DETECT_EVENT_PROGRESS: 'detect:event:progress',
   DETECT_EVENT_DONE: 'detect:event:done',
+  /** S41：分阶段检测 */
+  DETECT_RUN_BOUNDARY: 'detect:runBoundary',
+  DETECT_RUN_LABELS: 'detect:runLabels',
+  DETECT_APPLY_LABELS: 'detect:applyLabels',
+  DETECT_EVENT_BOUNDARY_APPLIED: 'detect:event:boundaryApplied',
+  DETECT_EVENT_LABELS_DONE: 'detect:event:labelsDone',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',

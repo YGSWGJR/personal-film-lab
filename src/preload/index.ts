@@ -17,6 +17,9 @@ import {
   detectCancelArgsSchema,
   detectGetJobArgsSchema,
   detectRunArgsSchema,
+  boundaryDetectRunArgsSchema,
+  labelDetectRunArgsSchema,
+  labelApplyArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -87,6 +90,12 @@ import type {
   DetectProgressEvent,
   DetectRunArgs,
   DetectRunResult,
+  BoundaryDetectRunArgs,
+  BoundaryAppliedEvent,
+  LabelDetectRunArgs,
+  LabelApplyArgs,
+  LabelApplyResult,
+  LabelsDoneEvent,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -218,6 +227,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.DETECT_CANCEL]: detectCancelArgsSchema,
   [IPC.DETECT_GET_JOB]: detectGetJobArgsSchema,
   [IPC.DETECT_APPLY]: detectApplyArgsSchema,
+  [IPC.DETECT_RUN_BOUNDARY]: boundaryDetectRunArgsSchema,
+  [IPC.DETECT_RUN_LABELS]: labelDetectRunArgsSchema,
+  [IPC.DETECT_APPLY_LABELS]: labelApplyArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -281,6 +293,8 @@ const EVENT_WHITELIST = {
   onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
   onDetectProgress: IPC.DETECT_EVENT_PROGRESS,
   onDetectDone: IPC.DETECT_EVENT_DONE,
+  onBoundaryApplied: IPC.DETECT_EVENT_BOUNDARY_APPLIED,
+  onLabelsDone: IPC.DETECT_EVENT_LABELS_DONE,
   onStillCreated: IPC.STILL_EVENT_CREATED,
   onExportProgress: IPC.EXPORT_EVENT_PROGRESS,
   onExportDone: IPC.EXPORT_EVENT_DONE,
@@ -403,6 +417,14 @@ const detectApi = {
     subscribe<DetectProgressEvent>(EVENT_WHITELIST.onDetectProgress, listener),
   onDone: (listener: (event: DetectDoneEvent) => void) =>
     subscribe<DetectDoneEvent>(EVENT_WHITELIST.onDetectDone, listener),
+  runBoundary: (args: BoundaryDetectRunArgs) =>
+    invoke<DetectRunResult>(IPC.DETECT_RUN_BOUNDARY, [args]),
+  runLabels: (args: LabelDetectRunArgs) => invoke<DetectRunResult>(IPC.DETECT_RUN_LABELS, [args]),
+  applyLabels: (args: LabelApplyArgs) => invoke<LabelApplyResult>(IPC.DETECT_APPLY_LABELS, [args]),
+  onBoundaryApplied: (listener: (event: BoundaryAppliedEvent) => void) =>
+    subscribe<BoundaryAppliedEvent>(EVENT_WHITELIST.onBoundaryApplied, listener),
+  onLabelsDone: (listener: (event: LabelsDoneEvent) => void) =>
+    subscribe<LabelsDoneEvent>(EVENT_WHITELIST.onLabelsDone, listener),
 };
 
 const dataApi = {

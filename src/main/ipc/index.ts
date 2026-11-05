@@ -18,6 +18,10 @@ import type {
   DetectJobSnapshot,
   DetectRunArgs,
   DetectRunResult,
+  BoundaryDetectRunArgs,
+  LabelDetectRunArgs,
+  LabelApplyArgs,
+  LabelApplyResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -424,6 +428,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.DETECT_APPLY,
     withEnvelope((args: DetectApplyArgs): DetectApplyResult => requireDetect().apply(args)),
+  );
+  // S41：分阶段检测
+  ipcMain.handle(
+    IPC.DETECT_RUN_BOUNDARY,
+    withEnvelope((args: BoundaryDetectRunArgs): DetectRunResult =>
+      requireDetect().runBoundary(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.DETECT_RUN_LABELS,
+    withEnvelope((args: LabelDetectRunArgs): DetectRunResult => requireDetect().runLabels(args)),
+  );
+  ipcMain.handle(
+    IPC.DETECT_APPLY_LABELS,
+    withEnvelope((args: LabelApplyArgs): LabelApplyResult => requireDetect().applyLabels(args)),
   );
 
   // ---------- data: external project import ----------
