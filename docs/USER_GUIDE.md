@@ -1,6 +1,6 @@
 # 个人拉片工作台使用说明
 
-适用版本：`0.1.9`  
+适用版本：`0.2.0`  
 系统：Windows 10 / 11 x64
 更新日期：2026-11-05
 
@@ -25,10 +25,10 @@
 1. 打开仓库根目录，运行下载脚本：
 
 ```powershell
-.\scripts\download-release.ps1 -Tag v0.1.9 -Destination .\downloads
+.\scripts\download-release.ps1 -Tag v0.2.0 -Destination .\downloads
 ```
 
-2. 确认目录中有 `个人拉片工作台 Setup 0.1.9.exe` 和 `个人拉片工作台-0.1.9-local-ai.7z`。
+2. 确认目录中有 `个人拉片工作台 Setup 0.2.0.exe` 和 `个人拉片工作台-0.2.0-local-ai.7z`。
 3. 把两个文件放在同一个文件夹，不要改名。
 4. 双击 Setup，选择至少保留 30 GB 空间的安装目录。
 5. 安装器解压应用主体和本地 AI 资源。
@@ -40,14 +40,14 @@
 
 | 文件 | SHA-256 |
 |---|---|
-| Setup 0.1.9 | `D15399C6CA8CD9626A06A2A2518E25E81A7A48B3C46070456AACD0B4A10A1B9B` |
-| local-ai 0.1.9 | `5CADA480C0F6BF617C9E8D449C78F97A981D7AE501E963B6FD8ADB54B293EDE9` |
-| 卸载工具 0.1.9 | `71610B898205A2E71C63CCD6699AB32E6CA7CD14020A4052E49630A628DE0B20` |
+| Setup 0.2.0 | `（构建后填写）` |
+| local-ai 0.2.0 | `5CADA480C0F6BF617C9E8D449C78F97A981D7AE501E963B6FD8ADB54B293EDE9` |
+| 卸载工具 0.2.0 | `71610B898205A2E71C63CCD6699AB32E6CA7CD14020A4052E49630A628DE0B20` |
 
 可在 PowerShell 中校验：
 
 ```powershell
-Get-FileHash '.\个人拉片工作台 Setup 0.1.9.exe' -Algorithm SHA256
+Get-FileHash '.\个人拉片工作台 Setup 0.2.0.exe' -Algorithm SHA256
 ```
 
 ## 首次启动
@@ -351,7 +351,7 @@ npm run dev
 如需完整本地 AI：
 
 ```powershell
-$env:PFL_LOCAL_AI_ARCHIVE = 'D:\downloads\个人拉片工作台-0.1.9-local-ai.7z'
+$env:PFL_LOCAL_AI_ARCHIVE = 'D:\downloads\个人拉片工作台-0.2.0-local-ai.7z'
 npm run prepare:local-ai
 ```
 
