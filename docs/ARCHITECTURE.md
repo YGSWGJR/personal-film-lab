@@ -68,11 +68,15 @@ NVIDIA 环境优先使用 CUDA 解帧、`scale_cuda` 和 NVENC；失败时依次
 
 ## 镜头识别
 
-本地模式先将视频切成画面候选，再用 Qwen3-VL 读取代表帧。模型输出必须经过 schema 校验，不能直接写数据库。
+S41 起检测拆分为两条独立管线（DetectService）：
 
-OpenCV 模式通过 stdio JSON-RPC 调用 Python。抽帧目录按 job ID 隔离，图片读取使用 `np.fromfile + cv2.imdecode` 支持中文路径。
+- 边界任务（`detect:runBoundary`）：抽帧 → TransNetV2+OpenCV 混合边界（stdio JSON-RPC 调用 Python）→ 按任务隔离生成缩略图 → `applyDetected` 单事务写入 shots/scenes 并自动应用 → `detect:event:boundaryApplied`。Qwen 不参与；模型缺失自动回退 OpenCV。
+- 标签任务（`detect:runLabels`）：读取已落库镜头 → 逐镜头抽取中点代表帧 → Qwen3-VL 分析 → 仅生成 LabelPreviewResult（含 shotId+startMs+endMs 几何版本快照）→ `detect:event:labelsDone`。不写库。
+- 标签应用（`detect:applyLabels`）：按 `overwrite-all` / `preserve-manual` 策略在单事务内更新字段与受管标签；以应用时的 `manualFields` 为准保护人工字段，几何变化或锁定镜头逐个跳过（LABEL_RESULT_STALE / SHOT_LOCKED）。
 
-两类结果都先进入 preview。用户确认后才写库，且不覆盖锁定或人工镜头。
+抽帧目录按 job ID 隔离，图片读取使用 `np.fromfile + cv2.imdecode` 支持中文路径。旧的一次性 `detect:run`/`detect:apply` 保留为兼容路径（MCP 使用）。
+
+`manualFields` 数据流：shot.update 按补丁键标记 shotSize/cameraMethod/dialogue/remark；tag assign/unassign 标记 tags 并设 origin='manual'；split 右段继承、merge 取并集；AI 写入（applyLabelUpdates）不标记。迁移 005 新增 `shots.manual_fields_json`。
 
 ## 导出
 
