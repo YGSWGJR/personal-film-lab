@@ -94,6 +94,9 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let transnetHybridChecks: Record<string, unknown> = {};
   let shotSplitChecks: Record<string, unknown> = {};
   let shotSplitUiChecks: Record<string, unknown> = {};
+  let stagedDetectChecks: Record<string, unknown> = {};
+  let stagedDetectUiChecks: Record<string, unknown> = {};
+  let timelineWheelZoomChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
@@ -105,7 +108,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -427,6 +430,24 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, shotSplitUiChecksAssertions(shotSplitUiChecks));
     }
 
+    if (process.env['SMOKE_STAGED_DETECT'] === '1') {
+      stagedDetectChecks = await runStagedDetectChecks(deps);
+      Object.assign(checks, stagedDetectChecksAssertions(stagedDetectChecks));
+    }
+
+    if (process.env['SMOKE_STAGED_DETECT_UI'] === '1') {
+      stagedDetectUiChecks = await runStagedDetectUiChecks(
+        deps,
+        process.env['SMOKE_STAGED_DETECT_VIDEO'] ?? process.env['SMOKE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, stagedDetectUiChecksAssertions(stagedDetectUiChecks));
+    }
+
+    if (process.env['SMOKE_TIMELINE_WHEEL_ZOOM'] === '1') {
+      timelineWheelZoomChecks = await runTimelineWheelZoomChecks(win);
+      Object.assign(checks, timelineWheelZoomChecksAssertions(timelineWheelZoomChecks));
+    }
+
     if (process.env['SMOKE_AI_SEGMENT'] === '1') {
       aiSegmentChecks = await runAiSegmentChecks(
         deps,
@@ -457,7 +478,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -4442,6 +4463,344 @@ function shotSplitChecksAssertions(result: Record<string, any>): Record<string, 
     shotSplitManualProtected: result.manualProtected === true,
     shotSplitTrimAtomic: result.trimAtomic === true,
     shotSplitDownstreamSnapshot: result.downstreamSnapshot === true,
+  };
+}
+
+/** S41：分阶段检测数据层验收（V2~V7 数据面） */
+function stagedDetectChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    stagedApplyDetectedCounts: result.applyDetectedCounts === true,
+    stagedBoundaryPersisted: result.boundaryPersisted === true,
+    stagedManualFieldMarking: result.manualFieldMarking === true,
+    stagedTagAssignMarking: result.tagAssignMarking === true,
+    stagedSplitInheritsManualFields: result.splitInheritsManualFields === true,
+    stagedMergeUnionsManualFields: result.mergeUnionsManualFields === true,
+    stagedPreserveManual: result.preserveManual === true,
+    stagedOverwriteAll: result.overwriteAll === true,
+    stagedOverwriteKeepsCustomTags: result.overwriteKeepsCustomTags === true,
+    stagedOverwriteUntouched: result.overwriteUntouched === true,
+    stagedStaleSkipped: result.staleSkipped === true,
+    stagedLockedSkipped: result.lockedSkipped === true,
+    stagedDownstreamSnapshot: result.downstreamSnapshot === true,
+  };
+}
+
+async function runStagedDetectChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const project = data.projects.create({
+    name: `S41 Staged ${Date.now()}`,
+    media: { filename: 'staged-smoke.mp4', durationMs: 6000, fps: 25, width: 640, height: 360 },
+  });
+  const out: Record<string, any> = {};
+  try {
+    // 人工保护镜头 0-2000
+    data.shots.create({ projectId: project.id, startMs: 0, endMs: 2000, remark: '手工镜头' });
+
+    // S41-V2/V10：applyDetected 统计 applied + skippedProtected
+    const applyResult = data.shots.applyDetected(project.id, [
+      { id: 'p1', index: 1, startMs: 1000, endMs: 3000, durationMs: 2000 },
+      { id: 'p2', index: 2, startMs: 3000, endMs: 4000, durationMs: 1000 },
+      { id: 'p3', index: 3, startMs: 4000, endMs: 6000, durationMs: 2000 },
+    ] as any);
+    out.applyDetectedCounts =
+      applyResult.applied === 2 && applyResult.skippedProtected === 1;
+    let shots = data.shots.list(project.id);
+    out.boundaryPersisted = shots.length === 3;
+    const auto1 = shots.find((shot) => shot.startMs === 3000)!;
+    const auto2 = shots.find((shot) => shot.startMs === 4000)!;
+
+    // S41-V3：用户改字段 → manualFields 标记
+    data.shots.update({ id: auto1.id, patch: { shotSize: '特写' } });
+    const afterUpdate = data.shots.get(auto1.id);
+    out.manualFieldMarking = afterUpdate.manualFields.includes('shotSize');
+    const tag = data.tags.create({ category: '光线', name: `S41-${Date.now()}` });
+    data.tags.assign(auto1.id, [tag.id]);
+    const afterAssign = data.shots.get(auto1.id);
+    out.tagAssignMarking =
+      afterAssign.manualFields.includes('tags') && afterAssign.origin === 'manual';
+
+    // split 右段继承 manualFields
+    const split = data.shots.split({ projectId: project.id, shotId: auto1.id, cutMs: 3500 });
+    out.splitInheritsManualFields =
+      split.right.manualFields.includes('shotSize') && split.right.manualFields.includes('tags');
+    data.shots.merge({ projectId: project.id, shotIdA: split.left.id, shotIdB: split.right.id });
+    out.mergeUnionsManualFields = data.shots.get(split.left.id).manualFields.includes('shotSize');
+
+    // S41-V4：preserve-manual 精确保留人工字段
+    const target = data.shots.get(split.left.id); // manualFields 含 shotSize + tags
+    const customTag = data.tags.create({ category: '自定义S41', name: `C-${Date.now()}` });
+    data.tags.assign(target.id, [customTag.id]);
+    const labelResult = data.shots.applyLabelUpdates(
+      project.id,
+      [
+        {
+          shotId: target.id,
+          startMs: target.startMs,
+          endMs: target.endMs,
+          shotSize: '全景',
+          cameraMethod: '手持',
+          remark: 'AI 备注',
+          tags: { 景别: ['远景'], 机位: ['高机位'] },
+        },
+      ],
+      'preserve-manual',
+    );
+    const afterPreserve = data.shots.get(target.id);
+    out.preserveManual =
+      labelResult.appliedShots === 1 &&
+      afterPreserve.shotSize === '特写' &&
+      afterPreserve.cameraMethod === '手持' &&
+      afterPreserve.remark === 'AI 备注' &&
+      afterPreserve.tagIds.includes(tag.id) &&
+      afterPreserve.manualFields.includes('shotSize') &&
+      afterPreserve.manualFields.includes('tags') &&
+      labelResult.preserved.some(
+        (item) => item.shotId === target.id && item.fields.includes('shotSize'),
+      );
+
+    // S41-V5/V6：overwrite-all 覆盖受管字段与六类标签，不碰 dialogue/notes/thumbnail/范围/自定义标签
+    data.shots.update({ id: auto2.id, patch: { dialogue: '原台词', remark: '人工备注' } });
+    const customTag2 = data.tags.create({ category: '自定义S41', name: `D-${Date.now()}` });
+    data.tags.assign(auto2.id, [customTag2.id]);
+    const managedTagBefore = data.shots
+      .get(auto2.id)
+      .tagIds.filter((id) => ['景别', '机位', '运镜', '光线', '声音', '剪辑'].includes(data.tags.get(id).category));
+    const overwrite = data.shots.applyLabelUpdates(
+      project.id,
+      [
+        {
+          shotId: auto2.id,
+          startMs: data.shots.get(auto2.id).startMs,
+          endMs: data.shots.get(auto2.id).endMs,
+          shotSize: '中景',
+          cameraMethod: '固定',
+          remark: 'AI 覆盖备注',
+          tags: { 景别: ['近景'] },
+        },
+      ],
+      'overwrite-all',
+    );
+    const afterOverwrite = data.shots.get(auto2.id);
+    out.overwriteAll =
+      overwrite.appliedShots === 1 &&
+      afterOverwrite.shotSize === '中景' &&
+      afterOverwrite.remark === 'AI 覆盖备注' &&
+      afterOverwrite.tagIds.some((id) => data.tags.get(id).category === '景别') &&
+      !afterOverwrite.tagIds.some((id) => managedTagBefore.includes(id)) &&
+      afterOverwrite.tagIds.includes(customTag2.id);
+    out.overwriteKeepsCustomTags = afterOverwrite.tagIds.includes(customTag2.id);
+    out.overwriteUntouched =
+      afterOverwrite.dialogue === '原台词' &&
+      afterOverwrite.startMs === auto2.startMs &&
+      afterOverwrite.endMs === auto2.endMs &&
+      afterOverwrite.locked === false &&
+      !afterOverwrite.manualFields.includes('remark');
+
+    // S41-V7：范围变化 → LABEL_RESULT_STALE；锁定 → SHOT_LOCKED
+    const stale2 = data.shots.applyLabelUpdates(
+      project.id,
+      [
+        {
+          shotId: auto2.id,
+          startMs: 0,
+          endMs: 1,
+          shotSize: '中景',
+          cameraMethod: null,
+          remark: null,
+          tags: {},
+        },
+        {
+          shotId: target.id,
+          startMs: target.startMs,
+          endMs: target.endMs,
+          shotSize: '全景',
+          cameraMethod: null,
+          remark: null,
+          tags: {},
+        },
+      ],
+      'overwrite-all',
+    );
+    out.staleSkipped = stale2.skipped.some((item) => item.code === 'LABEL_RESULT_STALE');
+    // 锁定镜头跳过
+    data.db.prepare('UPDATE shots SET locked = 1 WHERE id = ?').run(auto2.id);
+    const stale3 = data.shots.applyLabelUpdates(
+      project.id,
+      [
+        {
+          shotId: auto2.id,
+          startMs: data.shots.get(auto2.id).startMs,
+          endMs: data.shots.get(auto2.id).endMs,
+          shotSize: '中景',
+          cameraMethod: null,
+          remark: null,
+          tags: {},
+        },
+      ],
+      'overwrite-all',
+    );
+    out.lockedSkipped = stale3.skipped.some((item) => item.code === 'SHOT_LOCKED');
+    data.db.prepare('UPDATE shots SET locked = 0 WHERE id = ?').run(auto2.id);
+
+    const snapshot = buildProjectSnapshot(data, project.id);
+    out.downstreamSnapshot =
+      snapshot.project.id === project.id && snapshot.shots.length >= 3;
+    return out;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+    return out;
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch {
+      // 清理失败不影响断言
+    }
+  }
+}
+
+/** S41：时间线连续缩放持久化验收（TL-V2/V6 数据面） */
+async function runTimelineWheelZoomChecks(win: Electron.BrowserWindow): Promise<Record<string, any>> {
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        const base = (await window.api.settings.get()).data;
+        const original = base.timeline;
+        const setAndRead = async (px) => {
+          const setResult = await window.api.settings.set({ ...base, timeline: { trackHeight: original.trackHeight, pxPerSecond: px } });
+          const read = await window.api.settings.get();
+          out['dbg_' + px] = { setOk: setResult.ok, setErr: setResult.ok ? null : setResult.error, value: read.ok ? read.data.timeline.pxPerSecond : null };
+          return read.ok ? read.data.timeline.pxPerSecond : null;
+        };
+        out.continuous137 = (await setAndRead(137.5)) === 137.5;
+        out.continuous365 = (await setAndRead(365.25)) === 365.25;
+        out.clampHigh = (await setAndRead(5000)) === 768;
+        out.clampLow = (await setAndRead(1)) === 24;
+        out.restoreOk = (await window.api.settings.set({ ...base, timeline: original })).ok === true;
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `));
+}
+
+function timelineWheelZoomChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    wheelZoomContinuous137: result.continuous137 === true,
+    wheelZoomContinuous365: result.continuous365 === true,
+    wheelZoomClampHigh: result.clampHigh === true,
+    wheelZoomClampLow: result.clampLow === true,
+    wheelZoomRestore: result.restoreOk === true,
+  };
+}
+
+/** S41：分阶段 UI/端到端门控——真实视频走 runBoundary，验证自动落库与 Qwen 不参与。 */
+async function runStagedDetectUiChecks(
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  const detect = deps.getDetect?.() ?? null;
+  const media = deps.getMedia?.() ?? null;
+  const out: Record<string, any> = {};
+  if (!videoPath || !data || !detect || !media) {
+    return { skipped: true, reason: 'missing video/data/detect/media' };
+  }
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const probe = await media.probe({ path: videoPath });
+  const project = data.projects.create({
+    name: `S41 Staged UI ${Date.now()}`,
+    source: { type: 'local', path: videoPath },
+    media: {
+      filename: probe.filename,
+      container: probe.container,
+      durationMs: probe.durationMs,
+      width: probe.width,
+      height: probe.height,
+      fps: probe.fps,
+      videoCodec: probe.videoCodec,
+      audioCodec: probe.audioCodec,
+      sizeBytes: statSync(videoPath).size,
+    },
+  });
+  try {
+    const started = detect.runBoundary({
+      projectId: project.id,
+      options: {
+        sensitivity: 0.62,
+        minShotSeconds: 0.3,
+        filterTransitions: true,
+        weights: { s: 0.3, c: 0.3, h: 0.4 },
+        intervalMs: 250,
+        boundaryEngine: process.env['SMOKE_STAGED_DETECT_BOUNDARY'] === 'opencv' ? 'opencv' : 'hybrid',
+      },
+    });
+    const deadline = Date.now() + 240_000;
+    let job = detect.getJob(started.jobId);
+    while ((job.status === 'running' || job.status === 'queued') && Date.now() < deadline) {
+      await sleep(250);
+      job = detect.getJob(started.jobId);
+    }
+    out.status = job.status;
+    out.error = job.error;
+    out.pipeline = job.pipeline;
+    out.applied = job.applied;
+    out.done = job.status === 'done' && job.pipeline === 'boundary';
+    const shots = data.shots.list(project.id);
+    out.persistedCount = shots.length;
+    out.autoApplied = job.applied === shots.length && shots.length > 0;
+    // Qwen 未参与：语义字段保持空（engine=opencv 路径不调用 Qwen）
+    out.qwenNotInvolved = shots.every((shot) => shot.remark === null && shot.shotSize === null);
+    // 落库镜头范围连续覆盖
+    out.continuous =
+      shots.length > 0 &&
+      shots[0].startMs === 0 &&
+      shots.every(
+        (shot, index) =>
+          shot.endMs > shot.startMs && (index === 0 || shots[index - 1].endMs === shot.startMs),
+      );
+    // 手工镜头保护：锁定第一个镜头后重跑，applied 应减少且该镜头仍存在
+    data.db.prepare('UPDATE shots SET locked = 1 WHERE id = ?').run(shots[0].id);
+    const started2 = detect.runBoundary({
+      projectId: project.id,
+      options: {
+        sensitivity: 0.62,
+        minShotSeconds: 0.3,
+        filterTransitions: true,
+        weights: { s: 0.3, c: 0.3, h: 0.4 },
+        intervalMs: 250,
+        boundaryEngine: 'opencv',
+      },
+    });
+    let job2 = detect.getJob(started2.jobId);
+    while ((job2.status === 'running' || job2.status === 'queued') && Date.now() < deadline) {
+      await sleep(250);
+      job2 = detect.getJob(started2.jobId);
+    }
+    const shotsAfterRerun = data.shots.list(project.id);
+    out.protectedSurvives = shotsAfterRerun.some((shot) => shot.id === shots[0].id);
+    return out;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+    return out;
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch {
+      // 清理失败不影响断言
+    }
+  }
+}
+
+function stagedDetectUiChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    stagedUiBoundaryDone: result.done === true,
+    stagedUiAutoApplied: result.autoApplied === true,
+    stagedUiQwenNotInvolved: result.qwenNotInvolved === true,
+    stagedUiContinuous: result.continuous === true,
+    stagedUiProtectedSurvives: result.protectedSurvives === true,
   };
 }
 

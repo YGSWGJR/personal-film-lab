@@ -464,11 +464,11 @@ export class ShotRepository {
         const manualFields = parseManualFields(row.manual_fields_json);
         const applyField = (field: ManualShotField): boolean =>
           policy === 'overwrite-all' || !manualFields.includes(field);
-        const preservedFields = MANUAL_FIELD_KEYS.filter(
-          (field) => field !== 'tags' && !applyField(field) && field !== 'dialogue',
-        );
         const tagsLocked = !applyField('tags');
-        if (preservedFields.length > 0 || (tagsLocked && hasManagedTags(update.tags))) {
+        const preservedFields = MANUAL_FIELD_KEYS.filter(
+          (field) => field !== 'dialogue' && !applyField(field),
+        );
+        if (preservedFields.length > 0) {
           preserved.push({ shotId: update.shotId, fields: preservedFields });
         }
         const now = nowIso();
@@ -717,9 +717,3 @@ function unionManualFields(left: string | null, right: string | null): string {
   return JSON.stringify([...new Set([...parseManualFields(left), ...parseManualFields(right)])]);
 }
 
-function hasManagedTags(tags: Record<string, string[]> | undefined): boolean {
-  if (!tags) return false;
-  return Object.keys(tags).some((category) =>
-    (MANAGED_TAG_CATEGORIES as readonly string[]).includes(category.trim()),
-  );
-}
