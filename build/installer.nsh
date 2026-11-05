@@ -1,7 +1,7 @@
 !macro customInstall
   ; v0.2.0 修复：local-ai 资源包文件名跟随版本号，避免升版后写死旧版本名找不到文件。
   ; 查找顺序：个人拉片工作台-<版本>-local-ai.7z → $EXEDIR 下任意 *-local-ai.7z → 提示后跳过。
-  StrCpy $R0 "$EXEDIR\个人拉片工作台-${PRODUCT_VERSION}-local-ai.7z"
+  StrCpy $R0 "$EXEDIR\个人拉片工作台-${VERSION}-local-ai.7z"
   IfFileExists $R0 local_ai_run
     FindFirst $R1 $R2 "$EXEDIR\*-local-ai.7z"
     StrCmp $R2 "" local_ai_notfound local_ai_found_glob
