@@ -18,8 +18,16 @@ export interface TimelineSettings {
   pxPerSecond: number;
 }
 
+export interface ShortcutSettings {
+  split: string;
+  merge: string;
+}
+
 /** S36-2：镜头识别引擎。 */
 export type RecognitionEngine = 'ai' | 'opencv';
+
+/** S39：镜头边界引擎。与 RecognitionEngine 分离，后者继续控制 Qwen 语义标注。 */
+export type ShotBoundaryEngine = 'hybrid' | 'transnetv2' | 'opencv';
 
 export interface RecognitionSettings {
   engine: RecognitionEngine;
@@ -117,6 +125,8 @@ export interface Settings {
   recognition?: RecognitionSettings;
   /** AI 识别配置（S36-2） */
   ai?: AiSettings;
+  /** S40：镜头编辑快捷键 */
+  shortcuts?: ShortcutSettings;
 }
 
 export interface SettingsSetArgs {
@@ -139,6 +149,8 @@ export interface SettingsSetArgs {
   recognition?: RecognitionSettings;
   /** AI 识别配置（S36-2） */
   ai?: AiSettings;
+  /** S40：镜头编辑快捷键 */
+  shortcuts?: ShortcutSettings;
 }
 
 export interface SettingsChooseDirectoryArgs {
@@ -692,6 +704,8 @@ export interface DetectOptions {
   intervalMs?: number;
   /** S36-2：识别引擎；缺省读取 settings.recognition.engine（默认 ai） */
   engine?: RecognitionEngine;
+  /** S39：镜头边界引擎；缺省 hybrid，模型不可用时自动回退 opencv */
+  boundaryEngine?: ShotBoundaryEngine;
 }
 
 export interface Project {
@@ -761,6 +775,8 @@ export interface Shot {
   locked: boolean;
   thumbnail?: string | null;
   tagIds: string[];
+  /** S41：被用户手动编辑过的语义字段（标签应用策略据此保留人工标注） */
+  manualFields: ManualShotField[];
   createdAt: string;
   updatedAt: string;
 }
@@ -811,6 +827,16 @@ export interface DetectJobSnapshot {
   currentSegment?: number;
   segmentsTotal?: number;
   usage?: ShotDetectionUsage;
+  /** S39：实际执行的镜头边界引擎（模型运行中失败时可能从 hybrid 变为 opencv） */
+  boundaryEngine?: ShotBoundaryEngine;
+  /** S39：是否因模型/FFmpeg不可用而回退 OpenCV */
+  boundaryFallback?: boolean;
+  /** S39：边界引擎降级或 Python 返回的可读警告 */
+  boundaryWarning?: string | null;
+  /** S41：任务所属管线（boundary=切分落库，labels=标签识别） */
+  pipeline: DetectPipeline;
+  /** S41：边界任务自动应用的镜头数量 */
+  applied?: number;
 }
 
 export interface DetectRunArgs {
@@ -827,6 +853,18 @@ export interface DetectProgressEvent {
   jobId: string;
   stage: 'extractFrames' | 'analyze';
   percent: number;
+  /** S41：管线标识，渲染层据此区分切分进度与标签进度 */
+  pipeline: DetectPipeline;
+}
+
+export interface BoundaryAppliedEvent {
+  jobId: string;
+  result: BoundaryAppliedResult;
+}
+
+export interface LabelsDoneEvent {
+  jobId: string;
+  result: LabelPreviewResult;
 }
 
 export interface DetectDoneEvent {
@@ -842,6 +880,72 @@ export interface DetectApplyArgs {
 
 export interface DetectApplyResult {
   applied: number;
+}
+
+/** ---------- S41：分阶段检测（边界任务 / 标签任务） ---------- */
+
+export type DetectPipeline = 'boundary' | 'labels';
+
+export type LabelApplyPolicy = 'overwrite-all' | 'preserve-manual';
+
+/** 标签应用可能覆盖、且需要字段级人工保护的镜头字段 */
+export type ManualShotField = 'shotSize' | 'cameraMethod' | 'dialogue' | 'remark' | 'tags';
+
+export interface BoundaryDetectRunArgs {
+  projectId: string;
+  options: DetectOptions;
+}
+
+export interface BoundaryAppliedResult {
+  jobId: string;
+  applied: number;
+  /** 因与人工/锁定镜头重叠而被跳过的候选数量 */
+  skippedProtected: number;
+  /** 应用后的持久化镜头（落库结果） */
+  shots: Shot[];
+  scenes: Scene[];
+  boundaryEngine: ShotBoundaryEngine;
+  boundaryFallback: boolean;
+  boundaryWarning: string | null;
+}
+
+export interface LabelDetectRunArgs {
+  projectId: string;
+  shotIds?: string[];
+}
+
+export interface LabelShotPrediction {
+  shotId: string;
+  index: number;
+  startMs: number;
+  endMs: number;
+  predicted: {
+    shotSize: string | null;
+    cameraMethod: string | null;
+    remark: string | null;
+    tags: Record<string, string[]>;
+  };
+  confidence: number;
+}
+
+export interface LabelPreviewResult {
+  jobId: string;
+  projectId: string;
+  shots: LabelShotPrediction[];
+}
+
+export interface LabelApplyArgs {
+  jobId: string;
+  shotIds: string[];
+  policy: LabelApplyPolicy;
+}
+
+export interface LabelApplyResult {
+  appliedShots: number;
+  updatedFields: number;
+  updatedTagLinks: number;
+  preserved: Array<{ shotId: string; fields: ManualShotField[] }>;
+  skipped: Array<{ shotId: string; code: string; message: string }>;
 }
 
 /** ---------- S36-2：镜头识别 AI 契约 ---------- */
@@ -922,6 +1026,39 @@ export interface ShotUpdateArgs {
     dialogue?: string | null;
     remark?: string | null;
   };
+}
+
+export interface ShotSplitArgs {
+  projectId: string;
+  shotId: string;
+  cutMs: number;
+}
+
+export interface ShotSplitResult {
+  left: Shot;
+  right: Shot;
+}
+
+export interface ShotMergeArgs {
+  projectId: string;
+  shotIdA: string;
+  shotIdB: string;
+}
+
+export interface ShotMergeResult {
+  shot: Shot;
+}
+
+export interface ShotTrimArgs {
+  projectId: string;
+  leftShotId: string;
+  rightShotId: string;
+  cutMs: number;
+}
+
+export interface ShotTrimResult {
+  left: Shot;
+  right: Shot;
 }
 
 export type AnnotationType = 'box' | 'arrow' | 'text';
@@ -1177,6 +1314,9 @@ export interface ShotApi {
   create(args: ShotCreateArgs): Promise<IpcResult<Shot>>;
   update(args: ShotUpdateArgs): Promise<IpcResult<Shot>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  split(args: ShotSplitArgs): Promise<IpcResult<ShotSplitResult>>;
+  merge(args: ShotMergeArgs): Promise<IpcResult<ShotMergeResult>>;
+  trim(args: ShotTrimArgs): Promise<IpcResult<ShotTrimResult>>;
 }
 
 export interface StillApi {
@@ -1228,8 +1368,16 @@ export interface DetectApi {
   cancel(args: { jobId: string }): Promise<IpcResult<void>>;
   getJob(args: { jobId: string }): Promise<IpcResult<DetectJobSnapshot>>;
   apply(args: DetectApplyArgs): Promise<IpcResult<DetectApplyResult>>;
+  /** S41：边界任务（切分 + 自动落库），不调用 Qwen */
+  runBoundary(args: BoundaryDetectRunArgs): Promise<IpcResult<DetectRunResult>>;
+  /** S41：标签任务（对已落库镜头做 Qwen 识别，仅生成预览） */
+  runLabels(args: LabelDetectRunArgs): Promise<IpcResult<DetectRunResult>>;
+  /** S41：按策略应用标签预览（唯一写库入口） */
+  applyLabels(args: LabelApplyArgs): Promise<IpcResult<LabelApplyResult>>;
   onProgress(listener: (event: DetectProgressEvent) => void): () => void;
   onDone(listener: (event: DetectDoneEvent) => void): () => void;
+  onBoundaryApplied(listener: (event: BoundaryAppliedEvent) => void): () => void;
+  onLabelsDone(listener: (event: LabelsDoneEvent) => void): () => void;
 }
 
 export interface ScopeApi {

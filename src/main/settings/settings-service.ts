@@ -9,10 +9,10 @@ import type {
   Settings,
   SettingsChooseDirectoryArgs,
   SettingsSetArgs,
+  ShortcutSettings,
   TimelineSettings,
 } from '../../shared/types';
 import {
-  PX_PER_SEC_LEVELS,
   TRACK_HEIGHT_LEVELS,
   snapToLevel,
 } from '../../shared/types';
@@ -20,6 +20,7 @@ import {
   defaultAiSettings,
   defaultRecognitionSettings,
   defaultSettings,
+  defaultShortcutSettings,
   defaultTimelineSettings,
   environmentDataRoot,
 } from '../paths';
@@ -76,6 +77,7 @@ export class SettingsService {
         timeline: this.stored?.timeline ?? defaultTimelineSettings(),
         recognition: this.stored?.recognition ?? defaultRecognitionSettings(),
         ai: this.stored?.ai ?? defaultAiSettings(),
+        shortcuts: this.stored?.shortcuts ?? defaultShortcutSettings(),
         settingsPath: this.settingsPath,
         environmentOverride: true,
       };
@@ -196,6 +198,8 @@ export function verifyStoredSettings(
       stored.timeline?.trackHeight === expected.timeline?.trackHeight &&
       stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond &&
       stored.recognition?.engine === expected.recognition?.engine &&
+      stored.shortcuts?.split === expected.shortcuts?.split &&
+      stored.shortcuts?.merge === expected.shortcuts?.merge &&
       stored.ai?.provider === expected.ai?.provider &&
       stored.ai?.activeProviderId === expected.ai?.activeProviderId &&
       JSON.stringify(stored.ai?.providers ?? []) === JSON.stringify(expected.ai?.providers ?? []) &&
@@ -234,6 +238,7 @@ function normalizeSettings(
     timeline: normalizeTimeline(args.timeline ?? fallback?.timeline),
     recognition: normalizeRecognition(args.recognition ?? fallback?.recognition),
     ai: normalizeAi(args.ai, fallback?.ai, forWrite),
+    shortcuts: normalizeShortcuts(args.shortcuts ?? fallback?.shortcuts),
   };
 }
 
@@ -242,14 +247,30 @@ function normalizeTimeline(value: TimelineSettings | undefined): TimelineSetting
   const trackHeight = Number.isFinite(source.trackHeight) && source.trackHeight > 0
     ? snapToLevel(source.trackHeight, TRACK_HEIGHT_LEVELS)
     : defaultTimelineSettings().trackHeight;
+  // S41：pxPerSecond 支持连续缩放值——保留合法区间内的连续值（四舍五入到 2 位小数），
+  // 越界夹紧到 24~768；trackHeight 继续吸附档位。
   const pxPerSecond = Number.isFinite(source.pxPerSecond) && source.pxPerSecond > 0
-    ? snapToLevel(source.pxPerSecond, PX_PER_SEC_LEVELS)
+    ? Math.round(Math.max(24, Math.min(768, source.pxPerSecond)) * 100) / 100
     : defaultTimelineSettings().pxPerSecond;
   return { trackHeight, pxPerSecond };
 }
 
 function normalizeRecognition(value: RecognitionSettings | undefined): RecognitionSettings {
   return { engine: value?.engine === 'opencv' ? 'opencv' : 'ai' };
+}
+
+function normalizeShortcuts(value: ShortcutSettings | undefined): ShortcutSettings {
+  const fallback = defaultShortcutSettings();
+  const split = normalizeShortcut(value?.split, fallback.split);
+  const merge = normalizeShortcut(value?.merge, fallback.merge);
+  return split.toLowerCase() === merge.toLowerCase()
+    ? { split, merge: fallback.merge }
+    : { split, merge };
+}
+
+function normalizeShortcut(value: string | undefined, fallback: string): string {
+  const normalized = value?.trim();
+  return normalized && normalized.length <= 40 ? normalized : fallback;
 }
 
 /**

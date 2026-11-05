@@ -9,6 +9,7 @@ import AppIcon from './components/AppIcon.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
+import LabelPreviewModal from './components/LabelPreviewModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import SettingsModal from './components/SettingsModal.vue';
@@ -37,8 +38,13 @@ import type {
   CandidateProject,
   CandidateSource,
   DetectEnvCheck,
+  DetectJobSnapshot,
   DetectProgressEvent,
   DetectResult,
+  BoundaryAppliedResult,
+  LabelApplyPolicy,
+  LabelApplyResult,
+  LabelPreviewResult,
   ExportProgressEvent,
   GpuStatus,
   IpcResult,
@@ -55,6 +61,7 @@ import type {
   SettingsDataRootChangingEvent,
   SettingsSetArgs,
   Shot,
+  ShotBoundaryEngine,
   Still,
   StoryboardExportArgs,
   Tag,
@@ -63,7 +70,7 @@ import type {
   WorkspaceState,
 } from '../../shared/types';
 import { PLAYBACK_SPEEDS, PX_PER_SEC_LEVELS } from '../../shared/types';
-import { frameToMs } from '../../shared/time';
+import { formatTimeMs, frameToMs } from '../../shared/time';
 
 const info = ref<AppInfo | null>(null);
 const bridgeReady = ref(false);
@@ -77,6 +84,8 @@ const demoShots = createDemoShots();
 const shots = ref<WorkspaceShot[]>(demoShots);
 const markers = ref<TimelineMarker[]>(createDemoMarkers(demoShots));
 const selectedId = ref<string | null>(demoShots[2]?.id ?? null);
+const mergePartnerId = ref<string | null>(null);
+const shotEditing = ref(false);
 const previewTimeMs = ref(demoShots[2]?.startMs ?? 0);
 const notes = reactive<Record<string, string>>(
   Object.fromEntries(demoShots.map((shot) => [shot.id, shot.remark ?? ''])),
@@ -113,6 +122,45 @@ const detectionCapsuleHidden = ref(false);
 /** 用户在 run 返回 jobId 之前就点了取消时，等 jobId 到手后立即补发取消。 */
 const detectionCancelRequested = ref(false);
 const detectionJobId = ref<string | null>(null);
+const detectionBoundaryEngine = ref<ShotBoundaryEngine | null>(null);
+const detectionBoundaryFallback = ref(false);
+const detectionBoundaryWarning = ref<string | null>(null);
+/** S41：分阶段检测状态机（boundary=切分落库，labels=标签识别） */
+type StagedDetectionState =
+  | { kind: 'idle' }
+  | { kind: 'boundary-running'; jobId: string }
+  | { kind: 'boundary-ready'; result: BoundaryAppliedResult }
+  | { kind: 'labels-running'; jobId: string }
+  | { kind: 'labels-ready'; result: LabelPreviewResult };
+const stagedDetection = ref<StagedDetectionState>({ kind: 'idle' });
+/** 当前任务是否为边界任务（onDone 事件据此跳过旧的一次性预览流程） */
+const boundaryFlow = ref(false);
+/** 边界任务完成后的顶部提示（可关闭，关闭后仍可从镜头列表再次进入标签识别） */
+const boundaryNotice = ref<BoundaryAppliedResult | null>(null);
+const labelsFlow = ref(false);
+const labelPreview = ref<LabelPreviewResult | null>(null);
+const labelPreviewOpen = ref(false);
+const labelApplying = ref(false);
+const labelSelected = ref<string[]>([]);
+const detectionStageLabel = computed(() => {
+  const progress = detectionProgress.value;
+  const percent = progress?.percent ?? 0;
+  if (progress?.pipeline === 'labels') {
+    if (percent < 45) return '提取代表帧';
+    return percent >= 95 ? '整理识别结果' : 'Qwen 标签识别';
+  }
+  if (!progress || progress.stage === 'extractFrames' || percent < 58) {
+    return '提取画面';
+  }
+  if (percent >= 94) {
+    return (settings.value?.recognition?.engine ?? 'ai') === 'ai'
+      ? 'Qwen 标签识别'
+      : '整理镜头';
+  }
+  if (detectionBoundaryEngine.value === 'transnetv2') return 'TransNetV2 切分';
+  if (detectionBoundaryEngine.value === 'opencv') return 'OpenCV 补充';
+  return percent < 82 ? 'TransNetV2 切分' : 'OpenCV 补充';
+});
 interface ContextMenuItem {
   label: string;
   danger?: boolean;
@@ -146,6 +194,9 @@ const confirmState = reactive({
   open: false,
   title: '',
   message: '',
+  warning: '',
+  confirmLabel: '',
+  cancelLabel: '',
   resolve: (_confirmed: boolean): void => {},
 });
 /** 删除用户内容前是否二次确认，由设置 confirmUserContent 驱动，缺省开启 */
@@ -162,10 +213,17 @@ const outPointMs = ref<number | null>(null);
  * 弹出删除确认弹窗并等待用户选择。
  * @returns 用户点击「删除」返回 true；点击取消 / Esc / 点击遮罩返回 false。
  */
-function confirmUserDelete(title: string, message: string): Promise<boolean> {
+function confirmUserDelete(
+  title: string,
+  message: string,
+  options: { warning?: string; confirmLabel?: string; cancelLabel?: string } = {},
+): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     confirmState.title = title;
     confirmState.message = message;
+    confirmState.warning = options.warning ?? '';
+    confirmState.confirmLabel = options.confirmLabel ?? '';
+    confirmState.cancelLabel = options.cancelLabel ?? '';
     confirmState.resolve = resolve;
     confirmState.open = true;
   });
@@ -221,6 +279,28 @@ const skeleton: SkeletonState = {
 window.__SKELETON_STATE__ = skeleton;
 
 const selectedShot = computed(() => shots.value.find((shot) => shot.id === selectedId.value) ?? null);
+const selectedMergePair = computed<[WorkspaceShot, WorkspaceShot] | null>(() => {
+  const primary = selectedShot.value;
+  const partner = shots.value.find((shot) => shot.id === mergePartnerId.value) ?? null;
+  if (!primary || !partner || primary.id === partner.id) return null;
+  const pair: [WorkspaceShot, WorkspaceShot] =
+    primary.startMs <= partner.startMs ? [primary, partner] : [partner, primary];
+  return pair[0].endMs === pair[1].startMs ? pair : null;
+});
+const canSplitAtPlayhead = computed(() => {
+  const shot = selectedShot.value;
+  return Boolean(
+    shot &&
+      !shot.locked &&
+      !demoMode.value &&
+      displayTimeMs.value > shot.startMs &&
+      displayTimeMs.value < shot.endMs,
+  );
+});
+const shortcutSettings = computed(() => settings.value?.shortcuts ?? {
+  split: 'Ctrl+K',
+  merge: 'Ctrl+Shift+G',
+});
 const selectedNote = computed(() => (selectedId.value ? notes[selectedId.value] ?? '' : ''));
 const selectedStill = computed(() => {
   if (!selectedShot.value) return null;
@@ -520,6 +600,7 @@ async function loadProject(
     ? mapped.find((shot) => shot.id === restoreState.selectedShotId) ?? null
     : null;
   selectedId.value = restoredShot?.id ?? mapped[0]?.id ?? null;
+  mergePartnerId.value = null;
   previewTimeMs.value = restoreState?.timeMs ?? mapped[0]?.startMs ?? 0;
   await Promise.all([loadTerms(true, true), loadTags()]);
 
@@ -573,6 +654,7 @@ async function refreshProjectData(projectId: string, preferredShotId?: string | 
     mapped[0] ??
     null;
   selectedId.value = preferred?.id ?? null;
+  mergePartnerId.value = null;
   previewTimeMs.value = preferred?.startMs ?? 0;
   await loadTags();
   return true;
@@ -993,7 +1075,24 @@ async function seekTo(timeMs: number): Promise<void> {
   if (state) Object.assign(player, state);
 }
 
-async function selectShot(shot: WorkspaceShot): Promise<void> {
+async function selectShot(shot: WorkspaceShot, additive = false): Promise<void> {
+  if (additive) {
+    const primary = selectedShot.value;
+    if (!primary || primary.id === shot.id) {
+      mergePartnerId.value = null;
+      return;
+    }
+    const [left, right] =
+      primary.startMs <= shot.startMs ? [primary, shot] : [shot, primary];
+    if (left.endMs !== right.startMs || left.locked || right.locked) {
+      showToast('合并只能选择时间上相邻且未锁定的两个镜头。');
+      mergePartnerId.value = null;
+      return;
+    }
+    mergePartnerId.value = shot.id;
+    return;
+  }
+  mergePartnerId.value = null;
   const switched = selectedId.value !== shot.id;
   selectedId.value = shot.id;
   previewTimeMs.value = shot.startMs;
@@ -1008,7 +1107,11 @@ async function selectShot(shot: WorkspaceShot): Promise<void> {
 function openShotContextMenu(
   shot: WorkspaceShot,
   position: { x: number; y: number },
+  splitTimeMs = displayTimeMs.value,
 ): void {
+  const index = shots.value.findIndex((item) => item.id === shot.id);
+  const previous = index > 0 ? shots.value[index - 1] : null;
+  const next = index >= 0 && index < shots.value.length - 1 ? shots.value[index + 1] : null;
   const stillCount = projectStills.value.filter((still) => still.shotId === shot.id).length;
   const hasNote = Boolean(notes[shot.id]?.trim());
   const suffix =
@@ -1017,17 +1120,148 @@ function openShotContextMenu(
       : '';
   contextMenu.x = position.x;
   contextMenu.y = position.y;
-  contextMenu.items = [
-    {
-      label: demoMode.value ? '示例镜头不可删除' : `删除镜头${suffix}`,
-      danger: true,
-      disabled: demoMode.value,
-      action: () => {
-        void deleteShot(shot);
-      },
+  const items: ContextMenuItem[] = [{
+    label: `在 ${formatTimeMs(splitTimeMs)} 切分`,
+    disabled:
+      demoMode.value ||
+      shotEditing.value ||
+      shot.locked ||
+      splitTimeMs <= shot.startMs ||
+      splitTimeMs >= shot.endMs,
+    action: () => {
+      void splitShotAtTime(shot, splitTimeMs);
     },
-  ];
+  }];
+  if (selectedMergePair.value?.some((item) => item.id === shot.id)) {
+    items.push({
+      label: '合并已选两个镜头',
+      disabled: demoMode.value || shotEditing.value,
+      action: () => {
+        if (selectedMergePair.value) void mergeShotPair(selectedMergePair.value);
+      },
+    });
+  } else {
+    if (previous && previous.endMs === shot.startMs) {
+      items.push({
+        label: '合并前一镜头',
+        disabled: demoMode.value || shotEditing.value || shot.locked || previous.locked,
+        action: () => {
+          void mergeShotPair([previous, shot]);
+        },
+      });
+    }
+    if (next && shot.endMs === next.startMs) {
+      items.push({
+        label: '合并后一镜头',
+        disabled: demoMode.value || shotEditing.value || shot.locked || next.locked,
+        action: () => {
+          void mergeShotPair([shot, next]);
+        },
+      });
+    }
+  }
+  items.push({
+    label: demoMode.value ? '示例镜头不可删除' : `删除镜头${suffix}`,
+    danger: true,
+    disabled: demoMode.value || shotEditing.value,
+    action: () => {
+      void deleteShot(shot);
+    },
+  });
+  contextMenu.items = items;
   contextMenu.visible = true;
+}
+
+function openTimelineContextMenu(
+  shot: WorkspaceShot | null,
+  position: { x: number; y: number },
+  timeMs: number,
+): void {
+  const target =
+    shot ?? shots.value.find((item) => timeMs >= item.startMs && timeMs < item.endMs) ?? null;
+  if (!target) {
+    showToast('当前时码没有可编辑的镜头。');
+    return;
+  }
+  openShotContextMenu(target, position, timeMs);
+}
+
+function canSplitShot(shot: WorkspaceShot, cutMs: number): boolean {
+  return !demoMode.value && !shot.locked && cutMs > shot.startMs && cutMs < shot.endMs;
+}
+
+async function splitShotAtTime(shot: WorkspaceShot, cutMs: number): Promise<void> {
+  if (!activeProject.value || shotEditing.value) return;
+  if (!canSplitShot(shot, cutMs)) {
+    showToast('播放头必须位于镜头内部，且镜头不能锁定。');
+    return;
+  }
+  shotEditing.value = true;
+  try {
+    const result = unwrap(
+      await window.api.shot.split({
+        projectId: activeProject.value.id,
+        shotId: shot.id,
+        cutMs,
+      }),
+    );
+    if (!result) return;
+    mergePartnerId.value = null;
+    await refreshProjectData(activeProject.value.id, result.right.id);
+    previewTimeMs.value = cutMs;
+    if (player.hasFile) await seekTo(cutMs);
+    showToast(`已在 ${formatTimeMs(cutMs)} 切分镜头。`, 'success');
+  } finally {
+    shotEditing.value = false;
+  }
+}
+
+async function mergeShotPair(pair: [WorkspaceShot, WorkspaceShot]): Promise<void> {
+  if (!activeProject.value || shotEditing.value) return;
+  if (pair[0].endMs !== pair[1].startMs || pair[0].locked || pair[1].locked) {
+    showToast('只能合并时间相邻且未锁定的两个镜头。');
+    return;
+  }
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '合并镜头',
+      `将镜头 ${String(pair[0].index).padStart(2, '0')} 与 ${String(pair[1].index).padStart(2, '0')} 合并，第二段镜头记录会删除，笔记、标签与静帧会保留。`,
+      {
+        warning: '原镜头记录会被删除，但标签、笔记和静帧会迁移到合并后的镜头。',
+        confirmLabel: '合并',
+      },
+    );
+    if (!confirmed) return;
+  }
+  shotEditing.value = true;
+  try {
+    const result = unwrap(
+      await window.api.shot.merge({
+        projectId: activeProject.value.id,
+        shotIdA: pair[0].id,
+        shotIdB: pair[1].id,
+      }),
+    );
+    if (!result) return;
+    mergePartnerId.value = null;
+    await refreshProjectData(activeProject.value.id, result.shot.id);
+    previewTimeMs.value = result.shot.startMs;
+    if (player.hasFile) await seekTo(result.shot.startMs);
+    showToast('相邻镜头已合并。', 'success');
+  } finally {
+    shotEditing.value = false;
+  }
+}
+
+async function splitSelectedAtPlayhead(): Promise<void> {
+  const shot = selectedShot.value;
+  if (!shot) return;
+  await splitShotAtTime(shot, displayTimeMs.value);
+}
+
+async function mergeSelectedShots(): Promise<void> {
+  if (!selectedMergePair.value) return;
+  await mergeShotPair(selectedMergePair.value);
 }
 
 function openStillContextMenu(still: Still, position: { x: number; y: number }): void {
@@ -1130,18 +1364,20 @@ async function commitBoundary(change: BoundaryChange): Promise<void> {
   if (!shot || !next) return;
   busy.value = true;
   try {
-    const [updatedShot, updatedNext] = await Promise.all([
-      window.api.shot.update({ id: shot.id, patch: { endMs: change.timeMs } }),
-      window.api.shot.update({ id: next.id, patch: { startMs: change.timeMs } }),
-    ]);
-    if (!updatedShot.ok || !updatedNext.ok) {
-      const failure = !updatedShot.ok ? updatedShot.error : !updatedNext.ok ? updatedNext.error : null;
-      showToast(failure?.message ?? '镜头边界保存失败', 'error', failure?.code);
+    const updated = await window.api.shot.trim({
+      projectId: activeProject.value?.id ?? shot.projectId,
+      leftShotId: shot.id,
+      rightShotId: next.id,
+      cutMs: change.timeMs,
+    });
+    if (!updated.ok) {
+      showToast(updated.error.message, 'error', updated.error.code);
       if (activeProject.value) await loadProject(activeProject.value);
       return;
     }
-    Object.assign(shot, updatedShot.data);
-    Object.assign(next, updatedNext.data);
+    if (activeProject.value) {
+      await refreshProjectData(activeProject.value.id, selectedId.value);
+    }
     showToast('镜头边界已保存。', 'success');
   } finally {
     busy.value = false;
@@ -1166,6 +1402,7 @@ async function addShotAtPlayhead(): Promise<void> {
       tagIds: [],
       origin: 'manual',
       locked: false,
+      manualFields: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       thumbnail: DEMO_THUMBNAILS[shots.value.length % DEMO_THUMBNAILS.length],
@@ -1630,19 +1867,7 @@ async function openDetection(): Promise<void> {
     showToast('请先导入本地影片，再运行镜头检测。');
     return;
   }
-  const engine = settings.value?.recognition?.engine ?? 'ai';
-  if (engine === 'ai') {
-    const local = await window.api.ai.getLocalStatus();
-    if (!local.ok || !local.data.available) {
-      detectionError.value =
-        local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
-      detectionProgress.value = null;
-      detectionResult.value = null;
-      detecting.value = false;
-      detectionOpen.value = true;
-      return;
-    }
-  }
+  // S41：切分不再依赖 Qwen 环境，只检查 Python/OpenCV 检测环境。
   let environment: IpcResult<DetectEnvCheck>;
   try {
     environment = await window.api.detect.checkEnv();
@@ -2198,7 +2423,16 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     capsuleHidden: detectionCapsuleHidden.value,
     layer: player.layer,
     progress: detectionProgress.value?.percent ?? 0,
+    stageLabel: detectionStageLabel.value,
+    boundaryEngine: detectionBoundaryEngine.value,
+    boundaryFallback: detectionBoundaryFallback.value,
+    boundaryWarning: detectionBoundaryWarning.value,
     jobId: detectionJobId.value,
+    selectedId: selectedId.value,
+    mergePartnerId: mergePartnerId.value,
+    canSplitAtPlayhead: canSplitAtPlayhead.value,
+    canMergeSelected: Boolean(selectedMergePair.value),
+    shotEditing: shotEditing.value,
   }),
   collapse: () => closeDetection(),
   openResult: () => viewDetectionResult(),
@@ -2211,6 +2445,55 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
   timeline: { ...timelineSettings.value },
   settingsTimeline: settings.value?.timeline ? { ...settings.value.timeline } : null,
 });
+
+(window as unknown as Record<string, unknown>).__S40_SHOT_EDIT_TEST__ = {
+  openProject: async (projectId: string) => {
+    const result = await window.api.project.get({ id: projectId });
+    if (!result.ok) return { ok: false, error: result.error };
+    await loadProject(result.data);
+    return { ok: true };
+  },
+  state: () => ({
+    shots: shots.value.map((shot) => ({
+      id: shot.id,
+      index: shot.index,
+      startMs: shot.startMs,
+      endMs: shot.endMs,
+      locked: shot.locked,
+      thumbnail: shot.thumbnail,
+    })),
+    selectedId: selectedId.value,
+    mergePartnerId: mergePartnerId.value,
+    canSplitAtPlayhead: canSplitAtPlayhead.value,
+    canMergeSelected: Boolean(selectedMergePair.value),
+    shotEditing: shotEditing.value,
+    timeMs: displayTimeMs.value,
+    busy: busy.value,
+    overlayOpen: overlayOpen.value,
+  }),
+  setTime: async (timeMs: number) => {
+    previewTimeMs.value = timeMs;
+    player.timeMs = timeMs;
+    if (player.hasFile) await seekTo(timeMs);
+  },
+  select: async (shotId: string, additive = false) => {
+    const shot = shots.value.find((item) => item.id === shotId);
+    if (!shot) return false;
+    await selectShot(shot, additive);
+    return true;
+  },
+  splitAt: async (timeMs = displayTimeMs.value) => {
+    const shot = selectedShot.value;
+    if (!shot) return false;
+    await splitShotAtTime(shot, timeMs);
+    return true;
+  },
+  mergeSelected: async () => {
+    if (!selectedMergePair.value) return false;
+    await mergeShotPair(selectedMergePair.value);
+    return true;
+  },
+};
 
 watch(
   [
@@ -2232,44 +2515,50 @@ watch(
 
 async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
-  const engine = settings.value?.recognition?.engine ?? 'ai';
   stopDetectionPolling();
   // 清掉上一次任务的 jobId，避免第二次检测时 cancel/进度过滤命中旧任务。
   detectionJobId.value = null;
   detecting.value = true;
+  boundaryFlow.value = true;
+  labelsFlow.value = false;
   detectionCapsuleHidden.value = false;
   detectionCancelRequested.value = false;
   void syncTranscodeConcurrency();
   applyingDetection.value = false;
   detectionError.value = null;
   detectionResult.value = null;
+  detectionBoundaryEngine.value = null;
+  detectionBoundaryFallback.value = false;
+  detectionBoundaryWarning.value = null;
   detectionProgress.value = {
     jobId: '',
-    stage: engine === 'ai' ? 'analyze' : 'extractFrames',
+    stage: 'extractFrames',
     percent: 0,
+    pipeline: 'boundary',
   };
   const started = unwrap(
-    await window.api.detect.run({
+    await window.api.detect.runBoundary({
       projectId: activeProject.value.id,
-      dryRun: true,
       options: {
         sensitivity: 0.62,
         minShotSeconds: 0.5,
         filterTransitions: true,
         weights: { s: 0.3, c: 0.3, h: 0.4 },
         intervalMs: 500,
-        engine,
+        boundaryEngine: 'hybrid',
       },
     }),
   );
   if (!started) {
     detecting.value = false;
-    detectionError.value = '无法启动镜头检测';
+    boundaryFlow.value = false;
+    detectionError.value = '无法启动镜头切分';
     detectionOpen.value = true;
     void syncTranscodeConcurrency();
     return;
   }
   detectionJobId.value = started.jobId;
+  stagedDetection.value = { kind: 'boundary-running', jobId: started.jobId };
   if (detectionCancelRequested.value) {
     detectionCancelRequested.value = false;
     await window.api.detect.cancel({ jobId: started.jobId });
@@ -2293,6 +2582,7 @@ async function startDetection(): Promise<void> {
       showToast(result.error.message, 'error', result.error.code);
       return;
     }
+    updateDetectionBoundaryState(result.data);
     if (result.data.status === 'error') {
       detectionError.value = result.data.error ?? '镜头检测失败';
       detecting.value = false;
@@ -2317,6 +2607,9 @@ async function cancelDetection(): Promise<void> {
     detecting.value = false;
     detectionOpen.value = false;
     detectionResult.value = null;
+    detectionBoundaryEngine.value = null;
+    detectionBoundaryFallback.value = false;
+    detectionBoundaryWarning.value = null;
     detectionCapsuleHidden.value = false;
     void syncTranscodeConcurrency();
     showToast('正在取消镜头检测…');
@@ -2325,7 +2618,13 @@ async function cancelDetection(): Promise<void> {
   unwrap(await window.api.detect.cancel({ jobId: detectionJobId.value }));
   stopDetectionPolling();
   detecting.value = false;
+  boundaryFlow.value = false;
+  labelsFlow.value = false;
+  stagedDetection.value = { kind: 'idle' };
   detectionResult.value = null;
+  detectionBoundaryEngine.value = null;
+  detectionBoundaryFallback.value = false;
+  detectionBoundaryWarning.value = null;
   detectionCapsuleHidden.value = false;
   void syncTranscodeConcurrency();
   detectionOpen.value = false;
@@ -2347,6 +2646,12 @@ function closeDetection(): void {
 function viewDetectionResult(): void {
   if (!detectionResult.value && !detectionError.value) return;
   detectionOpen.value = true;
+}
+
+function updateDetectionBoundaryState(snapshot: DetectJobSnapshot): void {
+  if (snapshot.boundaryEngine) detectionBoundaryEngine.value = snapshot.boundaryEngine;
+  detectionBoundaryFallback.value = snapshot.boundaryFallback === true;
+  detectionBoundaryWarning.value = snapshot.boundaryWarning ?? null;
 }
 
 function showDetectionCapsule(): void {
@@ -2382,6 +2687,163 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
   }
 }
 
+/** S41：标签识别（用户主动启动；Qwen 只分析已落库镜头，结果仅生成预览）。 */
+async function startLabelDetection(): Promise<void> {
+  if (!activeProject.value || detecting.value) return;
+  if (shots.value.length === 0) {
+    showToast('请先完成镜头切分，再运行标签识别。');
+    return;
+  }
+  const local = await window.api.ai.getLocalStatus();
+  if (!local.ok || !local.data.available) {
+    const message = local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
+    showToast(message, 'error', '标签识别不可用');
+    return;
+  }
+  stopDetectionPolling();
+  detectionJobId.value = null;
+  detecting.value = true;
+  labelsFlow.value = true;
+  boundaryFlow.value = false;
+  detectionCapsuleHidden.value = false;
+  detectionCancelRequested.value = false;
+  detectionError.value = null;
+  detectionResult.value = null;
+  void syncTranscodeConcurrency();
+  detectionProgress.value = {
+    jobId: '',
+    stage: 'extractFrames',
+    percent: 0,
+    pipeline: 'labels',
+  };
+  const started = unwrap(
+    await window.api.detect.runLabels({ projectId: activeProject.value.id }),
+  );
+  if (!started) {
+    detecting.value = false;
+    labelsFlow.value = false;
+    showToast('无法启动标签识别', 'error');
+    void syncTranscodeConcurrency();
+    return;
+  }
+  detectionJobId.value = started.jobId;
+  stagedDetection.value = { kind: 'labels-running', jobId: started.jobId };
+  detectionPollTimer = setInterval(async () => {
+    if (!detectionJobId.value) return;
+    const result = await window.api.detect.getJob({ jobId: detectionJobId.value });
+    if (!result.ok) {
+      detectionError.value = result.error.message;
+      detecting.value = false;
+      labelsFlow.value = false;
+      void syncTranscodeConcurrency();
+      stopDetectionPolling();
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    if (result.data.status === 'error') {
+      detectionError.value = result.data.error ?? '标签识别失败';
+      detecting.value = false;
+      labelsFlow.value = false;
+      void syncTranscodeConcurrency();
+      stopDetectionPolling();
+      showToast(detectionError.value, 'error', '标签识别失败');
+    } else if (result.data.status === 'cancelled') {
+      detecting.value = false;
+      labelsFlow.value = false;
+      void syncTranscodeConcurrency();
+      stopDetectionPolling();
+    }
+  }, 500);
+}
+
+function closeLabelPreview(): void {
+  // S41：关闭预览不写库；结果暂时保留，可再次查看。
+  labelPreviewOpen.value = false;
+}
+
+function viewLabelPreview(): void {
+  if (!labelPreview.value) return;
+  labelSelected.value = labelPreview.value.shots.map((prediction) => prediction.shotId);
+  labelPreviewOpen.value = true;
+}
+
+function toggleLabelShot(shotId: string, checked: boolean): void {
+  const next = new Set(labelSelected.value);
+  if (checked) next.add(shotId);
+  else next.delete(shotId);
+  labelSelected.value = [...next];
+}
+
+function onLabelToggle(shotId: string, checked: boolean): void {
+  if (shotId === '__all__') {
+    labelSelected.value = checked
+      ? (labelPreview.value?.shots.map((prediction) => prediction.shotId) ?? [])
+      : [];
+    return;
+  }
+  toggleLabelShot(shotId, checked);
+}
+
+/** S41：按策略应用标签预览（唯一写库入口）。 */
+async function applyLabelPreview(policy: LabelApplyPolicy): Promise<void> {
+  if (!labelPreview.value || labelApplying.value) return;
+  if (labelSelected.value.length === 0) {
+    showToast('请先选择要应用的镜头。');
+    return;
+  }
+  if (policy === 'overwrite-all') {
+    const confirmed = await confirmUserDelete(
+      '覆盖全部选中镜头',
+      `将用 AI 识别结果覆盖 ${labelSelected.value.length} 个选中镜头的景别、摄法、备注和六类受管标签。`,
+      {
+        warning: '人工修改过的对应字段也会被覆盖，此操作不可自动恢复。',
+        confirmLabel: '覆盖应用',
+        cancelLabel: '取消',
+      },
+    );
+    if (!confirmed) return;
+  }
+  labelApplying.value = true;
+  try {
+    const result = unwrap(
+      await window.api.detect.applyLabels({
+        jobId: labelPreview.value.jobId,
+        shotIds: labelSelected.value,
+        policy,
+      }),
+    );
+    if (!result) return;
+    handleLabelApplyResult(result);
+    labelPreviewOpen.value = false;
+    labelPreview.value = null;
+    stagedDetection.value = { kind: 'idle' };
+    const project = activeProject.value;
+    if (project) await loadProject(project);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(message, 'error', '标签应用失败');
+  } finally {
+    labelApplying.value = false;
+  }
+}
+
+function handleLabelApplyResult(result: LabelApplyResult): void {
+  const preservedCount = result.preserved.length;
+  if (result.skipped.length > 0) {
+    showToast(
+      `已应用 ${result.appliedShots} 个镜头；${result.skipped.length} 个镜头因切分状态变化未应用。`,
+      'success',
+      '标签应用完成',
+    );
+    return;
+  }
+  showToast(
+    `已更新 ${result.appliedShots} 个镜头、${result.updatedFields} 个字段、${result.updatedTagLinks} 个标签；保留 ${preservedCount} 项人工标注。`,
+    'success',
+    '标签应用完成',
+  );
+}
+
 function setPlayerBounds(bounds: RenderBounds): void {
   const changed =
     !lastPlayerBounds ||
@@ -2401,6 +2863,23 @@ async function setPlayerLayer(level: OverlayLayer): Promise<void> {
 async function applyPlayerLayer(level: OverlayLayer): Promise<void> {
   const state = unwrap(await window.api.player.setLayer({ level }));
   if (state) Object.assign(player, state);
+}
+
+function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
+  const parts = shortcut
+    .split('+')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  const key = parts.at(-1);
+  if (!key) return false;
+  const command = parts.includes('ctrl') || parts.includes('cmd') || parts.includes('meta');
+  const hasCommand = event.ctrlKey || event.metaKey;
+  return (
+    event.key.toLowerCase() === key &&
+    hasCommand === command &&
+    event.shiftKey === parts.includes('shift') &&
+    event.altKey === parts.includes('alt')
+  );
 }
 
 function handleKeydown(event: KeyboardEvent): void {
@@ -2430,6 +2909,18 @@ function handleKeydown(event: KeyboardEvent): void {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     void saveCurrentNote();
+    return;
+  }
+  if (matchesShortcut(event, shortcutSettings.value.merge)) {
+    if (overlayOpen.value || contextMenu.visible || busy.value || shotEditing.value) return;
+    event.preventDefault();
+    void mergeSelectedShots();
+    return;
+  }
+  if (matchesShortcut(event, shortcutSettings.value.split)) {
+    if (overlayOpen.value || contextMenu.visible || busy.value || shotEditing.value) return;
+    event.preventDefault();
+    void splitSelectedAtPlayhead();
     return;
   }
   if (event.key.toLowerCase() === 'm' && !event.ctrlKey && !event.metaKey) {
@@ -2589,7 +3080,10 @@ onMounted(async () => {
       const active = shots.value.find(
         (shot) => event.timeMs >= shot.startMs && event.timeMs < shot.endMs,
       );
-      if (active && active.id !== selectedId.value) selectedId.value = active.id;
+      if (active && active.id !== selectedId.value) {
+        selectedId.value = active.id;
+        mergePartnerId.value = null;
+      }
     }),
     api.player.onLoaded((media: MediaInfo) => {
       loadedPlaybackPath.value = media.path;
@@ -2615,21 +3109,78 @@ onMounted(async () => {
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
       detectionProgress.value = event;
     }),
-    api.detect.onDone((event) => {
+    api.detect.onDone(async (event) => {
       if (!detecting.value) return;
+      if (boundaryFlow.value || labelsFlow.value) return;
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      const snapshot = await window.api.detect.getJob({ jobId: event.jobId });
+      if (snapshot.ok) updateDetectionBoundaryState(snapshot.data);
       detectionResult.value = event.result;
-      detectionProgress.value = { jobId: event.jobId, stage: 'analyze', percent: 100 };
+      detectionProgress.value = {
+        jobId: event.jobId,
+        stage: 'analyze',
+        percent: 100,
+        pipeline: 'boundary',
+      };
       detecting.value = false;
       detectionCapsuleHidden.value = false;
       detectionOpen.value = false;
       void syncTranscodeConcurrency();
       stopDetectionPolling();
-      showToast(
-        `检测完成，${event.result.shots.length} 个镜头待确认。`,
-        'success',
-        '镜头检测完成',
-      );
+      if (detectionBoundaryFallback.value) {
+        showToast(
+          `检测完成，${event.result.shots.length} 个合并镜头待确认。已使用 OpenCV 备用切分。`,
+          'default',
+          '已使用 OpenCV 备用切分',
+        );
+      } else {
+        showToast(
+          `检测完成，${event.result.shots.length} 个合并镜头待确认。`,
+          'success',
+          '镜头检测完成',
+        );
+      }
+    }),
+    // S41：边界任务完成 → 已自动落库，刷新项目并提示
+    api.detect.onBoundaryApplied(async (event) => {
+      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      stopDetectionPolling();
+      detecting.value = false;
+      boundaryFlow.value = false;
+      detectionOpen.value = false;
+      detectionResult.value = null;
+      detectionCapsuleHidden.value = false;
+      stagedDetection.value = { kind: 'boundary-ready', result: event.result };
+      boundaryNotice.value = event.result;
+      void syncTranscodeConcurrency();
+      const project = activeProject.value;
+      if (project) await loadProject(project);
+      if (event.result.applied === 0 && event.result.skippedProtected > 0) {
+        showToast(
+          `切分完成，但 ${event.result.skippedProtected} 个候选镜头与人工/锁定镜头重叠，未应用任何新镜头。`,
+          'error',
+          '切分已跳过全部候选',
+        );
+      } else {
+        showToast(
+          `切分已应用 · ${event.result.applied} 个镜头`,
+          'success',
+          '镜头切分完成',
+        );
+      }
+    }),
+    // S41：标签识别完成 → 打开预览，不自动写库
+    api.detect.onLabelsDone((event) => {
+      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      stopDetectionPolling();
+      detecting.value = false;
+      labelsFlow.value = false;
+      detectionCapsuleHidden.value = false;
+      void syncTranscodeConcurrency();
+      labelPreview.value = event.result;
+      labelSelected.value = event.result.shots.map((prediction) => prediction.shotId);
+      labelPreviewOpen.value = true;
+      stagedDetection.value = { kind: 'labels-ready', result: event.result };
     }),
     api.still.onCreated((still) => upsertStill(still)),
     api.export.onProgress((event) => {
@@ -2698,9 +3249,18 @@ onBeforeUnmount(() => {
         <button class="nav-item" type="button" @click="toggleDemoWorkspace">
           {{ demoMode ? '最近项目' : '示例模式' }}
         </button>
-        <button class="nav-item primary" type="button" @click="openDetection">
+        <button class="nav-item primary" type="button" :disabled="detecting" @click="openDetection">
           <img class="nav-image-icon" :src="cutIcon" alt="" />
-          镜头检测
+          {{ shots.length > 0 ? '重新切分' : '镜头切分' }}
+        </button>
+        <button
+          class="nav-item"
+          type="button"
+          :disabled="detecting || shots.length === 0"
+          :title="shots.length === 0 ? '请先完成镜头切分' : '对已落库镜头运行 Qwen 标签识别'"
+          @click="startLabelDetection"
+        >
+          标签识别
         </button>
         <button class="nav-item" type="button" @click="captureStill">
           <AppIcon name="camera" :size="16" />
@@ -2728,7 +3288,7 @@ onBeforeUnmount(() => {
       <div class="topbar-right">
         <div v-if="detecting && !detectionCapsuleHidden" class="detect-status-chip">
           <span class="detect-chip-dot"></span>
-          <strong>检测中 {{ detectionProgress?.percent ?? 0 }}%</strong>
+          <strong>{{ detectionStageLabel }} · {{ detectionProgress?.percent ?? 0 }}%</strong>
           <div class="detect-chip-track">
             <i :style="{ width: `${detectionProgress?.percent ?? 0}%` }"></i>
           </div>
@@ -2741,8 +3301,29 @@ onBeforeUnmount(() => {
           type="button"
           @click="showDetectionCapsule"
         >
-          检测中 {{ detectionProgress?.percent ?? 0 }}%
+          {{ detectionStageLabel }} · {{ detectionProgress?.percent ?? 0 }}%
         </button>
+        <button
+          v-else-if="labelPreview"
+          class="detect-result-chip"
+          type="button"
+          @click="viewLabelPreview"
+        >
+          标签识别完成 {{ labelPreview.shots.length }} 个镜头 · 查看结果
+        </button>
+        <div v-else-if="boundaryNotice" class="detect-result-chip boundary-notice">
+          <span>
+            切分已应用 · {{ boundaryNotice.applied }} 个镜头{{
+              boundaryNotice.skippedProtected > 0
+                ? `（${boundaryNotice.skippedProtected} 个被人工镜头保护跳过）`
+                : ''
+            }}
+          </span>
+          <button type="button" class="boundary-notice-action" @click="startLabelDetection">
+            开始标签识别
+          </button>
+          <button type="button" aria-label="关闭提示" @click="boundaryNotice = null">×</button>
+        </div>
         <button
           v-else-if="detectionResult"
           class="detect-result-chip"
@@ -2785,6 +3366,7 @@ onBeforeUnmount(() => {
       <ShotListPanel
         :shots="shots"
         :selected-id="selectedId"
+        :merge-partner-id="mergePartnerId"
         :current-time-ms="displayTimeMs"
         :empty-image="emptyShotsImage"
         :initial-scroll-top="shotScrollTop"
@@ -2801,6 +3383,9 @@ onBeforeUnmount(() => {
         :shots="shots"
         :markers="markers"
         :selected-shot="selectedShot"
+        :merge-partner-id="mergePartnerId"
+        :split-shortcut="shortcutSettings.split"
+        :merge-shortcut="shortcutSettings.merge"
         :poster="videoPoster"
         :display-duration-ms="displayDurationMs"
         :display-time-ms="displayTimeMs"
@@ -2817,6 +3402,9 @@ onBeforeUnmount(() => {
         @step="stepFrame"
         @seek="seekTo"
         @select-shot="selectShot"
+        @split-shot="splitSelectedAtPlayhead"
+        @merge-shots="mergeSelectedShots"
+        @shot-context-menu="openTimelineContextMenu"
         @boundary-change="updateBoundary"
         @boundary-commit="commitBoundary"
         @bounds="setPlayerBounds"
@@ -3042,6 +3630,9 @@ onBeforeUnmount(() => {
       :open="confirmState.open"
       :title="confirmState.title"
       :message="confirmState.message"
+      :warning="confirmState.warning || undefined"
+      :confirm-label="confirmState.confirmLabel || undefined"
+      :cancel-label="confirmState.cancelLabel || undefined"
       @confirm="resolveConfirm(true)"
       @cancel="resolveConfirm(false)"
     />
@@ -3075,10 +3666,24 @@ onBeforeUnmount(() => {
       :result="detectionResult"
       :error="detectionError"
       :engine="settings?.recognition?.engine ?? 'ai'"
+      :stage-label="detectionStageLabel"
+      :boundary-engine="detectionBoundaryEngine"
+      :boundary-fallback="detectionBoundaryFallback"
+      :boundary-warning="detectionBoundaryWarning"
       @close="closeDetection"
       @cancel="cancelDetection"
       @retry="openDetection"
       @apply="applyDetection"
+    />
+
+    <LabelPreviewModal
+      :open="labelPreviewOpen"
+      :preview="labelPreview"
+      :selected-ids="labelSelected"
+      :applying="labelApplying"
+      @close="closeLabelPreview"
+      @toggle="onLabelToggle"
+      @apply="applyLabelPreview"
     />
 
     <ExportModal

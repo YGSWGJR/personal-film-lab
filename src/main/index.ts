@@ -153,6 +153,12 @@ function createWindowDataServices(
     (event) => {
       if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_DONE, event);
     },
+    (event) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_BOUNDARY_APPLIED, event);
+    },
+    (event) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.DETECT_EVENT_LABELS_DONE, event);
+    },
     {
       runner: aiRunner,
       getSettings: () =>

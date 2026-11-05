@@ -14,6 +14,7 @@ const props = defineProps<{
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  warning?: string;
 }>();
 
 const emit = defineEmits<{
@@ -65,7 +66,9 @@ watch(
               <p class="confirm-dialog-message">{{ message }}</p>
             </div>
           </div>
-          <p class="confirm-dialog-warning">此操作不可恢复，文件将永久删除，不进回收站。</p>
+          <p class="confirm-dialog-warning">
+            {{ warning ?? '此操作不可恢复，文件将永久删除，不进回收站。' }}
+          </p>
           <div class="confirm-dialog-actions">
             <button type="button" class="confirm-dialog-cancel" @click="emit('cancel')">
               {{ cancelLabel ?? '取消' }}

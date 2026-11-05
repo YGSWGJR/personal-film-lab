@@ -88,7 +88,15 @@ export class TagRepository {
     for (const tagId of tagIds) this.get(tagId);
     this.layer.transaction(() => {
       const insert = this.db.prepare('INSERT OR IGNORE INTO shot_tags (shot_id, tag_id) VALUES (?, ?)');
-      for (const tagId of tagIds) insert.run(shotId, tagId);
+      let changed = false;
+      for (const tagId of tagIds) {
+        const result = insert.run(shotId, tagId);
+        if (result.changes > 0) changed = true;
+      }
+      if (changed) {
+        // S41：人工打标签标记 tags 字段为人工修改，并设 origin='manual'
+        this.markManualTags(shotId);
+      }
       this.layer.projects.touch(projectId);
     });
     return this.tagIdsOfShot(shotId);
@@ -98,10 +106,41 @@ export class TagRepository {
     const projectId = this.assertShot(shotId);
     this.layer.transaction(() => {
       const remove = this.db.prepare('DELETE FROM shot_tags WHERE shot_id = ? AND tag_id = ?');
-      for (const tagId of tagIds) remove.run(shotId, tagId);
+      let changed = false;
+      for (const tagId of tagIds) {
+        const result = remove.run(shotId, tagId);
+        if (result.changes > 0) changed = true;
+      }
+      if (changed) {
+        this.markManualTags(shotId);
+      }
       this.layer.projects.touch(projectId);
     });
     return this.tagIdsOfShot(shotId);
+  }
+
+  /** S41：人工标签变更记录到 manualFields 并设 origin='manual'。 */
+  private markManualTags(shotId: string): void {
+    this.db
+      .prepare("UPDATE shots SET origin = 'manual' WHERE id = ? AND locked = 0")
+      .run(shotId);
+    const row = this.db
+      .prepare('SELECT manual_fields_json FROM shots WHERE id = ?')
+      .get(shotId) as { manual_fields_json: string | null } | undefined;
+    if (!row) return;
+    let current: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.manual_fields_json ?? '[]');
+      if (Array.isArray(parsed)) current = parsed.filter((v): v is string => typeof v === 'string');
+    } catch {
+      current = [];
+    }
+    if (!current.includes('tags')) {
+      current.push('tags');
+      this.db
+        .prepare('UPDATE shots SET manual_fields_json = ? WHERE id = ?')
+        .run(JSON.stringify(current), shotId);
+    }
   }
 
   get(id: string): Tag {

@@ -3,6 +3,7 @@ param(
     [string]$PythonVersion = "3.12.10",
     [string]$NumpyVersion = "2.5.4",
     [string]$OpenCvVersion = "5.0.0.93",
+    [string]$OnnxRuntimeVersion = "1.20.1",
     [switch]$VerifyOnly,
     [switch]$Force
 )
@@ -69,7 +70,7 @@ function Test-Runtime {
     if (-not (Test-Path -LiteralPath $pythonExe)) { return $false }
     $versionText = (& $pythonExe --version 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $versionText -notmatch "^Python\s+3\.12\.") { return $false }
-    $probe = (& $pythonExe -c "import numpy, cv2; print(numpy.__version__ + '|' + cv2.__version__)" 2>&1 | Out-String).Trim()
+    $probe = (& $pythonExe -c "import numpy, cv2, onnxruntime; print(numpy.__version__ + '|' + cv2.__version__ + '|' + onnxruntime.__version__)" 2>&1 | Out-String).Trim()
     return $LASTEXITCODE -eq 0 -and $probe.Contains("|")
 }
 
@@ -83,6 +84,7 @@ function Write-SizeReport {
         "Python runtime: $PythonVersion embed-amd64",
         "numpy: $NumpyVersion",
         "opencv-python: $OpenCvVersion",
+        "onnxruntime: $OnnxRuntimeVersion",
         "Generated: $((Get-Date).ToString('s'))",
         "Total bytes: $totalBytes",
         "Total MB: $totalMb",
@@ -143,6 +145,7 @@ try {
         "--abi", "cp312",
         "numpy==$NumpyVersion",
         "opencv-python==$OpenCvVersion",
+        "onnxruntime==$OnnxRuntimeVersion",
         "-d", $wheelDir
     )
     & python @pipDownloadArgs
@@ -176,7 +179,7 @@ try {
         Copy-Item -LiteralPath $sourceDll -Destination (Join-Path $runtimeDir $dllName) -Force
     }
 
-    $probe = (& $pythonExe -c "import numpy, cv2; print('numpy=' + numpy.__version__ + '; opencv=' + cv2.__version__)" 2>&1 | Out-String).Trim()
+    $probe = (& $pythonExe -c "import numpy, cv2, onnxruntime; print('numpy=' + numpy.__version__ + '; opencv=' + cv2.__version__ + '; onnxruntime=' + onnxruntime.__version__)" 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "内嵌 Python 导入自检失败：$probe"
     }
@@ -185,6 +188,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath (Join-Path $sitePackagesDir "cv2"))) {
         throw "Lib/site-packages 中缺少 cv2"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $sitePackagesDir "onnxruntime"))) {
+        throw "Lib/site-packages 中缺少 onnxruntime"
     }
 
     Write-SizeReport $probe

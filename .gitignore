@@ -41,6 +41,10 @@ resources/ffmpeg/*.exe
 # 内嵌 Python 运行时（由 scripts/prepare-python-runtime.ps1 本地生成）
 resources/python/
 
+# TransNetV2 模型权重（由 scripts/fetch-transnetv2-model.ps1 下载并校验；不入库）
+resources/transnetv2/models/*.onnx
+resources/transnetv2/models/*.part
+
 # Python 缓存
 __pycache__/
 *.pyc

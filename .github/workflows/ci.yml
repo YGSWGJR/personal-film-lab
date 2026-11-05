@@ -37,5 +37,10 @@ jobs:
       - name: Install Python test dependencies
         run: python -m pip install numpy opencv-python
 
-      - name: Test OpenCV algorithms
-        run: python tests/unit/detect/test_detection_algorithms.py
+      - name: Test detection algorithms and TransNetV2 contracts
+        run: |
+          python tests/unit/detect/test_detection_algorithms.py
+          python tests/unit/detect/test_boundary_fusion.py
+          python tests/unit/detect/test_transnetv2_runtime.py
+          python tests/unit/detect/test_server_hybrid.py
+          python tests/unit/detect/test_eval_transnetv2.py

@@ -69,6 +69,7 @@ export function createDemoShots(projectId = 'demo-project'): WorkspaceShot[] {
     id: `demo-shot-${String(index + 1).padStart(2, '0')}`,
     projectId,
     index: index + 1,
+    manualFields: [],
     startMs: definition.start,
     endMs: definition.end,
     durationMs: definition.end - definition.start,

@@ -12,7 +12,7 @@ import type {
 
 type PathKey = Exclude<
   keyof SettingsSetArgs,
-  'proxyTier' | 'confirmUserContent' | 'timeline' | 'recognition' | 'ai'
+  'proxyTier' | 'confirmUserContent' | 'timeline' | 'recognition' | 'ai' | 'shortcuts'
 >;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 type SettingsDraft = Record<PathKey, string>;
@@ -49,6 +49,8 @@ const liveSettings = ref<Settings | null>(null);
 const proxyTier = ref<ProxyTier>('540p');
 /** S36-1b：删除用户内容前二次确认，默认开启（与主进程 defaultSettings 对齐） */
 const confirmUserContent = ref(true);
+const splitShortcut = ref('Ctrl+K');
+const mergeShortcut = ref('Ctrl+Shift+G');
 /** S36-2：识别引擎与 AI 配置草稿 */
 const recognitionEngine = ref<'ai' | 'opencv'>('ai');
 const aiProvider = ref<'local' | 'openai-compatible' | 'mock'>('local');
@@ -174,6 +176,8 @@ function fillDraft(settings: Settings): void {
   proxyTier.value = settings.proxyTier ?? '540p';
   confirmUserContent.value = settings.confirmUserContent ?? true;
   recognitionEngine.value = settings.recognition?.engine ?? 'ai';
+  splitShortcut.value = settings.shortcuts?.split ?? 'Ctrl+K';
+  mergeShortcut.value = settings.shortcuts?.merge ?? 'Ctrl+Shift+G';
   aiProvider.value = settings.ai?.provider ?? 'openai-compatible';
   const sourceProviders = (settings.ai?.providers ?? []).map((item) => ({
     ...item,
@@ -266,6 +270,8 @@ async function resetDefaults(): Promise<void> {
     draft.stillSubDir = '';
     proxyTier.value = '540p';
     confirmUserContent.value = true;
+    splitShortcut.value = 'Ctrl+K';
+    mergeShortcut.value = 'Ctrl+Shift+G';
     recognitionEngine.value = 'ai';
     aiProvider.value = 'openai-compatible';
     aiProviders.value = [];
@@ -515,6 +521,13 @@ function submit(): void {
   value.proxyTier = proxyTier.value;
   value.confirmUserContent = confirmUserContent.value;
   value.recognition = { engine: recognitionEngine.value };
+  const splitKey = splitShortcut.value.trim();
+  const mergeKey = mergeShortcut.value.trim();
+  if (!splitKey || !mergeKey || splitKey.toLowerCase() === mergeKey.toLowerCase()) {
+    browseError.value = '切分与合并快捷键不能为空或重复。';
+    return;
+  }
+  value.shortcuts = { split: splitKey, merge: mergeKey };
   const aiValue: NonNullable<SettingsSetArgs['ai']> = {
     provider: 'local',
     providers: [],
@@ -901,6 +914,33 @@ function submit(): void {
                 : '二次确认 · 已关闭 · 点击开启'
             }}
           </button>
+        </section>
+
+        <section class="mcp-setting shortcut-setting">
+          <div class="mcp-copy">
+            <strong>镜头编辑快捷键</strong>
+            <small>支持 Ctrl/Shift/Alt 组合，例如 Ctrl+K。修改后立即按当前设置匹配。</small>
+          </div>
+          <div class="shortcut-grid">
+            <label class="shortcut-field">
+              <span>切分镜头</span>
+              <input
+                v-model="splitShortcut"
+                type="text"
+                maxlength="40"
+                :disabled="saving || resettingDefaults"
+              />
+            </label>
+            <label class="shortcut-field">
+              <span>合并镜头</span>
+              <input
+                v-model="mergeShortcut"
+                type="text"
+                maxlength="40"
+                :disabled="saving || resettingDefaults"
+              />
+            </label>
+          </div>
         </section>
 
         <section class="path-list">
@@ -1675,6 +1715,36 @@ function submit(): void {
   border-color: rgba(34, 197, 94, 0.42);
   background: rgba(34, 197, 94, 0.1);
   color: #86efac;
+}
+
+.shortcut-setting {
+  align-items: flex-start;
+}
+
+.shortcut-grid {
+  display: grid;
+  min-width: 250px;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.shortcut-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.shortcut-field input {
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 10px;
 }
 
 .path-list {

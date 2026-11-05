@@ -17,6 +17,9 @@ import {
   detectCancelArgsSchema,
   detectGetJobArgsSchema,
   detectRunArgsSchema,
+  boundaryDetectRunArgsSchema,
+  labelDetectRunArgsSchema,
+  labelApplyArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -32,6 +35,9 @@ import {
   projectSaveAsArgsSchema,
   projectUpdateArgsSchema,
   shotCreateArgsSchema,
+  shotMergeArgsSchema,
+  shotSplitArgsSchema,
+  shotTrimArgsSchema,
   shotUpdateArgsSchema,
   stillCreateArgsSchema,
   stillCaptureArgsSchema,
@@ -84,6 +90,12 @@ import type {
   DetectProgressEvent,
   DetectRunArgs,
   DetectRunResult,
+  BoundaryDetectRunArgs,
+  BoundaryAppliedEvent,
+  LabelDetectRunArgs,
+  LabelApplyArgs,
+  LabelApplyResult,
+  LabelsDoneEvent,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -121,6 +133,12 @@ import type {
   Project,
   Shot,
   ShotCreateArgs,
+  ShotMergeArgs,
+  ShotMergeResult,
+  ShotSplitArgs,
+  ShotSplitResult,
+  ShotTrimArgs,
+  ShotTrimResult,
   ShotUpdateArgs,
   Still,
   StillCaptureArgs,
@@ -209,6 +227,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.DETECT_CANCEL]: detectCancelArgsSchema,
   [IPC.DETECT_GET_JOB]: detectGetJobArgsSchema,
   [IPC.DETECT_APPLY]: detectApplyArgsSchema,
+  [IPC.DETECT_RUN_BOUNDARY]: boundaryDetectRunArgsSchema,
+  [IPC.DETECT_RUN_LABELS]: labelDetectRunArgsSchema,
+  [IPC.DETECT_APPLY_LABELS]: labelApplyArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -224,6 +245,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SHOT_CREATE]: shotCreateArgsSchema,
   [IPC.SHOT_UPDATE]: shotUpdateArgsSchema,
   [IPC.SHOT_DELETE]: idArgsSchema,
+  [IPC.SHOT_SPLIT]: shotSplitArgsSchema,
+  [IPC.SHOT_MERGE]: shotMergeArgsSchema,
+  [IPC.SHOT_TRIM]: shotTrimArgsSchema,
 
   [IPC.STILL_LIST]: stillListArgsSchema,
   [IPC.STILL_GET]: idArgsSchema,
@@ -269,6 +293,8 @@ const EVENT_WHITELIST = {
   onMediaProgress: IPC.MEDIA_EVENT_PROGRESS,
   onDetectProgress: IPC.DETECT_EVENT_PROGRESS,
   onDetectDone: IPC.DETECT_EVENT_DONE,
+  onBoundaryApplied: IPC.DETECT_EVENT_BOUNDARY_APPLIED,
+  onLabelsDone: IPC.DETECT_EVENT_LABELS_DONE,
   onStillCreated: IPC.STILL_EVENT_CREATED,
   onExportProgress: IPC.EXPORT_EVENT_PROGRESS,
   onExportDone: IPC.EXPORT_EVENT_DONE,
@@ -391,6 +417,14 @@ const detectApi = {
     subscribe<DetectProgressEvent>(EVENT_WHITELIST.onDetectProgress, listener),
   onDone: (listener: (event: DetectDoneEvent) => void) =>
     subscribe<DetectDoneEvent>(EVENT_WHITELIST.onDetectDone, listener),
+  runBoundary: (args: BoundaryDetectRunArgs) =>
+    invoke<DetectRunResult>(IPC.DETECT_RUN_BOUNDARY, [args]),
+  runLabels: (args: LabelDetectRunArgs) => invoke<DetectRunResult>(IPC.DETECT_RUN_LABELS, [args]),
+  applyLabels: (args: LabelApplyArgs) => invoke<LabelApplyResult>(IPC.DETECT_APPLY_LABELS, [args]),
+  onBoundaryApplied: (listener: (event: BoundaryAppliedEvent) => void) =>
+    subscribe<BoundaryAppliedEvent>(EVENT_WHITELIST.onBoundaryApplied, listener),
+  onLabelsDone: (listener: (event: LabelsDoneEvent) => void) =>
+    subscribe<LabelsDoneEvent>(EVENT_WHITELIST.onLabelsDone, listener),
 };
 
 const dataApi = {
@@ -422,6 +456,9 @@ const shotApi = {
   create: (args: ShotCreateArgs) => invoke<Shot>(IPC.SHOT_CREATE, [args]),
   update: (args: ShotUpdateArgs) => invoke<Shot>(IPC.SHOT_UPDATE, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.SHOT_DELETE, [args]),
+  split: (args: ShotSplitArgs) => invoke<ShotSplitResult>(IPC.SHOT_SPLIT, [args]),
+  merge: (args: ShotMergeArgs) => invoke<ShotMergeResult>(IPC.SHOT_MERGE, [args]),
+  trim: (args: ShotTrimArgs) => invoke<ShotTrimResult>(IPC.SHOT_TRIM, [args]),
 };
 
 const stillApi = {

@@ -18,6 +18,10 @@ import type {
   DetectJobSnapshot,
   DetectRunArgs,
   DetectRunResult,
+  BoundaryDetectRunArgs,
+  LabelDetectRunArgs,
+  LabelApplyArgs,
+  LabelApplyResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -48,6 +52,12 @@ import type {
   SettingsSetArgs,
   Shot,
   ShotCreateArgs,
+  ShotMergeArgs,
+  ShotMergeResult,
+  ShotSplitArgs,
+  ShotSplitResult,
+  ShotTrimArgs,
+  ShotTrimResult,
   ShotUpdateArgs,
   Still,
   StillCaptureArgs,
@@ -419,6 +429,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     IPC.DETECT_APPLY,
     withEnvelope((args: DetectApplyArgs): DetectApplyResult => requireDetect().apply(args)),
   );
+  // S41：分阶段检测
+  ipcMain.handle(
+    IPC.DETECT_RUN_BOUNDARY,
+    withEnvelope((args: BoundaryDetectRunArgs): DetectRunResult =>
+      requireDetect().runBoundary(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.DETECT_RUN_LABELS,
+    withEnvelope((args: LabelDetectRunArgs): DetectRunResult => requireDetect().runLabels(args)),
+  );
+  ipcMain.handle(
+    IPC.DETECT_APPLY_LABELS,
+    withEnvelope((args: LabelApplyArgs): LabelApplyResult => requireDetect().applyLabels(args)),
+  );
 
   // ---------- data: external project import ----------
   ipcMain.handle(
@@ -487,6 +512,35 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.SHOT_UPDATE,
     withEnvelope((args: ShotUpdateArgs): Shot => requireData().shots.update(args)),
+  );
+  ipcMain.handle(
+    IPC.SHOT_SPLIT,
+    withEnvelope(async (args: ShotSplitArgs): Promise<ShotSplitResult> => {
+      const data = requireData();
+      const result = data.shots.split(args);
+      try {
+        const still = await requireCapture().captureAt({
+          shotId: result.right.id,
+          caption: `镜头 ${String(result.right.index).padStart(2, '0')} 自动缩略图`,
+        });
+        const thumbnail = still.thumbPath ?? still.filePath;
+        return {
+          left: data.shots.get(result.left.id),
+          right: data.shots.setThumbnail(result.right.id, thumbnail),
+        };
+      } catch (error) {
+        console.warn(`[shot-split] 右段缩略图生成失败：${(error as Error).message}`);
+        return result;
+      }
+    }),
+  );
+  ipcMain.handle(
+    IPC.SHOT_MERGE,
+    withEnvelope((args: ShotMergeArgs): ShotMergeResult => requireData().shots.merge(args)),
+  );
+  ipcMain.handle(
+    IPC.SHOT_TRIM,
+    withEnvelope((args: ShotTrimArgs): ShotTrimResult => requireData().shots.trim(args)),
   );
   ipcMain.handle(
     IPC.SHOT_DELETE,

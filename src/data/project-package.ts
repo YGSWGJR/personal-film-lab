@@ -318,8 +318,8 @@ export class ProjectPackageService {
       .prepare(
         `INSERT INTO shots (
           id, project_id, shot_index, start_ms, end_ms, duration_ms,
-          shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          shot_size, camera_method, dialogue, remark, origin, locked, manual_fields_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -334,6 +334,7 @@ export class ProjectPackageService {
         (row.remark as string | null) ?? null,
         String(row.origin ?? 'manual'),
         Number(row.locked) ? 1 : 0,
+        typeof row.manual_fields_json === 'string' ? row.manual_fields_json : '[]',
         String(row.created_at ?? new Date().toISOString()),
         String(row.updated_at ?? new Date().toISOString()),
       );

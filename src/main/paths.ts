@@ -5,6 +5,7 @@ import type {
   RecognitionSettings,
   Settings,
   SettingsSetArgs,
+  ShortcutSettings,
   TimelineSettings,
 } from '../shared/types';
 
@@ -22,6 +23,10 @@ export function defaultTimelineSettings(): TimelineSettings {
 /** S36-2：默认识别引擎 = AI（OpenCV 仅隐藏开关）。 */
 export function defaultRecognitionSettings(): RecognitionSettings {
   return { engine: 'ai' };
+}
+
+export function defaultShortcutSettings(): ShortcutSettings {
+  return { split: 'Ctrl+K', merge: 'Ctrl+Shift+G' };
 }
 
 /** S36-2：AI 识别默认参数。apiKey 为空时由凭据存储加密写入。 */
@@ -61,6 +66,7 @@ export function defaultSettings(): SettingsSetArgs {
     timeline: defaultTimelineSettings(),
     recognition: defaultRecognitionSettings(),
     ai: defaultAiSettings(),
+    shortcuts: defaultShortcutSettings(),
   };
 }
 

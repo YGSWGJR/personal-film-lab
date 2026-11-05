@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import emptyShotsImage from '../../../../assets/design/design_empty_shots_1024x768.png';
-import type { DetectProgressEvent, DetectResult } from '../../../shared/types';
+import type { DetectProgressEvent, DetectResult, ShotBoundaryEngine } from '../../../shared/types';
 
 const props = defineProps<{
   open: boolean;
@@ -14,6 +14,10 @@ const props = defineProps<{
   result: DetectResult | null;
   error: string | null;
   engine?: 'ai' | 'opencv';
+  stageLabel: string;
+  boundaryEngine?: ShotBoundaryEngine | null;
+  boundaryFallback?: boolean;
+  boundaryWarning?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +30,16 @@ const emit = defineEmits<{
 const selectedIds = ref<string[]>([]);
 const hasDetection = computed(() => Boolean(props.result && props.result.shots.length > 1));
 const selectedCount = computed(() => selectedIds.value.length);
+const boundaryLabel = computed(() => {
+  if (props.boundaryFallback) return 'OpenCV 备用';
+  if (props.boundaryEngine === 'transnetv2') return 'TransNetV2';
+  if (props.boundaryEngine === 'opencv') return 'OpenCV';
+  if (props.boundaryEngine === 'hybrid') return 'TransNetV2 + OpenCV';
+  return '准备检测';
+});
+const engineSummary = computed(
+  () => `${boundaryLabel.value}${props.engine === 'ai' ? ' · Qwen 标签识别' : ''}`,
+);
 
 watch(
   () => props.result,
@@ -65,7 +79,7 @@ function applyResult(): void {
     <div v-if="open && running" class="detect-capsule" role="status" aria-live="polite">
       <span class="capsule-dot"></span>
       <div class="capsule-copy">
-        <strong>检测中 {{ progress?.percent ?? 0 }}%</strong>
+        <strong class="detect-stage-label">{{ stageLabel }} · {{ progress?.percent ?? 0 }}%</strong>
         <div class="capsule-track"><i :style="{ width: `${progress?.percent ?? 0}%` }"></i></div>
       </div>
       <button type="button" class="capsule-close" title="收起，后台继续检测" @click="emit('close')">
@@ -80,10 +94,7 @@ function applyResult(): void {
           <div>
             <p>SHOT DETECTION</p>
             <h2>镜头检测</h2>
-            <span>
-              {{ projectName }} ·
-              {{ engine === 'ai' ? '本地 Qwen3-VL + OpenCV' : 'OpenCV（备用）' }}
-            </span>
+            <span>{{ projectName }} · {{ engineSummary }}</span>
           </div>
           <button type="button" aria-label="关闭" @click="emit('close')">×</button>
         </header>
@@ -99,10 +110,19 @@ function applyResult(): void {
         </div>
 
         <div v-else-if="result" class="detect-result">
+          <div
+            v-if="boundaryFallback"
+            class="detect-fallback"
+            role="status"
+            :title="boundaryWarning ?? undefined"
+          >
+            <strong>已使用 OpenCV 备用切分</strong>
+            <span>TransNetV2 本次未成功运行，镜头结果由 OpenCV 生成。</span>
+          </div>
           <div class="result-summary">
-            <div><span>候选镜头</span><strong>{{ result.shots.length }}</strong></div>
+            <div><span>合并镜头</span><strong>{{ result.shots.length }}</strong></div>
             <div><span>场景分组</span><strong>{{ result.scenes.length }}</strong></div>
-            <div><span>采样</span><strong>500 ms</strong></div>
+            <div><span>边界引擎</span><strong class="summary-engine">{{ boundaryLabel }}</strong></div>
           </div>
 
           <div v-if="!hasDetection" class="no-cut">
@@ -427,6 +447,27 @@ function applyResult(): void {
   flex-direction: column;
 }
 
+.detect-fallback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 9px 16px;
+  border-bottom: 1px solid rgba(228, 166, 63, 0.35);
+  background: rgba(228, 166, 63, 0.08);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.detect-fallback strong {
+  color: var(--amber);
+  font-weight: 600;
+}
+
+.detect-fallback span {
+  color: var(--text-faint);
+}
+
 .result-summary {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -454,6 +495,12 @@ function applyResult(): void {
   font-family: var(--mono);
   font-size: 18px;
   font-weight: 500;
+}
+
+.result-summary .summary-engine {
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 22px;
 }
 
 .preview-head {

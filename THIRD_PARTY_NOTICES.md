@@ -14,6 +14,8 @@
 | FFmpeg | 探测、抽帧、转码、波形 | 依构建选项而定，可能涉及 LGPL/GPL |
 | libmpv / mpv | 原生视频播放 | 依构建选项而定，可能涉及 LGPL/GPL |
 | OpenCV | 离线镜头检测与图像处理 | Apache-2.0 |
+| TransNetV2（ONNX 权重） | 镜头边界检测模型 | MIT |
+| onnxruntime | TransNetV2 推理运行时 | MIT |
 | NumPy | Python 数值计算 | BSD-3-Clause |
 | PyTorch | 本地模型推理 | BSD-style |
 | ComfyUI | 本地推理核心 | GPL-3.0 |
@@ -25,6 +27,7 @@ FFmpeg 二进制来自
 [`BtbN/FFmpeg-Builds`](https://github.com/BtbN/FFmpeg-Builds)。
 本地模型的上游参考为
 [`nif0/Qwen3-VL-8B-W4A8-GPTQ-ConvRot`](https://huggingface.co/nif0/Qwen3-VL-8B-W4A8-GPTQ-ConvRot)。
+TransNetV2 模型来自 `edgetools/transnetv2`（Hugging Face，revision `4b2cef0e4f246904228785e9f0a693a2363e0a6b`，SHA-256 见 `resources/transnetv2/SHA256SUMS.txt`），上游模型为 Souček & Lokoč（MIT）。通过 `npm run prepare:transnetv2` 获取并校验。
 随包模型的最终来源和校验值应由发布维护者在每次打包前复核。
 
 ## 发布注意事项
