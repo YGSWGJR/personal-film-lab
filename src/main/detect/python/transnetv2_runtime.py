@@ -6,8 +6,10 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from collections import deque
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 import numpy as np
 
@@ -65,14 +67,38 @@ def resolve_output_path(raw_path: str) -> Path:
     return resolved
 
 
-def decode_frames_normalized(
+def decode_frames_raw(
     video_path: str,
     ffmpeg_path: str,
     *,
-    progress: Callable[[float], None] | None = None,
+    progress: Callable[[int], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> np.ndarray:
-    """解码为 rgb24/48x27/25fps 的帧数组（float32，值域 0~1，形状 [n, 27, 48, 3]）。"""
+    """兼容辅助函数：解码为 rgb24/48x27/25fps 的 uint8 原始帧数组。
+
+    正式视频检测走 ``stream_sliding_window_inference``，不会把整段视频常驻内存。
+    """
+    frames = list(
+        _iter_ffmpeg_frames(
+            video_path,
+            ffmpeg_path,
+            progress=progress,
+            cancel_check=cancel_check,
+        )
+    )
+    if not frames:
+        raise TransNetV2RuntimeError("FFmpeg 没有输出任何帧（视频为空或无法解码）")
+    return np.stack(frames, axis=0)
+
+
+def _iter_ffmpeg_frames(
+    video_path: str,
+    ffmpeg_path: str,
+    *,
+    progress: Callable[[int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> Iterator[np.ndarray]:
+    """逐帧产出 rgb24/48x27/25fps 的 uint8 原始帧。"""
     command = [
         ffmpeg_path,
         "-hide_banner",
@@ -89,16 +115,18 @@ def decode_frames_normalized(
         "rgb24",
         "-",
     ]
+    stderr_file = tempfile.TemporaryFile()
     try:
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=stderr_file,
         )
     except OSError as error:
+        stderr_file.close()
         raise TransNetV2RuntimeError(f"无法启动 FFmpeg：{error}") from error
 
-    frames: list[np.ndarray] = []
+    frame_count = 0
     assert process.stdout is not None
     try:
         while True:
@@ -107,38 +135,32 @@ def decode_frames_normalized(
             if not buffer:
                 break
             if len(buffer) != BYTES_PER_FRAME:
-                stderr = _drain_stderr(process)
+                stderr = _read_stderr(stderr_file)
                 raise TransNetV2RuntimeError(
                     f"FFmpeg 输出不完整帧（{len(buffer)}/{BYTES_PER_FRAME} 字节）：{stderr}"
                 )
-            frames.append(
-                np.frombuffer(buffer, dtype=np.uint8)
-                .reshape(FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)
-                .astype(np.float32)
+            frame_count += 1
+            if progress is not None and frame_count % 500 == 0:
+                progress(frame_count)
+            yield np.frombuffer(buffer, dtype=np.uint8).reshape(
+                FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS
             )
-            # 注意：本 ONNX 导出期望 0~255 原始像素值（实测：0~1 归一化时切点概率 <0.01，
-            # 0~255 时合成视频切点概率 0.9995）。
-            if progress is not None and (len(frames) % 500 == 0):
-                progress(len(frames))
+        stderr = _read_stderr(stderr_file)
+        code = process.wait()
+        if code != 0:
+            raise TransNetV2RuntimeError(f"FFmpeg 退出码 {code}：{stderr}")
     finally:
         if process.poll() is None:
             process.kill()
+            process.wait()
         process.stdout.close()
-
-    stderr = _drain_stderr(process)
-    code = process.wait()
-    if code != 0:
-        raise TransNetV2RuntimeError(f"FFmpeg 退出码 {code}：{stderr}")
-
-    if not frames:
-        raise TransNetV2RuntimeError("FFmpeg 没有输出任何帧（视频为空或无法解码）")
-    return np.stack(frames, axis=0)
+        stderr_file.close()
 
 
-def _drain_stderr(process: subprocess.Popen) -> str:
+def _read_stderr(stderr_file) -> str:
     try:
-        assert process.stderr is not None
-        return process.stderr.read().decode("utf-8", errors="replace").strip()[-2000:]
+        stderr_file.seek(0)
+        return stderr_file.read().decode("utf-8", errors="replace").strip()[-2000:]
     except Exception:  # noqa: BLE001 - 诊断信息读取失败不应掩盖主错误
         return ""
 
@@ -171,7 +193,7 @@ def sliding_window_inference(
         window_start = center - WINDOW_STRIDE // 2
         window_end = window_start + WINDOW_SIZE
         indices = np.clip(np.arange(window_start, window_end), 0, total - 1)
-        window = frames[indices]  # [100, 27, 48, 3]
+        window = np.asarray(frames[indices], dtype=np.float32)  # [100, 27, 48, 3]
         batch = window[np.newaxis, ...]  # [1, 100, 27, 48, 3]
         outputs = session.run(output_names, {input_name: batch})
         # 输出已过 sigmoid，不再重复。
@@ -187,6 +209,117 @@ def sliding_window_inference(
             progress(valid_end / total)
 
     return single, many
+
+
+def stream_sliding_window_inference(
+    frame_iter: Iterable[np.ndarray],
+    session,
+    *,
+    expected_frames: int | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """流式版本：只在内存中保留当前 100 帧窗口和预测数组。
+
+    每块 b 的有效输出是 [50b, 50b+50)，输入窗口是 [50b-25, 50b+75)。
+    首尾缺失帧分别复制首帧和尾帧，与官方实现一致。
+    """
+    input_name = session.get_inputs()[0].name
+    output_names = [output.name for output in session.get_outputs()[:2]]
+    if len(output_names) < 2:
+        raise TransNetV2RuntimeError("模型输出不足两路（single_frame / many_hot）")
+
+    buffer: deque[tuple[int, np.ndarray]] = deque()
+    buffer_start = 0
+    total = 0
+    first_frame: np.ndarray | None = None
+    last_frame: np.ndarray | None = None
+    exhausted = False
+    blocks: list[tuple[np.ndarray, np.ndarray]] = []
+    block = 0
+
+    def ensure_through(required_index: int) -> None:
+        nonlocal total, first_frame, last_frame, exhausted
+        while total <= required_index and not exhausted:
+            _cancel_or_raise(cancel_check)
+            try:
+                frame = next(iterator)
+            except StopIteration:
+                exhausted = True
+                break
+            normalized = np.asarray(frame, dtype=np.uint8)
+            if normalized.shape != (FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS):
+                raise TransNetV2RuntimeError(
+                    f"FFmpeg 帧形状错误：{normalized.shape}，期望 "
+                    f"{(FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)}"
+                )
+            if first_frame is None:
+                first_frame = normalized.copy()
+            last_frame = normalized
+            buffer.append((total, normalized))
+            total += 1
+
+    iterator = iter(frame_iter)
+    while True:
+        _cancel_or_raise(cancel_check)
+        center = block * WINDOW_STRIDE
+        window_start = center - WINDOW_STRIDE // 2
+        ensure_through(window_start + WINDOW_SIZE - 1)
+        if center >= total:
+            break
+        if first_frame is None or last_frame is None:
+            raise TransNetV2RuntimeError("FFmpeg 没有输出任何帧（视频为空或无法解码）")
+
+        window = np.empty(
+            (WINDOW_SIZE, FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS),
+            dtype=np.float32,
+        )
+        first_float = first_frame.astype(np.float32)
+        last_float = last_frame.astype(np.float32)
+        for offset, frame_index in enumerate(range(window_start, window_start + WINDOW_SIZE)):
+            if frame_index < 0:
+                window[offset] = first_float
+            elif frame_index >= total:
+                window[offset] = last_float
+            else:
+                buffered_index = frame_index - buffer_start
+                if buffered_index < 0 or buffered_index >= len(buffer):
+                    raise TransNetV2RuntimeError(
+                        f"TransNetV2 流式窗口越界：frame={frame_index}, "
+                        f"bufferStart={buffer_start}, buffered={len(buffer)}"
+                    )
+                window[offset] = buffer[buffered_index][1]
+
+        # 该 ONNX 导出期望 0~255 原始像素值；图内自行处理缩放。
+        outputs = session.run(output_names, {input_name: window[np.newaxis, ...]})
+        single_frame = np.asarray(outputs[0]).reshape(-1)
+        all_frames = np.asarray(outputs[1]).reshape(-1)
+        valid_start = center
+        valid_end = min(center + WINDOW_STRIDE, total)
+        offset = valid_start - window_start
+        length = valid_end - valid_start
+        blocks.append(
+            (
+                single_frame[offset : offset + length].copy(),
+                all_frames[offset : offset + length].copy(),
+            )
+        )
+        if progress is not None and expected_frames and expected_frames > 0:
+            progress(min(1.0, valid_end / expected_frames))
+
+        block += 1
+        next_window_start = block * WINDOW_STRIDE - WINDOW_STRIDE // 2
+        while buffer and buffer[0][0] < next_window_start:
+            buffer.popleft()
+        buffer_start = next_window_start
+
+    if total == 0:
+        raise TransNetV2RuntimeError("FFmpeg 没有输出任何帧（视频为空或无法解码）")
+    single = np.concatenate([item[0] for item in blocks])[:total]
+    many = np.concatenate([item[1] for item in blocks])[:total]
+    if progress is not None:
+        progress(1.0)
+    return single, many, total
 
 
 def predictions_to_scenes(
@@ -234,10 +367,11 @@ def detect_video(
     *,
     fps: float = 25.0,
     threshold: float = 0.5,
+    duration_ms: float | None = None,
     progress=None,
     cancel_check=None,
 ) -> dict:
-    """全流程：解码 → 滑窗推理 → 官方规则切镜头。fps 参数仅回显，解码固定 25fps 标准化。"""
+    """全流程：流式解码 → 滑窗推理 → 官方规则切镜头。"""
     import onnxruntime as ort
 
     providers = ["CPUExecutionProvider"]
@@ -248,35 +382,35 @@ def detect_video(
 
     last_ratio = [0.0]
 
-    def decode_progress(frames_done: int) -> None:
+    def mapped_progress(ratio: float) -> None:
         if progress is not None:
-            progress(min(0.5, frames_done / max(1, frames_done + 2500) * 0.5))
-
-    def infer_progress(ratio: float) -> None:
-        if progress is not None:
-            step = 0.5 + min(1.0, max(0.0, ratio)) * 0.5
+            step = min(1.0, max(0.0, ratio))
             if step > last_ratio[0]:
                 last_ratio[0] = step
                 progress(step)
 
-    frames = decode_frames_normalized(
-        video_path,
-        ffmpeg_path,
-        progress=decode_progress,
-        cancel_check=cancel_check,
+    expected_frames = (
+        max(1, round(float(duration_ms) * NORMALIZED_FPS / 1000.0))
+        if duration_ms is not None and float(duration_ms) > 0
+        else None
     )
-    single, many = sliding_window_inference(
-        frames,
-        session,
-        progress=infer_progress,
-        cancel_check=cancel_check,
-    )
+    frame_iter = _iter_ffmpeg_frames(video_path, ffmpeg_path, cancel_check=cancel_check)
+    try:
+        single, many, frames_total = stream_sliding_window_inference(
+            frame_iter,
+            session,
+            expected_frames=expected_frames,
+            progress=mapped_progress,
+            cancel_check=cancel_check,
+        )
+    finally:
+        frame_iter.close()
     scenes = predictions_to_scenes(single, threshold=threshold)
     return {
         "scenes": scenes,
         "singleFramePredictions": [float(value) for value in single],
         "allFramePredictions": [float(value) for value in many],
-        "framesTotal": int(frames.shape[0]),
+        "framesTotal": frames_total,
         "fps": NORMALIZED_FPS,
         "model": "TransNetV2",
         "modelSha256": _sha256_of(model_path),
@@ -291,6 +425,7 @@ def _main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--output")
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--duration-ms", type=float, default=None)
     args = parser.parse_args()
 
     def progress(percent: float) -> None:
@@ -303,6 +438,7 @@ def _main() -> int:
             args.ffmpeg,
             args.model,
             threshold=args.threshold,
+            duration_ms=args.duration_ms,
             progress=progress,
         )
     except TransNetV2RuntimeError as error:

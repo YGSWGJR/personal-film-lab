@@ -46,8 +46,8 @@ def fuse_boundaries(
 
     fallback_used = len(model) == 0
     if fallback_used:
-        kept = list(opencv)
-        discarded = opencv_total
+        kept, _ = _drop_discarded(list(opencv), [], min_shot_ms, duration_ms)
+        discarded = opencv_total - len(kept)
         model_only: list[float] = []
         supplements: list[float] = []
     else:
@@ -72,6 +72,9 @@ def fuse_boundaries(
 
     cuts = kept
     shots = _cuts_to_shots(cuts, duration_ms)
+    retained_supplements = (
+        0 if fallback_used else sum(1 for cut in cuts if cut in supplements)
+    )
     return {
         "shots": shots,
         "cuts": cuts,
@@ -80,7 +83,7 @@ def fuse_boundaries(
             "opencvCutCount": opencv_total,
             "mergedCutCount": len(cuts),
             "modelOnlyCount": len(model_only),
-            "opencvSupplementCount": len(supplements),
+            "opencvSupplementCount": retained_supplements,
             "discardedCount": discarded,
             "fallbackUsed": fallback_used,
             "mode": "opencv-fallback" if fallback_used else "hybrid",

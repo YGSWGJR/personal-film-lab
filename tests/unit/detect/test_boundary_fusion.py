@@ -40,6 +40,18 @@ class FuseBoundariesTests(unittest.TestCase):
         self.assertEqual(shots(result), [[0, 5000], [5000, 20000]])
         self.assertEqual(diag(result)["mergedCutCount"], 1)
 
+    def test_supplement_removed_by_min_shot_is_not_reported_as_retained(self):
+        result = fuse_boundaries(
+            [2000.0],
+            [2400.0],
+            20_000.0,
+            min_shot_ms=500.0,
+            merge_tolerance_ms=250.0,
+        )
+        self.assertEqual(result["cuts"], [2000.0])
+        self.assertEqual(diag(result)["opencvSupplementCount"], 0)
+        self.assertEqual(diag(result)["discardedCount"], 1)
+
     def test_model_empty_falls_back_to_opencv(self):
         result = fuse_boundaries([], [4000.0, 9000.0], 20_000.0, min_shot_ms=1000.0)
         self.assertEqual(shots(result), [[0, 4000], [4000, 9000], [9000, 20000]])
@@ -47,6 +59,7 @@ class FuseBoundariesTests(unittest.TestCase):
         self.assertEqual(diag(result)["mode"], "opencv-fallback")
         self.assertEqual(diag(result)["modelCutCount"], 0)
         self.assertEqual(diag(result)["mergedCutCount"], 2)
+        self.assertEqual(diag(result)["discardedCount"], 0)
 
     def test_full_coverage_head_tail(self):
         result = fuse_boundaries([10_000.0], [], 20_000.0, min_shot_ms=1000.0)
@@ -98,6 +111,17 @@ class FuseBoundariesTests(unittest.TestCase):
         self.assertEqual(shots(result), [[0, 20_000]])
         self.assertEqual(diag(result)["mergedCutCount"], 0)
         self.assertTrue(diag(result)["fallbackUsed"])
+
+    def test_opencv_fallback_still_applies_min_shot_filter(self):
+        result = fuse_boundaries(
+            [],
+            [500.0, 5000.0, 19_600.0],
+            20_000.0,
+            min_shot_ms=1000.0,
+        )
+        self.assertEqual(shots(result), [[0, 5000], [5000, 20000]])
+        self.assertEqual(diag(result)["mergedCutCount"], 1)
+        self.assertEqual(diag(result)["discardedCount"], 2)
 
     def test_cuts_deduped_and_sorted(self):
         result = fuse_boundaries([7000.0, 3000.0, 7000.0], [], 20_000.0, min_shot_ms=1000.0)
