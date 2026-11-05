@@ -9,6 +9,7 @@ import AppIcon from './components/AppIcon.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
+import LabelPreviewModal from './components/LabelPreviewModal.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import SettingsModal from './components/SettingsModal.vue';
@@ -40,6 +41,10 @@ import type {
   DetectJobSnapshot,
   DetectProgressEvent,
   DetectResult,
+  BoundaryAppliedResult,
+  LabelApplyPolicy,
+  LabelApplyResult,
+  LabelPreviewResult,
   ExportProgressEvent,
   GpuStatus,
   IpcResult,
@@ -120,9 +125,30 @@ const detectionJobId = ref<string | null>(null);
 const detectionBoundaryEngine = ref<ShotBoundaryEngine | null>(null);
 const detectionBoundaryFallback = ref(false);
 const detectionBoundaryWarning = ref<string | null>(null);
+/** S41：分阶段检测状态机（boundary=切分落库，labels=标签识别） */
+type StagedDetectionState =
+  | { kind: 'idle' }
+  | { kind: 'boundary-running'; jobId: string }
+  | { kind: 'boundary-ready'; result: BoundaryAppliedResult }
+  | { kind: 'labels-running'; jobId: string }
+  | { kind: 'labels-ready'; result: LabelPreviewResult };
+const stagedDetection = ref<StagedDetectionState>({ kind: 'idle' });
+/** 当前任务是否为边界任务（onDone 事件据此跳过旧的一次性预览流程） */
+const boundaryFlow = ref(false);
+/** 边界任务完成后的顶部提示（可关闭，关闭后仍可从镜头列表再次进入标签识别） */
+const boundaryNotice = ref<BoundaryAppliedResult | null>(null);
+const labelsFlow = ref(false);
+const labelPreview = ref<LabelPreviewResult | null>(null);
+const labelPreviewOpen = ref(false);
+const labelApplying = ref(false);
+const labelSelected = ref<string[]>([]);
 const detectionStageLabel = computed(() => {
   const progress = detectionProgress.value;
   const percent = progress?.percent ?? 0;
+  if (progress?.pipeline === 'labels') {
+    if (percent < 45) return '提取代表帧';
+    return percent >= 95 ? '整理识别结果' : 'Qwen 标签识别';
+  }
   if (!progress || progress.stage === 'extractFrames' || percent < 58) {
     return '提取画面';
   }
@@ -1841,19 +1867,7 @@ async function openDetection(): Promise<void> {
     showToast('请先导入本地影片，再运行镜头检测。');
     return;
   }
-  const engine = settings.value?.recognition?.engine ?? 'ai';
-  if (engine === 'ai') {
-    const local = await window.api.ai.getLocalStatus();
-    if (!local.ok || !local.data.available) {
-      detectionError.value =
-        local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
-      detectionProgress.value = null;
-      detectionResult.value = null;
-      detecting.value = false;
-      detectionOpen.value = true;
-      return;
-    }
-  }
+  // S41：切分不再依赖 Qwen 环境，只检查 Python/OpenCV 检测环境。
   let environment: IpcResult<DetectEnvCheck>;
   try {
     environment = await window.api.detect.checkEnv();
@@ -2501,11 +2515,12 @@ watch(
 
 async function startDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
-  const engine = settings.value?.recognition?.engine ?? 'ai';
   stopDetectionPolling();
   // 清掉上一次任务的 jobId，避免第二次检测时 cancel/进度过滤命中旧任务。
   detectionJobId.value = null;
   detecting.value = true;
+  boundaryFlow.value = true;
+  labelsFlow.value = false;
   detectionCapsuleHidden.value = false;
   detectionCancelRequested.value = false;
   void syncTranscodeConcurrency();
@@ -2517,33 +2532,33 @@ async function startDetection(): Promise<void> {
   detectionBoundaryWarning.value = null;
   detectionProgress.value = {
     jobId: '',
-    stage: engine === 'ai' ? 'analyze' : 'extractFrames',
+    stage: 'extractFrames',
     percent: 0,
-    pipeline: engine === 'ai' ? 'labels' : 'boundary',
+    pipeline: 'boundary',
   };
   const started = unwrap(
-    await window.api.detect.run({
+    await window.api.detect.runBoundary({
       projectId: activeProject.value.id,
-      dryRun: true,
       options: {
         sensitivity: 0.62,
         minShotSeconds: 0.5,
         filterTransitions: true,
         weights: { s: 0.3, c: 0.3, h: 0.4 },
         intervalMs: 500,
-        engine,
         boundaryEngine: 'hybrid',
       },
     }),
   );
   if (!started) {
     detecting.value = false;
-    detectionError.value = '无法启动镜头检测';
+    boundaryFlow.value = false;
+    detectionError.value = '无法启动镜头切分';
     detectionOpen.value = true;
     void syncTranscodeConcurrency();
     return;
   }
   detectionJobId.value = started.jobId;
+  stagedDetection.value = { kind: 'boundary-running', jobId: started.jobId };
   if (detectionCancelRequested.value) {
     detectionCancelRequested.value = false;
     await window.api.detect.cancel({ jobId: started.jobId });
@@ -2603,6 +2618,9 @@ async function cancelDetection(): Promise<void> {
   unwrap(await window.api.detect.cancel({ jobId: detectionJobId.value }));
   stopDetectionPolling();
   detecting.value = false;
+  boundaryFlow.value = false;
+  labelsFlow.value = false;
+  stagedDetection.value = { kind: 'idle' };
   detectionResult.value = null;
   detectionBoundaryEngine.value = null;
   detectionBoundaryFallback.value = false;
@@ -2667,6 +2685,163 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
     applyingDetection.value = false;
     void syncTranscodeConcurrency();
   }
+}
+
+/** S41：标签识别（用户主动启动；Qwen 只分析已落库镜头，结果仅生成预览）。 */
+async function startLabelDetection(): Promise<void> {
+  if (!activeProject.value || detecting.value) return;
+  if (shots.value.length === 0) {
+    showToast('请先完成镜头切分，再运行标签识别。');
+    return;
+  }
+  const local = await window.api.ai.getLocalStatus();
+  if (!local.ok || !local.data.available) {
+    const message = local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
+    showToast(message, 'error', '标签识别不可用');
+    return;
+  }
+  stopDetectionPolling();
+  detectionJobId.value = null;
+  detecting.value = true;
+  labelsFlow.value = true;
+  boundaryFlow.value = false;
+  detectionCapsuleHidden.value = false;
+  detectionCancelRequested.value = false;
+  detectionError.value = null;
+  detectionResult.value = null;
+  void syncTranscodeConcurrency();
+  detectionProgress.value = {
+    jobId: '',
+    stage: 'extractFrames',
+    percent: 0,
+    pipeline: 'labels',
+  };
+  const started = unwrap(
+    await window.api.detect.runLabels({ projectId: activeProject.value.id }),
+  );
+  if (!started) {
+    detecting.value = false;
+    labelsFlow.value = false;
+    showToast('无法启动标签识别', 'error');
+    void syncTranscodeConcurrency();
+    return;
+  }
+  detectionJobId.value = started.jobId;
+  stagedDetection.value = { kind: 'labels-running', jobId: started.jobId };
+  detectionPollTimer = setInterval(async () => {
+    if (!detectionJobId.value) return;
+    const result = await window.api.detect.getJob({ jobId: detectionJobId.value });
+    if (!result.ok) {
+      detectionError.value = result.error.message;
+      detecting.value = false;
+      labelsFlow.value = false;
+      void syncTranscodeConcurrency();
+      stopDetectionPolling();
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    if (result.data.status === 'error') {
+      detectionError.value = result.data.error ?? '标签识别失败';
+      detecting.value = false;
+      labelsFlow.value = false;
+      void syncTranscodeConcurrency();
+      stopDetectionPolling();
+      showToast(detectionError.value, 'error', '标签识别失败');
+    } else if (result.data.status === 'cancelled') {
+      detecting.value = false;
+      labelsFlow.value = false;
+      void syncTranscodeConcurrency();
+      stopDetectionPolling();
+    }
+  }, 500);
+}
+
+function closeLabelPreview(): void {
+  // S41：关闭预览不写库；结果暂时保留，可再次查看。
+  labelPreviewOpen.value = false;
+}
+
+function viewLabelPreview(): void {
+  if (!labelPreview.value) return;
+  labelSelected.value = labelPreview.value.shots.map((prediction) => prediction.shotId);
+  labelPreviewOpen.value = true;
+}
+
+function toggleLabelShot(shotId: string, checked: boolean): void {
+  const next = new Set(labelSelected.value);
+  if (checked) next.add(shotId);
+  else next.delete(shotId);
+  labelSelected.value = [...next];
+}
+
+function onLabelToggle(shotId: string, checked: boolean): void {
+  if (shotId === '__all__') {
+    labelSelected.value = checked
+      ? (labelPreview.value?.shots.map((prediction) => prediction.shotId) ?? [])
+      : [];
+    return;
+  }
+  toggleLabelShot(shotId, checked);
+}
+
+/** S41：按策略应用标签预览（唯一写库入口）。 */
+async function applyLabelPreview(policy: LabelApplyPolicy): Promise<void> {
+  if (!labelPreview.value || labelApplying.value) return;
+  if (labelSelected.value.length === 0) {
+    showToast('请先选择要应用的镜头。');
+    return;
+  }
+  if (policy === 'overwrite-all') {
+    const confirmed = await confirmUserDelete(
+      '覆盖全部选中镜头',
+      `将用 AI 识别结果覆盖 ${labelSelected.value.length} 个选中镜头的景别、摄法、备注和六类受管标签。`,
+      {
+        warning: '人工修改过的对应字段也会被覆盖，此操作不可自动恢复。',
+        confirmLabel: '覆盖应用',
+        cancelLabel: '取消',
+      },
+    );
+    if (!confirmed) return;
+  }
+  labelApplying.value = true;
+  try {
+    const result = unwrap(
+      await window.api.detect.applyLabels({
+        jobId: labelPreview.value.jobId,
+        shotIds: labelSelected.value,
+        policy,
+      }),
+    );
+    if (!result) return;
+    handleLabelApplyResult(result);
+    labelPreviewOpen.value = false;
+    labelPreview.value = null;
+    stagedDetection.value = { kind: 'idle' };
+    const project = activeProject.value;
+    if (project) await loadProject(project);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(message, 'error', '标签应用失败');
+  } finally {
+    labelApplying.value = false;
+  }
+}
+
+function handleLabelApplyResult(result: LabelApplyResult): void {
+  const preservedCount = result.preserved.length;
+  if (result.skipped.length > 0) {
+    showToast(
+      `已应用 ${result.appliedShots} 个镜头；${result.skipped.length} 个镜头因切分状态变化未应用。`,
+      'success',
+      '标签应用完成',
+    );
+    return;
+  }
+  showToast(
+    `已更新 ${result.appliedShots} 个镜头、${result.updatedFields} 个字段、${result.updatedTagLinks} 个标签；保留 ${preservedCount} 项人工标注。`,
+    'success',
+    '标签应用完成',
+  );
 }
 
 function setPlayerBounds(bounds: RenderBounds): void {
@@ -2936,6 +3111,7 @@ onMounted(async () => {
     }),
     api.detect.onDone(async (event) => {
       if (!detecting.value) return;
+      if (boundaryFlow.value || labelsFlow.value) return;
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
       const snapshot = await window.api.detect.getJob({ jobId: event.jobId });
       if (snapshot.ok) updateDetectionBoundaryState(snapshot.data);
@@ -2964,6 +3140,47 @@ onMounted(async () => {
           '镜头检测完成',
         );
       }
+    }),
+    // S41：边界任务完成 → 已自动落库，刷新项目并提示
+    api.detect.onBoundaryApplied(async (event) => {
+      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      stopDetectionPolling();
+      detecting.value = false;
+      boundaryFlow.value = false;
+      detectionOpen.value = false;
+      detectionResult.value = null;
+      detectionCapsuleHidden.value = false;
+      stagedDetection.value = { kind: 'boundary-ready', result: event.result };
+      boundaryNotice.value = event.result;
+      void syncTranscodeConcurrency();
+      const project = activeProject.value;
+      if (project) await loadProject(project);
+      if (event.result.applied === 0 && event.result.skippedProtected > 0) {
+        showToast(
+          `切分完成，但 ${event.result.skippedProtected} 个候选镜头与人工/锁定镜头重叠，未应用任何新镜头。`,
+          'error',
+          '切分已跳过全部候选',
+        );
+      } else {
+        showToast(
+          `切分已应用 · ${event.result.applied} 个镜头`,
+          'success',
+          '镜头切分完成',
+        );
+      }
+    }),
+    // S41：标签识别完成 → 打开预览，不自动写库
+    api.detect.onLabelsDone((event) => {
+      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      stopDetectionPolling();
+      detecting.value = false;
+      labelsFlow.value = false;
+      detectionCapsuleHidden.value = false;
+      void syncTranscodeConcurrency();
+      labelPreview.value = event.result;
+      labelSelected.value = event.result.shots.map((prediction) => prediction.shotId);
+      labelPreviewOpen.value = true;
+      stagedDetection.value = { kind: 'labels-ready', result: event.result };
     }),
     api.still.onCreated((still) => upsertStill(still)),
     api.export.onProgress((event) => {
@@ -3032,9 +3249,18 @@ onBeforeUnmount(() => {
         <button class="nav-item" type="button" @click="toggleDemoWorkspace">
           {{ demoMode ? '最近项目' : '示例模式' }}
         </button>
-        <button class="nav-item primary" type="button" @click="openDetection">
+        <button class="nav-item primary" type="button" :disabled="detecting" @click="openDetection">
           <img class="nav-image-icon" :src="cutIcon" alt="" />
-          镜头检测
+          {{ shots.length > 0 ? '重新切分' : '镜头切分' }}
+        </button>
+        <button
+          class="nav-item"
+          type="button"
+          :disabled="detecting || shots.length === 0"
+          :title="shots.length === 0 ? '请先完成镜头切分' : '对已落库镜头运行 Qwen 标签识别'"
+          @click="startLabelDetection"
+        >
+          标签识别
         </button>
         <button class="nav-item" type="button" @click="captureStill">
           <AppIcon name="camera" :size="16" />
@@ -3077,6 +3303,27 @@ onBeforeUnmount(() => {
         >
           {{ detectionStageLabel }} · {{ detectionProgress?.percent ?? 0 }}%
         </button>
+        <button
+          v-else-if="labelPreview"
+          class="detect-result-chip"
+          type="button"
+          @click="viewLabelPreview"
+        >
+          标签识别完成 {{ labelPreview.shots.length }} 个镜头 · 查看结果
+        </button>
+        <div v-else-if="boundaryNotice" class="detect-result-chip boundary-notice">
+          <span>
+            切分已应用 · {{ boundaryNotice.applied }} 个镜头{{
+              boundaryNotice.skippedProtected > 0
+                ? `（${boundaryNotice.skippedProtected} 个被人工镜头保护跳过）`
+                : ''
+            }}
+          </span>
+          <button type="button" class="boundary-notice-action" @click="startLabelDetection">
+            开始标签识别
+          </button>
+          <button type="button" aria-label="关闭提示" @click="boundaryNotice = null">×</button>
+        </div>
         <button
           v-else-if="detectionResult"
           class="detect-result-chip"
@@ -3427,6 +3674,16 @@ onBeforeUnmount(() => {
       @cancel="cancelDetection"
       @retry="openDetection"
       @apply="applyDetection"
+    />
+
+    <LabelPreviewModal
+      :open="labelPreviewOpen"
+      :preview="labelPreview"
+      :selected-ids="labelSelected"
+      :applying="labelApplying"
+      @close="closeLabelPreview"
+      @toggle="onLabelToggle"
+      @apply="applyLabelPreview"
     />
 
     <ExportModal
