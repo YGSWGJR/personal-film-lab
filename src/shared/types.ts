@@ -21,6 +21,9 @@ export interface TimelineSettings {
 /** S36-2：镜头识别引擎。 */
 export type RecognitionEngine = 'ai' | 'opencv';
 
+/** S39：镜头边界引擎。与 RecognitionEngine 分离，后者继续控制 Qwen 语义标注。 */
+export type ShotBoundaryEngine = 'hybrid' | 'transnetv2' | 'opencv';
+
 export interface RecognitionSettings {
   engine: RecognitionEngine;
 }
@@ -692,6 +695,8 @@ export interface DetectOptions {
   intervalMs?: number;
   /** S36-2：识别引擎；缺省读取 settings.recognition.engine（默认 ai） */
   engine?: RecognitionEngine;
+  /** S39：镜头边界引擎；缺省 hybrid，模型不可用时自动回退 opencv */
+  boundaryEngine?: ShotBoundaryEngine;
 }
 
 export interface Project {
@@ -811,6 +816,12 @@ export interface DetectJobSnapshot {
   currentSegment?: number;
   segmentsTotal?: number;
   usage?: ShotDetectionUsage;
+  /** S39：实际执行的镜头边界引擎（模型运行中失败时可能从 hybrid 变为 opencv） */
+  boundaryEngine?: ShotBoundaryEngine;
+  /** S39：是否因模型/FFmpeg不可用而回退 OpenCV */
+  boundaryFallback?: boolean;
+  /** S39：边界引擎降级或 Python 返回的可读警告 */
+  boundaryWarning?: string | null;
 }
 
 export interface DetectRunArgs {

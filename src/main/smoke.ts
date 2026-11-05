@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -23,7 +23,7 @@ import {
   createProviderFromSettings,
   resolveActiveProvider,
 } from './ai/provider';
-import type { DetectService } from './detect/detect-service';
+import { resolveTransnetModelPath, type DetectService } from './detect/detect-service';
 import type { MediaService } from './media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from './paths';
 import type { PlayerService } from './player/player-service';
@@ -90,6 +90,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let aiLiveTextChecks: Record<string, unknown> = {};
   let localAiChecks: Record<string, unknown> = {};
   let localDetectChecks: Record<string, unknown> = {};
+  let transnetHybridChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
@@ -101,7 +102,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -397,6 +398,14 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       });
     }
 
+    if (process.env['SMOKE_TRANSNET_HYBRID'] === '1') {
+      transnetHybridChecks = await runTransnetHybridChecks(
+        deps,
+        process.env['SMOKE_TRANSNET_VIDEO'] ?? process.env['SMOKE_VIDEO'] ?? '',
+      );
+      Object.assign(checks, transnetHybridChecksAssertions(transnetHybridChecks));
+    }
+
     if (process.env['SMOKE_AI_SEGMENT'] === '1') {
       aiSegmentChecks = await runAiSegmentChecks(
         deps,
@@ -427,7 +436,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -4219,6 +4228,145 @@ async function runLocalDetectChecks(
       rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
     } catch {
       // ignore cleanup failures
+    }
+  }
+  return out;
+}
+
+function transnetHybridChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  const expectedEngine = process.env['SMOKE_TRANSNET_BOUNDARY_MODE'] ?? 'hybrid';
+  const expectFallback = process.env['SMOKE_TRANSNET_EXPECT_FALLBACK'] === '1';
+  return {
+    transnetModelPresent: result.modelPresent === !expectFallback,
+    transnetHybridEngine: result.boundaryEngine === (expectFallback ? 'opencv' : expectedEngine),
+    transnetHybridNoFallback: result.boundaryFallback === expectFallback,
+    transnetHybridDone: result.done === true,
+    transnetHybridShots: Number(result.shotCount ?? 0) >= 2,
+    transnetHybridContinuous: result.continuous === true,
+    transnetHybridCoverage: result.coverage === true,
+    transnetHybridThumbnails: result.thumbnails === true,
+    transnetHybridApplied: Number(result.applied ?? 0) >= 2,
+    transnetHybridPersisted: result.persisted === true,
+    transnetHybridFramesClean: result.framesClean === true,
+    transnetHybridCancel: result.cancelStatus === 'cancelled',
+    transnetHybridQwen: process.env['SMOKE_TRANSNET_WITH_QWEN'] !== '1' || result.annotated === true,
+  };
+}
+
+async function runTransnetHybridChecks(
+  deps: SmokeDeps,
+  videoPath: string,
+): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  const detect = deps.getDetect?.() ?? null;
+  const media = deps.getMedia?.() ?? null;
+  const out: Record<string, any> = {
+    modelPath: resolveTransnetModelPath(),
+  };
+  const requestedBoundary = process.env['SMOKE_TRANSNET_BOUNDARY_MODE'] ?? 'hybrid';
+  if (!['hybrid', 'transnetv2', 'opencv'].includes(requestedBoundary)) {
+    return { ...out, error: `unsupported boundary mode: ${requestedBoundary}` };
+  }
+  out.modelPresent = existsSync(out.modelPath);
+  if (!videoPath || !data || !detect || !media) {
+    return { ...out, skipped: true, reason: 'missing video/data/detect/media' };
+  }
+
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const probe = await media.probe({ path: videoPath });
+  const project = data.projects.create({
+    name: `S39 TransNetV2 Hybrid ${Date.now()}`,
+    source: { type: 'local', path: videoPath },
+    media: {
+      filename: probe.filename,
+      container: probe.container,
+      durationMs: probe.durationMs,
+      width: probe.width,
+      height: probe.height,
+      fps: probe.fps,
+      videoCodec: probe.videoCodec,
+      audioCodec: probe.audioCodec,
+      sizeBytes: statSync(videoPath).size,
+    },
+  });
+  const options: DetectOptions = {
+    sensitivity: 0.62,
+    minShotSeconds: 0.3,
+    filterTransitions: true,
+    weights: { s: 0.15, c: 0.15, h: 0.25, hv: 0.2, edge: 0.1, grid: 0.15 },
+    intervalMs: 250,
+    engine: process.env['SMOKE_TRANSNET_WITH_QWEN'] === '1' ? 'ai' : 'opencv',
+    boundaryEngine: requestedBoundary as DetectOptions['boundaryEngine'],
+  };
+
+  try {
+    const started = detect.run({ projectId: project.id, dryRun: true, options });
+    const deadline = Date.now() + 240_000;
+    let job = detect.getJob(started.jobId);
+    while ((job.status === 'running' || job.status === 'queued') && Date.now() < deadline) {
+      await sleep(250);
+      job = detect.getJob(started.jobId);
+    }
+    out.status = job.status;
+    out.error = job.error;
+    out.boundaryEngine = job.boundaryEngine;
+    out.boundaryFallback = job.boundaryFallback;
+    out.boundaryWarning = job.boundaryWarning;
+    out.done = job.status === 'done';
+    if (job.status !== 'done') return out;
+
+    const result = detect.getJobResult(started.jobId);
+    out.shotCount = result.shots.length;
+    out.shots = result.shots.map((shot) => ({
+      index: shot.index,
+      startMs: shot.startMs,
+      endMs: shot.endMs,
+      thumbnail: shot.thumbnail,
+      hasAnnotation: Boolean(shot.remark && shot.shotSize),
+    }));
+    out.continuous =
+      result.shots.length > 0 &&
+      result.shots[0].startMs === 0 &&
+      result.shots.every(
+        (shot, index) =>
+          shot.endMs > shot.startMs &&
+          (index === 0 || shot.startMs === result.shots[index - 1].endMs),
+      );
+    const durationMs = Math.max(1, project.media.durationMs);
+    out.coverage = Math.abs((result.shots.at(-1)?.endMs ?? 0) - durationMs) <= 100;
+    out.thumbnails = result.shots.every(
+      (shot) => Boolean(shot.thumbnail && existsSync(shot.thumbnail)),
+    );
+    out.annotated = result.shots.some((shot) => Boolean(shot.remark && shot.shotSize));
+
+    out.applied = detect.applyByJob(started.jobId).applied;
+    const persisted = data.shots.list(project.id);
+    out.persisted =
+      persisted.length === out.applied &&
+      persisted.every((shot) => shot.startMs >= 0 && shot.endMs > shot.startMs);
+
+    const cancelJob = detect.run({ projectId: project.id, dryRun: true, options });
+    detect.cancel(cancelJob.jobId);
+    const cancelDeadline = Date.now() + 15_000;
+    let cancelSnapshot = detect.getJob(cancelJob.jobId);
+    while (
+      (cancelSnapshot.status === 'running' || cancelSnapshot.status === 'queued') &&
+      Date.now() < cancelDeadline
+    ) {
+      await sleep(150);
+      cancelSnapshot = detect.getJob(cancelJob.jobId);
+    }
+    out.cancelStatus = cancelSnapshot.status;
+    const frameRoot = resolveDetectFramesDir(project.id);
+    out.framesClean = !existsSync(frameRoot) || readdirSync(frameRoot).length === 0;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  } finally {
+    try {
+      data.projects.delete(project.id);
+      rmSync(join(resolveThumbCacheDir(), project.id), { recursive: true, force: true });
+    } catch (cleanupError) {
+      out.cleanupError = String(cleanupError);
     }
   }
   return out;

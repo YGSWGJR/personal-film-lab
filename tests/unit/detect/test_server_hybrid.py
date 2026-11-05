@@ -130,6 +130,26 @@ class HybridServerTests(unittest.TestCase):
         self.assertIn("已回退 OpenCV", result["warning"])
         self.assertEqual(result["shotRanges"][-1]["endFrame"], 1000)
 
+    def test_transnetv2_mode_ignores_opencv_supplement_on_success(self) -> None:
+        params = {
+            **self.base_params,
+            "mode": "transnetv2",
+            "videoPath": "video.mp4",
+            "ffmpegPath": "ffmpeg.exe",
+            "transnetModelPath": "model.onnx",
+        }
+        with (
+            mock.patch.object(server, "_run_opencv", return_value=(opencv_result(), None)),
+            mock.patch("transnetv2_runtime.detect_video", return_value=model_result()),
+        ):
+            result = server.analyze(params)
+
+        self.assertEqual(result["diagnostics"]["mode"], "transnetv2")
+        self.assertEqual(result["diagnostics"]["opencvCutCount"], 1)
+        self.assertEqual(result["diagnostics"]["opencvSupplementCount"], 0)
+        self.assertFalse(result["diagnostics"]["fallbackUsed"])
+        self.assertEqual(result["shotRanges"][0], {"startFrame": 0, "endFrame": 480})
+
     def test_hybrid_reports_when_both_engines_fail(self) -> None:
         params = {
             **self.base_params,

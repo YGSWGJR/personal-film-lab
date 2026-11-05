@@ -21,12 +21,14 @@ import type {
   RecognitionEngine,
   Scene,
   Settings,
+  ShotBoundaryEngine,
   ShotDetectionUsage,
   ShotPreview,
 } from '../../shared/types';
 import type { AiDetectRunner } from '../ai/ai-detect-runner';
 import type { LocalVisionService } from '../ai/local-vision-service';
 import type { ShotDetectionProvider } from '../ai/provider';
+import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
 import type { MediaService } from '../media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
 import { DetectError } from './detect-error';
@@ -53,6 +55,9 @@ interface InternalDetectJob {
   segmentsTotal: number;
   usage: ShotDetectionUsage | null;
   provider: ShotDetectionProvider | null;
+  boundaryEngine: ShotBoundaryEngine | null;
+  boundaryFallback: boolean;
+  boundaryWarning: string | null;
 }
 
 interface AiDetectDeps {
@@ -71,10 +76,21 @@ interface PythonAnalyzeResult {
   cutFrames: number[];
   shotRanges: PythonShotRange[];
   sceneRanges: PythonShotRange[];
+  diagnostics?: Record<string, unknown>;
+  warnings?: string[];
+  warning?: string;
 }
 
 interface ResolvedDetectOptions extends DetectOptions {
   weights: DetectWeights;
+  boundaryEngine: ShotBoundaryEngine;
+}
+
+interface ResolvedBoundaryPlan {
+  mode: ShotBoundaryEngine;
+  modelPath: string | null;
+  ffmpegPath: string | null;
+  warning: string | null;
 }
 
 /**
@@ -132,6 +148,9 @@ export class DetectService {
       segmentsTotal: 0,
       usage: null,
       provider: null,
+      boundaryEngine: null,
+      boundaryFallback: false,
+      boundaryWarning: null,
     };
     this.jobs.set(jobId, job);
     void this.runJob(job, options, Boolean(args.dryRun));
@@ -163,6 +182,9 @@ export class DetectService {
       currentSegment: job.currentSegment,
       segmentsTotal: job.segmentsTotal,
       usage: job.usage ?? undefined,
+      boundaryEngine: job.boundaryEngine ?? undefined,
+      boundaryFallback: job.boundaryFallback,
+      boundaryWarning: job.boundaryWarning,
     };
   }
 
@@ -335,13 +357,32 @@ export class DetectService {
         });
       }
 
+      const boundaryPlan = await this.resolveBoundaryPlan(options);
+      this.assertActive(job);
+      job.boundaryEngine = boundaryPlan.mode;
+      job.boundaryFallback = options.boundaryEngine !== 'opencv' && boundaryPlan.mode === 'opencv';
+      job.boundaryWarning = boundaryPlan.warning;
+      console.info(
+        `[detect] boundary engine requested=${options.boundaryEngine} actual=${boundaryPlan.mode}`,
+      );
       const analysis = await this.runPython(
         job,
         extraction.frames.map((frame) => frame.path),
         intervalMs,
         options,
+        sourcePath,
+        durationMs,
+        boundaryPlan,
       );
       this.assertActive(job);
+      if (analysis.warning) {
+        console.warn(`[detect] ${analysis.warning}`);
+        job.boundaryWarning = analysis.warning;
+      }
+      if (analysis.diagnostics?.['modelFailed'] === true) {
+        job.boundaryEngine = 'opencv';
+        job.boundaryFallback = true;
+      }
       const result = this.toPreview(job, project.id, analysis, project.media.durationMs);
       await this.createShotThumbnails(job, project, result.shots, sourcePath, thumbsDir, extraction.frames);
       this.assertActive(job);
@@ -528,6 +569,9 @@ export class DetectService {
     framePaths: string[],
     intervalMs: number,
     options: ResolvedDetectOptions,
+    videoPath: string,
+    durationMs: number,
+    boundaryPlan: ResolvedBoundaryPlan,
   ): Promise<PythonAnalyzeResult> {
     const python = resolvePythonExecutable();
     const embeddedPython = embeddedPythonExecutable();
@@ -621,6 +665,15 @@ export class DetectService {
           frames: framePaths,
           intervalMs,
           options,
+          durationMs,
+          mode: boundaryPlan.mode,
+          ...(boundaryPlan.mode === 'opencv'
+            ? {}
+            : {
+                videoPath,
+                ffmpegPath: boundaryPlan.ffmpegPath,
+                transnetModelPath: boundaryPlan.modelPath,
+              }),
         },
       })}\n`,
     );
@@ -629,6 +682,35 @@ export class DetectService {
     } finally {
       job.child = null;
       if (!child.killed) child.stdin.end();
+    }
+  }
+
+  private async resolveBoundaryPlan(options: ResolvedDetectOptions): Promise<ResolvedBoundaryPlan> {
+    if (options.boundaryEngine === 'opencv') {
+      return { mode: 'opencv', modelPath: null, ffmpegPath: null, warning: null };
+    }
+
+    const modelPath = resolveTransnetModelPath();
+    if (!isNonEmptyFile(modelPath)) {
+      const warning = `TransNetV2 模型缺失，已回退 OpenCV：${modelPath}`;
+      console.warn(`[detect] ${warning}`);
+      return { mode: 'opencv', modelPath: null, ffmpegPath: null, warning };
+    }
+
+    try {
+      const binaries = await resolveFfmpegBinaries();
+      return {
+        mode: options.boundaryEngine,
+        modelPath,
+        ffmpegPath: binaries.ffmpeg,
+        warning: null,
+      };
+    } catch (error) {
+      const warning = `TransNetV2 所需 FFmpeg 不可用，已回退 OpenCV：${
+        error instanceof Error ? error.message : String(error)
+      }`;
+      console.warn(`[detect] ${warning}`);
+      return { mode: 'opencv', modelPath: null, ffmpegPath: null, warning };
     }
   }
 
@@ -714,8 +796,13 @@ function normalizeOptions(options: DetectOptions): ResolvedDetectOptions {
   if (options.intervalMs !== undefined && (!Number.isFinite(options.intervalMs) || options.intervalMs < 50)) {
     throw new DetectError('INVALID_OPTIONS', 'intervalMs 不能小于 50ms');
   }
+  const boundaryEngine = options.boundaryEngine ?? 'hybrid';
+  if (!['hybrid', 'transnetv2', 'opencv'].includes(boundaryEngine)) {
+    throw new DetectError('INVALID_OPTIONS', `不支持的镜头边界引擎：${boundaryEngine}`);
+  }
   return {
     ...options,
+    boundaryEngine,
     weights: {
       s: weights.s / total,
       c: weights.c / total,
@@ -756,8 +843,10 @@ function nearestExtractedFrame(
 }
 
 function embeddedPythonExecutable(resourcesPath = process.resourcesPath): string | null {
-  const executable = join(resourcesPath, 'python', 'python.exe');
-  return existsSync(executable) ? executable : null;
+  const packaged = join(resourcesPath, 'python', 'python.exe');
+  if (existsSync(packaged)) return packaged;
+  const development = join(__dirname, '..', '..', 'resources', 'python', 'python.exe');
+  return existsSync(development) ? development : null;
 }
 
 export function resolvePythonExecutable(resourcesPath = process.resourcesPath): string {
@@ -773,7 +862,9 @@ function buildPythonEnvironment(pythonPath: string): NodeJS.ProcessEnv {
     ...process.env,
     PYTHONIOENCODING: 'utf-8',
     PYTHONUNBUFFERED: '1',
-    ...(embedded ? { PYTHONPATH: join(process.resourcesPath, 'python', 'Lib', 'site-packages') } : {}),
+    ...(embedded
+      ? { PYTHONPATH: join(dirname(pythonPath), 'Lib', 'site-packages') }
+      : {}),
   };
 }
 
@@ -926,4 +1017,21 @@ function resolveServerScript(): string {
   const development = join(__dirname, '..', '..', 'src', 'main', 'detect', 'python', 'server.py');
   if (existsSync(development)) return development;
   return join(process.resourcesPath, 'detect', 'python', 'server.py');
+}
+
+export function resolveTransnetModelPath(resourcesPath = process.resourcesPath): string {
+  const override = process.env['PFL_TRANSNETV2_MODEL'];
+  if (override) return override;
+
+  const development = join(
+    __dirname,
+    '..',
+    '..',
+    'resources',
+    'transnetv2',
+    'models',
+    'transnetv2.onnx',
+  );
+  if (existsSync(development)) return development;
+  return join(resourcesPath, 'transnetv2', 'models', 'transnetv2.onnx');
 }

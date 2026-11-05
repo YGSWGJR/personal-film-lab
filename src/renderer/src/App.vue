@@ -2259,6 +2259,7 @@ async function startDetection(): Promise<void> {
         weights: { s: 0.3, c: 0.3, h: 0.4 },
         intervalMs: 500,
         engine,
+        boundaryEngine: 'hybrid',
       },
     }),
   );

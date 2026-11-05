@@ -38,7 +38,7 @@ def analyze(params: dict[str, Any]) -> dict[str, Any]:
     interval_ms = int(params["intervalMs"])
     detect_options = params.get("options") or {}
     mode = str(params.get("mode") or "opencv").strip().lower()
-    if mode not in {"opencv", "hybrid"}:
+    if mode not in {"opencv", "hybrid", "transnetv2"}:
         raise ValueError(f"不支持的镜头检测模式：{mode}")
     if interval_ms <= 0:
         raise ValueError(f"intervalMs 必须大于 0：{interval_ms}")
@@ -57,7 +57,7 @@ def analyze(params: dict[str, Any]) -> dict[str, Any]:
             raise opencv_error
         return opencv_result
 
-    return _analyze_hybrid(params, frame_paths, interval_ms, normalized)
+    return _analyze_hybrid(params, frame_paths, interval_ms, normalized, mode)
 
 
 def _run_opencv(
@@ -109,8 +109,9 @@ def _analyze_hybrid(
     frame_paths: list[str],
     interval_ms: int,
     normalized,
+    mode: str,
 ) -> dict[str, Any]:
-    """hybrid：OpenCV 补充候选 + TransNetV2 主切点 → boundary_fusion 融合。
+    """TransNetV2 主切点；hybrid 模式额外合并 OpenCV 补充候选。
 
     输出协议：intervalMs=1 且 shotRanges/sceneRanges 的帧号即毫秒，
     上层 toPreview(startFrame * intervalMs) 无需改动即得精确毫秒。
@@ -177,11 +178,17 @@ def _analyze_hybrid(
     else:
         fused = fuse_boundaries(
             model_cuts_ms,
-            opencv_cuts_ms,
+            opencv_cuts_ms if mode == "hybrid" else [],
             _resolve_duration_ms(params, frame_paths, interval_ms, model_result),
             min_shot_ms=normalized.min_shot_ms,
             merge_tolerance_ms=max(250.0, interval_ms / 2.0),
         )
+        if mode == "transnetv2":
+            diagnostics = fused["diagnostics"]
+            diagnostics["mode"] = "transnetv2"
+            diagnostics["opencvCutCount"] = len(opencv_cuts_ms)
+            diagnostics["opencvSupplementCount"] = 0
+            diagnostics["fallbackUsed"] = False
 
     notify_progress(94)
     diagnostics = fused["diagnostics"]
