@@ -71,6 +71,7 @@ import type {
   AiListModelsResult,
   AiProjectSnapshot,
   AiProviderProbeResult,
+  LocalAiStatus,
   AppInfo,
   AudioWaveform,
   CandidateSource,
@@ -160,6 +161,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.APP_INFO]: emptyArgsSchema,
   [IPC.AI_COPY_PROMPT]: aiCopyPromptArgsSchema,
   [IPC.AI_GET_SNAPSHOT]: aiProjectArgsSchema,
+  [IPC.AI_LOCAL_STATUS]: emptyArgsSchema,
   [IPC.AI_PROBE_PROVIDER]: aiProbeProviderArgsSchema,
   [IPC.AI_LIST_MODELS]: aiListModelsArgsSchema,
   [IPC.AI_START_MCP]: aiMcpSetEnabledArgsSchema,
@@ -305,6 +307,7 @@ const aiApi = {
   copyPrompt: (args: AiCopyPromptArgs) => invoke<AiCopyPromptResult>(IPC.AI_COPY_PROMPT, [args]),
   getShotSnapshot: (args: { projectId: string }) =>
     invoke<AiProjectSnapshot>(IPC.AI_GET_SNAPSHOT, [args]),
+  getLocalStatus: () => invoke<LocalAiStatus>(IPC.AI_LOCAL_STATUS),
   probeProvider: (args?: { baseUrl?: string; apiKey?: string; providerId?: string }) =>
     invoke<AiProviderProbeResult>(IPC.AI_PROBE_PROVIDER, [args ?? {}]),
   listModels: (args: { providerId?: string; baseUrl?: string; apiKey?: string }) =>

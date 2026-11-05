@@ -16,6 +16,7 @@ import type {
 import { createMainWindow } from './app';
 import { AiAccessService, runMcpStdioServer } from './ai/mcp-server';
 import { AiDetectRunner } from './ai/ai-detect-runner';
+import { LocalVisionService } from './ai/local-vision-service';
 import { createProviderFromSettings } from './ai/provider';
 import { registerAssetProtocol, registerAssetScheme } from './assets/asset-protocol';
 import { CaptureService } from './capture/capture-service';
@@ -90,6 +91,7 @@ let settingsService: SettingsService | null = null;
 let sessionService: SessionService | null = null;
 let statsService: StatsService | null = null;
 let aiService: AiAccessService | null = null;
+let localVisionService: LocalVisionService | null = null;
 let exitCaptureStarted = false;
 let allowWindowClose = false;
 let closeCaptureStarted = false;
@@ -141,6 +143,7 @@ function createWindowDataServices(
     },
   );
   const aiRunner = new AiDetectRunner(layer, media);
+  localVisionService ??= new LocalVisionService();
   const detect = new DetectService(
     layer,
     media,
@@ -165,6 +168,7 @@ function createWindowDataServices(
           forceMock: process.env['SMOKE_AI_PROVIDER'] === 'mock',
         }),
     },
+    localVisionService,
   );
   return { capture, exportService, detect };
 }
@@ -368,6 +372,7 @@ if (!IS_AI_MCP) {
     getScope: () => scopeService,
     getSettings: () => settingsService,
     getAi: () => aiService,
+    getLocalAi: () => localVisionService,
     previewSettingsMigration: () => previewDataRootMigration(),
     confirmSettingsMigration: (projectIds) => confirmDataRootMigration(projectIds),
     skipSettingsMigration: () => skipDataRootMigration(),
@@ -394,6 +399,7 @@ app.whenReady().then(() => {
     },
   );
   bindSettingsProvider(() => settingsService!.get());
+  localVisionService ??= new LocalVisionService();
 
   if (!dataLayer) {
     dataLayer = new DataLayer(resolveDataRoot());
@@ -421,6 +427,7 @@ app.whenReady().then(() => {
       getData: () => dataLayer,
       getMedia: () => mediaService,
       getSession: () => sessionService,
+      getLocalAi: () => localVisionService,
     });
   }
 
@@ -455,6 +462,8 @@ function cleanupServices(): void {
   statsService = null;
   void aiService?.dispose();
   aiService = null;
+  localVisionService?.dispose();
+  localVisionService = null;
 }
 
 app.on('before-quit', (event) => {

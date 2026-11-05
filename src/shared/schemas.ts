@@ -49,7 +49,7 @@ export const settingsSchema = z.object({
     .optional(),
   ai: z
     .object({
-      provider: z.enum(['openai-compatible', 'mock']).optional(),
+      provider: z.enum(['local', 'openai-compatible', 'mock']).optional(),
       providers: z.array(aiProviderConfigSchema).max(50).optional(),
       activeProviderId: z.string().max(100).optional(),
       baseUrl: z.string().max(2000).optional(),
@@ -60,6 +60,8 @@ export const settingsSchema = z.object({
       timeoutSeconds: z.number().finite().min(30).max(7200).optional(),
       maxRetriesPerSegment: z.number().int().min(0).max(10).optional(),
       enabled: z.boolean().optional(),
+      fallbackToOpenCv: z.boolean().optional(),
+      localBatchSize: z.number().int().min(1).max(4).optional(),
     })
     .optional(),
 });

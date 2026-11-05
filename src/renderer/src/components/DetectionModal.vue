@@ -80,7 +80,10 @@ function applyResult(): void {
           <div>
             <p>SHOT DETECTION</p>
             <h2>镜头检测</h2>
-            <span>{{ projectName }} · {{ engine === 'ai' ? 'AI 全接管' : 'OpenCV（旧）' }}</span>
+            <span>
+              {{ projectName }} ·
+              {{ engine === 'ai' ? '本地 Qwen3-VL + OpenCV' : 'OpenCV（备用）' }}
+            </span>
           </div>
           <button type="button" aria-label="关闭" @click="emit('close')">×</button>
         </header>
@@ -122,6 +125,9 @@ function applyResult(): void {
                 <input type="checkbox" :checked="selectedIds.includes(shot.id)" @change="toggleShot(shot.id)" />
                 <span class="preview-index">{{ String(shot.index).padStart(2, '0') }}</span>
                 <span class="preview-range">{{ formatTime(shot.startMs) }} – {{ formatTime(shot.endMs) }}</span>
+                <span class="preview-ai">
+                  {{ shot.remark || (shot.shotSize ? `本地模型：${shot.shotSize}` : '等待本地模型分析') }}
+                </span>
                 <span>{{ (shot.durationMs / 1000).toFixed(1) }} 秒</span>
               </label>
             </div>
@@ -482,8 +488,8 @@ function applyResult(): void {
 
 .preview-row {
   display: grid;
-  height: 32px;
-  grid-template-columns: 20px 30px minmax(0, 1fr) 72px;
+  min-height: 38px;
+  grid-template-columns: 20px 30px 96px minmax(0, 1fr) 58px;
   align-items: center;
   gap: 8px;
   padding: 0 16px;
@@ -507,6 +513,15 @@ function applyResult(): void {
 
 .preview-range {
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-ai {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--sans, sans-serif);
+  font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

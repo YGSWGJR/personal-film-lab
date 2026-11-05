@@ -23,6 +23,7 @@ const props = defineProps<{
   busy: boolean;
   audioWaveform: AudioWaveform | null;
   audioLoading: boolean;
+  mediaLabel: string;
   trackHeight: number;
   pxPerSecond: number;
   inPointMs: number | null;
@@ -248,6 +249,7 @@ onBeforeUnmount(() => {
       :fps="player.hasFile ? player.fps : 500 / 21"
       :audio-waveform="audioWaveform"
       :audio-loading="audioLoading"
+      :media-label="mediaLabel"
       :track-height="trackHeight"
       :px-per-second="pxPerSecond"
       :in-point-ms="inPointMs"

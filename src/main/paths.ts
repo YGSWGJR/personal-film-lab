@@ -27,7 +27,7 @@ export function defaultRecognitionSettings(): RecognitionSettings {
 /** S36-2：AI 识别默认参数。apiKey 为空时由凭据存储加密写入。 */
 export function defaultAiSettings(): AiSettings {
   return {
-    provider: 'openai-compatible',
+    provider: 'local',
     providers: [],
     activeProviderId: '',
     baseUrl: '',
@@ -38,6 +38,8 @@ export function defaultAiSettings(): AiSettings {
     timeoutSeconds: 900,
     maxRetriesPerSegment: 3,
     enabled: true,
+    fallbackToOpenCv: true,
+    localBatchSize: 4,
   };
 }
 

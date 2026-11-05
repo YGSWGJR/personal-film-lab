@@ -181,29 +181,60 @@ export class ShotRepository {
         `INSERT INTO shots (
           id, project_id, shot_index, start_ms, end_ms, duration_ms,
           shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'auto', 0, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', 0, ?, ?, ?)`,
       );
       for (const preview of previews) {
         const overlapsProtected = protectedRows.some(
           (row) => preview.startMs < row.end_ms && preview.endMs > row.start_ms,
         );
         if (overlapsProtected) continue;
+        const shotId = randomUUID();
         insert.run(
-          randomUUID(),
+          shotId,
           projectId,
           nextIndex++,
           preview.startMs,
           preview.endMs,
           preview.endMs - preview.startMs,
+          preview.shotSize ?? null,
+          preview.cameraMethod ?? null,
+          preview.dialogue ?? null,
+          preview.remark ?? null,
           preview.thumbnail ?? preview.thumbPath ?? null,
           now,
           now,
         );
+        this.assignDetectedTags(shotId, preview.tags);
         applied += 1;
       }
       this.layer.projects.touch(projectId);
     });
     return applied;
+  }
+
+  private assignDetectedTags(shotId: string, tags: Record<string, string[]> | undefined): void {
+    if (!tags) return;
+    const findTag = this.db.prepare(
+      'SELECT id FROM tags WHERE category = ? AND name = ? LIMIT 1',
+    );
+    const insertTag = this.db.prepare(
+      'INSERT INTO tags (id, category, name, color, builtin, sort_order, created_at) VALUES (?, ?, ?, NULL, 0, 0, ?)',
+    );
+    const assignTag = this.db.prepare(
+      'INSERT OR IGNORE INTO shot_tags (shot_id, tag_id) VALUES (?, ?)',
+    );
+    for (const [rawCategory, names] of Object.entries(tags)) {
+      const category = rawCategory.trim();
+      if (!category || !Array.isArray(names)) continue;
+      for (const rawName of names) {
+        const name = String(rawName).trim();
+        if (!name) continue;
+        const existing = findTag.get(category, name) as { id: string } | undefined;
+        const tagId = existing?.id ?? randomUUID();
+        if (!existing) insertTag.run(tagId, category, name, nowIso());
+        assignTag.run(shotId, tagId);
+      }
+    }
   }
 
   private validateRange(startMs: number, endMs: number): void {

@@ -14,3 +14,20 @@
 - 无需额外拷贝其他运行时库（该 dev 包已静态链接依赖）。
 - 打包时 electron-builder 按 `build.extraResources` 把本目录复制到安装包 `resources/mpv/`；
   主进程通过 `app.isPackaged` 区分开发路径与安装包路径（见 `src/main/player/mpv-lib.ts`）。
+
+## 自动获取
+
+在仓库根目录运行：
+
+```powershell
+npm run prepare:runtime
+```
+
+脚本从 `zhongfly/mpv-winbuild` 最新公开 Release 下载 x64 的 `mpv-dev` 和 FFmpeg
+压缩包，按同页 `sha256.txt` 校验后提取：
+
+- `resources/mpv/libmpv-2.dll`
+- `resources/ffmpeg/ffmpeg.exe`
+- `resources/ffmpeg/ffprobe.exe`
+
+已存在文件时默认跳过；需要刷新时运行 `npm run prepare:runtime -- -Force`。

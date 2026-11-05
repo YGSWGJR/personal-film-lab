@@ -178,24 +178,29 @@ export class AiAccessService {
     if (forceMock || (settings?.provider === 'mock' && !args?.baseUrl && !args?.providerId)) {
       return createProviderFromSettings(settings, { forceMock: true });
     }
+    const config = args?.providerId
+      ? settings?.providers?.find((item) => item.id === args.providerId) ?? null
+      : null;
     if (args?.baseUrl || args?.apiKey) {
+      // 草稿字段只覆盖显式提供的部分；未填 Key 时回落到 providerId 对应的已存密文。
+      const baseUrl = (args.baseUrl ?? config?.baseUrl ?? '').trim();
+      const apiKey =
+        (args.apiKey ?? '').trim() ||
+        (config?.apiKey ? decryptApiKey(config.apiKey) : '');
       return new OpenAiCompatProvider({
-        baseUrl: (args.baseUrl ?? '').trim(),
-        apiKey: (args.apiKey ?? '').trim(),
-        model: resolveActiveProvider(settings)?.model,
+        baseUrl,
+        apiKey,
+        model: config?.model ?? resolveActiveProvider(settings)?.model,
         timeoutMs: Math.max(30, settings?.timeoutSeconds ?? 900) * 1000,
       });
     }
-    if (args?.providerId) {
-      const config = settings?.providers?.find((item) => item.id === args.providerId);
-      if (config) {
-        return new OpenAiCompatProvider({
-          baseUrl: config.baseUrl,
-          apiKey: decryptApiKey(config.apiKey),
-          model: config.model,
-          timeoutMs: Math.max(30, settings?.timeoutSeconds ?? 900) * 1000,
-        });
-      }
+    if (config) {
+      return new OpenAiCompatProvider({
+        baseUrl: config.baseUrl,
+        apiKey: decryptApiKey(config.apiKey),
+        model: config.model,
+        timeoutMs: Math.max(30, settings?.timeoutSeconds ?? 900) * 1000,
+      });
     }
     return createProviderFromSettings(settings);
   }

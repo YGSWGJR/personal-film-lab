@@ -4,10 +4,20 @@ import cv2
 import numpy as np
 
 
-def extract_frame_feature(frame_path: str) -> dict[str, object]:
-    image = cv2.imread(frame_path, cv2.IMREAD_COLOR)
+def _read_image_unicode(frame_path: str):
+    """Windows 上 cv2.imread 对中文/Unicode 路径会返回 None，改用 imdecode。"""
+    try:
+        buffer = np.fromfile(frame_path, dtype=np.uint8)
+        image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    except Exception:
+        image = None
     if image is None:
         raise ValueError(f"无法读取帧：{frame_path}")
+    return image
+
+
+def extract_frame_feature(frame_path: str) -> dict[str, object]:
+    image = _read_image_unicode(frame_path)
 
     height, width = image.shape[:2]
     if width > 320:

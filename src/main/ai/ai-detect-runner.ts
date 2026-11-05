@@ -15,7 +15,7 @@ import type {
 } from '../../shared/types';
 import { shotDetectionResultSchema } from '../../shared/schemas';
 import type { MediaService } from '../media/media-service';
-import { resolveThumbCacheDir } from '../paths';
+import { resolveFrameCacheDir, resolveThumbCacheDir } from '../paths';
 import type { ShotDetectionProvider } from './provider';
 import { ProviderError } from './provider';
 
@@ -190,7 +190,11 @@ export class AiDetectRunner {
       ),
     };
     const durationMs = Math.max(1, Math.round(project.media.durationMs));
-    const videoPath = project.source.path ?? project.media.proxyPath ?? '';
+    const proxyPath = project.media.proxyPath;
+    const videoPath =
+      proxyPath && (/^https?:\/\//iu.test(proxyPath) || existsSync(proxyPath))
+        ? proxyPath
+        : project.source.path ?? '';
     if (!videoPath) {
       throw new AiDetectError('AI_SOURCE_MISSING', '项目没有可读取的视频路径');
     }
@@ -228,43 +232,72 @@ export class AiDetectRunner {
       segments.length,
     );
 
-    for (const segment of segments.slice(resumeFrom)) {
-      if (signal.aborted) {
-        state.status = 'cancelled';
-        state.error = null;
-        this.saveState(state);
-        throw new AiDetectError('AI_CANCELLED', 'AI 识别已取消', { jobId: state.jobId });
-      }
-      state.currentSegment = segment.index;
-      this.saveState(state);
-      try {
-        const result = await this.analyzeWithRetry(provider, segment, options.maxRetriesPerSegment, signal);
-        state.completed = [...state.completed.filter((item) => item.index !== segment.index), {
-          index: segment.index,
-          result,
-        }].sort((left, right) => left.index - right.index);
-        state.errors = state.errors.filter((item) => item.index !== segment.index);
-        state.usage = accumulateUsage(state.usage, result.usage);
-        this.appendUsageLog(state, segment.index, result.usage, result.shots.length);
-        input.callbacks?.onSegmentDone?.(segment.index, segments.length, result.usage);
-      } catch (error) {
-        if (signal.aborted || (error instanceof ProviderError && error.code === 'PROVIDER_CANCELLED')) {
+    const aiSegmentDir = join(resolveFrameCacheDir(), 'ai-segments', project.id, state.jobId);
+    try {
+      for (const segment of segments.slice(resumeFrom)) {
+        if (signal.aborted) {
           state.status = 'cancelled';
+          state.error = null;
           this.saveState(state);
           throw new AiDetectError('AI_CANCELLED', 'AI 识别已取消', { jobId: state.jobId });
         }
-        const message = error instanceof Error ? error.message : String(error);
-        state.errors = [...state.errors.filter((item) => item.index !== segment.index), {
-          index: segment.index,
-          message,
-        }].sort((left, right) => left.index - right.index);
+        state.currentSegment = segment.index;
+        this.saveState(state);
+        let temporaryClip = '';
+        try {
+          let providerSegment = segment;
+          if (provider.requiresVideoBytes && !/^https?:\/\//iu.test(segment.videoPath)) {
+            const clipPath = join(
+              aiSegmentDir,
+              `segment-${String(segment.index).padStart(3, '0')}.mp4`,
+            );
+            await this.media.createAiSegment({
+              path: segment.videoPath,
+              startMs: segment.startMs,
+              endMs: segment.endMs,
+              outputPath: clipPath,
+              signal,
+            });
+            temporaryClip = clipPath;
+            providerSegment = { ...segment, videoPath: clipPath };
+          }
+          const result = await this.analyzeWithRetry(
+            provider,
+            providerSegment,
+            options.maxRetriesPerSegment,
+            signal,
+          );
+          state.completed = [...state.completed.filter((item) => item.index !== segment.index), {
+            index: segment.index,
+            result,
+          }].sort((left, right) => left.index - right.index);
+          state.errors = state.errors.filter((item) => item.index !== segment.index);
+          state.usage = accumulateUsage(state.usage, result.usage);
+          this.appendUsageLog(state, segment.index, result.usage, result.shots.length);
+          input.callbacks?.onSegmentDone?.(segment.index, segments.length, result.usage);
+        } catch (error) {
+          if (signal.aborted || (error instanceof ProviderError && error.code === 'PROVIDER_CANCELLED')) {
+            state.status = 'cancelled';
+            this.saveState(state);
+            throw new AiDetectError('AI_CANCELLED', 'AI 识别已取消', { jobId: state.jobId });
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          state.errors = [...state.errors.filter((item) => item.index !== segment.index), {
+            index: segment.index,
+            message,
+          }].sort((left, right) => left.index - right.index);
+        } finally {
+          if (temporaryClip) rmSync(temporaryClip, { force: true });
+        }
+        this.saveState(state);
+        input.callbacks?.onProgress?.(
+          Math.round(((state.completed.length + state.errors.length) / segments.length) * 100),
+          segment.index,
+          segments.length,
+        );
       }
-      this.saveState(state);
-      input.callbacks?.onProgress?.(
-        Math.round(((state.completed.length + state.errors.length) / segments.length) * 100),
-        segment.index,
-        segments.length,
-      );
+    } finally {
+      rmSync(aiSegmentDir, { recursive: true, force: true });
     }
 
     const deduped = dedupeSegmentShots(state.completed, durationMs);

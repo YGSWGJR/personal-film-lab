@@ -11,6 +11,10 @@ release/
 *.log
 npm-debug.log*
 
+# downloaded release assets and split archives
+downloads/
+*.part.*
+
 # runtime data
 *.db
 *.db-journal
