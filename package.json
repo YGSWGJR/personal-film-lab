@@ -27,6 +27,7 @@
     "prepare:runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-runtime-assets.ps1",
     "prepare:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-python-runtime.ps1",
     "prepare:local-ai": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-local-ai.ps1",
+    "prepare:transnetv2": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-transnetv2-model.ps1",
     "package:local-ai": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-local-ai.ps1",
     "build": "electron-vite build && npm run prepare:python && electron-builder",
     "build:dir": "electron-vite build && npm run prepare:python && electron-builder --dir",
@@ -126,6 +127,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "resources/transnetv2",
+        "to": "transnetv2",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "npmRebuild": false
@@ -137,5 +145,10 @@
     "echarts": "^6.1.0",
     "fflate": "^0.8.3",
     "koffi": "^3.3.3"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "koffi@3.3.3": true,
+    "electron-winstaller@5.4.0": true
   }
 }
