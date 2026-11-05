@@ -2670,11 +2670,16 @@ async function runTimelineChecks(win: BrowserWindow): Promise<Record<string, any
           && b.read.ok
           && b.read.data.timeline.trackHeight === 48
           && b.read.data.timeline.pxPerSecond === 24;
-        const c = await setAndRead({ trackHeight: 100, pxPerSecond: 100 });
+        const c = await setAndRead({ trackHeight: 100, pxPerSecond: 137.5 });
+        // S41：trackHeight 仍吸附档位；pxPerSecond 保留连续缩放值（2 位小数）
         out.snapOk = c.setOk
           && c.read.ok
           && c.read.data.timeline.trackHeight === 96
-          && c.read.data.timeline.pxPerSecond === 96;
+          && c.read.data.timeline.pxPerSecond === 137.5;
+        const d = await setAndRead({ trackHeight: 96, pxPerSecond: 5000 });
+        out.clampOk = d.setOk
+          && d.read.ok
+          && d.read.data.timeline.pxPerSecond === 768;
         const restore = await window.api.settings.set({ ...base, timeline: original });
         out.restoreOk = restore.ok === true;
         const finalRead = await window.api.settings.get();

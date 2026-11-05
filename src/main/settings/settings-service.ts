@@ -13,7 +13,6 @@ import type {
   TimelineSettings,
 } from '../../shared/types';
 import {
-  PX_PER_SEC_LEVELS,
   TRACK_HEIGHT_LEVELS,
   snapToLevel,
 } from '../../shared/types';
@@ -248,8 +247,10 @@ function normalizeTimeline(value: TimelineSettings | undefined): TimelineSetting
   const trackHeight = Number.isFinite(source.trackHeight) && source.trackHeight > 0
     ? snapToLevel(source.trackHeight, TRACK_HEIGHT_LEVELS)
     : defaultTimelineSettings().trackHeight;
+  // S41：pxPerSecond 支持连续缩放值——保留合法区间内的连续值（四舍五入到 2 位小数），
+  // 越界夹紧到 24~768；trackHeight 继续吸附档位。
   const pxPerSecond = Number.isFinite(source.pxPerSecond) && source.pxPerSecond > 0
-    ? snapToLevel(source.pxPerSecond, PX_PER_SEC_LEVELS)
+    ? Math.round(Math.max(24, Math.min(768, source.pxPerSecond)) * 100) / 100
     : defaultTimelineSettings().pxPerSecond;
   return { trackHeight, pxPerSecond };
 }

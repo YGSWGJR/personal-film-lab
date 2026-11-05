@@ -367,9 +367,17 @@ function resetDensity(): void {
   viewStartMs.value = 0;
 }
 
-function setPxPerSecond(nextPx: number, anchorClientX?: number): void {
-  const clamped = snapToLevel(nextPx, PX_PER_SEC_LEVELS);
-  if (clamped === props.pxPerSecond) return;
+function setPxPerSecond(
+  nextPx: number,
+  anchorClientX?: number,
+  options: { snap?: boolean } = {},
+): void {
+  // S41：默认仍吸附档位（胶囊/输入框/Ctrl+滚轮）；纯滚轮缩放传 snap:false 走连续值。
+  const snap = options.snap ?? true;
+  const target = snap
+    ? snapToLevel(nextPx, PX_PER_SEC_LEVELS)
+    : Math.max(24, Math.min(768, nextPx));
+  if (Math.abs(target - props.pxPerSecond) < 0.01) return;
   const width = trackWidthPx.value;
   const rect = timelineViewportEl.value?.getBoundingClientRect();
   const ratio =
@@ -377,15 +385,23 @@ function setPxPerSecond(nextPx: number, anchorClientX?: number): void {
       ? Math.max(0, Math.min(1, (anchorClientX - rect.left) / width))
       : 0.5;
   const anchorTime = viewStartMs.value + visibleDurationMs.value * ratio;
-  emit('updatePxPerSecond', clamped);
-  const nextVisible = width > 0 ? (width / clamped) * 1000 : safeDuration.value;
+  emit('updatePxPerSecond', target);
+  const nextVisible = width > 0 ? (width / target) * 1000 : safeDuration.value;
   viewStartMs.value = clampViewStart(anchorTime - nextVisible * ratio);
 }
 
 function stepPxPerSecond(direction: 1 | -1): number {
-  const index = PX_PER_SEC_LEVELS.indexOf(props.pxPerSecond);
-  const base = index >= 0 ? index : PX_PER_SEC_LEVELS.indexOf(96);
-  const next = PX_PER_SEC_LEVELS[clampIndex(base + direction, PX_PER_SEC_LEVELS.length)];
+  // 非档位值（连续缩放后）回退到最近档位，而不是写死 96。
+  let nearestIndex = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  PX_PER_SEC_LEVELS.forEach((level, index) => {
+    const distance = Math.abs(level - props.pxPerSecond);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = index;
+    }
+  });
+  const next = PX_PER_SEC_LEVELS[clampIndex(nearestIndex + direction, PX_PER_SEC_LEVELS.length)];
   setPxPerSecond(next);
   return snapToLevel(next, PX_PER_SEC_LEVELS);
 }
@@ -398,9 +414,13 @@ function stepTrackHeight(direction: 1 | -1): number {
   return next;
 }
 
-function panView(event: WheelEvent): void {
+function panView(event: WheelEvent, force = false): void {
   const delta =
-    Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.shiftKey ? event.deltaY : 0;
+    Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX
+      : event.shiftKey || force
+        ? event.deltaY
+        : 0;
   if (delta === 0) return;
   event.preventDefault();
   const rect = timelineViewportEl.value?.getBoundingClientRect();
@@ -408,13 +428,67 @@ function panView(event: WheelEvent): void {
   viewStartMs.value = clampViewStart(viewStartMs.value + (delta / rect.width) * visibleDurationMs.value);
 }
 
+/** S41：归一化滚轮位移（deltaMode 0=像素 1=行 2=页） */
+function normalizeWheelDelta(event: WheelEvent): number {
+  if (event.deltaMode === 1) return event.deltaY * 16;
+  if (event.deltaMode === 2) {
+    const height = timelineViewportEl.value?.clientHeight ?? 400;
+    return event.deltaY * height;
+  }
+  return event.deltaY;
+}
+
+/** 高频 wheel 事件用 rAF 合并，一帧只应用一次连续缩放。 */
+let pendingWheelZoom: { clientX: number; delta: number } | null = null;
+let wheelZoomRaf = 0;
+
+function scheduleWheelZoom(event: WheelEvent): void {
+  const delta = normalizeWheelDelta(event);
+  if (pendingWheelZoom) {
+    pendingWheelZoom.delta += delta;
+  } else {
+    pendingWheelZoom = { clientX: event.clientX, delta };
+  }
+  if (wheelZoomRaf) return;
+  wheelZoomRaf = requestAnimationFrame(() => {
+    wheelZoomRaf = 0;
+    const pending = pendingWheelZoom;
+    pendingWheelZoom = null;
+    if (!pending) return;
+    zoomAtClientX(pending.clientX, pending.delta);
+  });
+}
+
+function zoomAtClientX(clientX: number, delta: number): void {
+  const rect = timelineViewportEl.value?.getBoundingClientRect();
+  if (!rect || rect.width <= 0) return;
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const anchorTime = viewStartMs.value + visibleDurationMs.value * ratio;
+  const nextPx = Math.max(24, Math.min(768, props.pxPerSecond * Math.pow(1.0015, -delta)));
+  emit('updatePxPerSecond', nextPx);
+  const width = trackWidthPx.value;
+  const nextVisible = width > 0 ? (width / nextPx) * 1000 : safeDuration.value;
+  viewStartMs.value = clampViewStart(anchorTime - nextVisible * ratio);
+}
+
 function onRulerWheel(event: WheelEvent): void {
+  // 事件顺序：Ctrl/Cmd 档位 → ALT 平移 → Shift/横向平移 → 默认连续缩放
   if (event.ctrlKey || event.metaKey) {
     event.preventDefault();
     stepPxPerSecond(event.deltaY < 0 ? 1 : -1);
     return;
   }
-  panView(event);
+  if (event.altKey) {
+    panView(event, true);
+    return;
+  }
+  if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+    panView(event);
+    return;
+  }
+  if (event.deltaY === 0) return;
+  event.preventDefault();
+  scheduleWheelZoom(event);
 }
 
 function onNavigatorInput(event: Event): void {
@@ -428,7 +502,17 @@ function onTracksWheel(event: WheelEvent): void {
     stepTrackHeight(event.deltaY < 0 ? 1 : -1);
     return;
   }
-  panView(event);
+  if (event.altKey) {
+    panView(event, true);
+    return;
+  }
+  if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+    panView(event);
+    return;
+  }
+  if (event.deltaY === 0) return;
+  event.preventDefault();
+  scheduleWheelZoom(event);
 }
 
 function beginScrub(event: PointerEvent, element: HTMLElement | null): void {
