@@ -93,6 +93,8 @@ npm run prepare:python
 
 `prepare:runtime` 从公开的 `zhongfly/mpv-winbuild` 最新发布下载 x64 版 `libmpv-2.dll`、`ffmpeg.exe` 和 `ffprobe.exe`，并校验发布方 SHA-256。`prepare:python` 生成带 NumPy 和 OpenCV 的内嵌 Python 运行时。
 
+如果 GitHub API 触发匿名限流，可先设置 `GH_TOKEN` 或 `GITHUB_TOKEN` 环境变量再运行准备脚本。
+
 完整本地 AI 构建需要官方离线资源包：
 
 ```powershell

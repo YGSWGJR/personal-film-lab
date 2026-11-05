@@ -9,7 +9,12 @@ $ProgressPreference = "SilentlyContinue"
 
 $repo = "YGSWGJR/personal-film-lab"
 $releaseUri = "https://api.github.com/repos/$repo/releases/tags/$Tag"
-$release = Invoke-RestMethod -Uri $releaseUri -Headers @{ "User-Agent" = "Personal-Film-Lab-Downloader" }
+$apiHeaders = @{ "User-Agent" = "Personal-Film-Lab-Downloader" }
+$githubToken = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { "" }
+if ($githubToken) {
+  $apiHeaders["Authorization"] = "Bearer $githubToken"
+}
+$release = Invoke-RestMethod -Uri $releaseUri -Headers $apiHeaders
 $Destination = [System.IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 $Version = $Tag.TrimStart("v")

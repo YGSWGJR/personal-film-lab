@@ -25,9 +25,14 @@ if (-not (Test-Path -LiteralPath $sevenZip)) {
   throw "缺少 build\7zr.exe，无法解压运行时资源。"
 }
 
+$apiHeaders = @{ "User-Agent" = "Personal-Film-Lab-Setup" }
+$githubToken = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { "" }
+if ($githubToken) {
+  $apiHeaders["Authorization"] = "Bearer $githubToken"
+}
 $release = Invoke-RestMethod `
   -Uri "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest" `
-  -Headers @{ "User-Agent" = "Personal-Film-Lab-Setup" }
+  -Headers $apiHeaders
 $mpvAsset = $release.assets |
   Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } |
   Select-Object -First 1

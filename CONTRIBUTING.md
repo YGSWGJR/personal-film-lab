@@ -17,6 +17,8 @@ npm run prepare:python
 
 `npm ci` 的 `postinstall` 会自动按当前 Electron 版本重建原生 Node.js 模块，因此首次安装需要本机具备 C++ 构建工具。
 
+GitHub API 出现匿名限流时，请为当前终端设置 `GH_TOKEN` 或 `GITHUB_TOKEN`。
+
 3. 如需本地 Qwen3-VL：
 
 ```powershell
