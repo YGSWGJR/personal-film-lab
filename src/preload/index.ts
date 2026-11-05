@@ -32,6 +32,9 @@ import {
   projectSaveAsArgsSchema,
   projectUpdateArgsSchema,
   shotCreateArgsSchema,
+  shotMergeArgsSchema,
+  shotSplitArgsSchema,
+  shotTrimArgsSchema,
   shotUpdateArgsSchema,
   stillCreateArgsSchema,
   stillCaptureArgsSchema,
@@ -121,6 +124,12 @@ import type {
   Project,
   Shot,
   ShotCreateArgs,
+  ShotMergeArgs,
+  ShotMergeResult,
+  ShotSplitArgs,
+  ShotSplitResult,
+  ShotTrimArgs,
+  ShotTrimResult,
   ShotUpdateArgs,
   Still,
   StillCaptureArgs,
@@ -224,6 +233,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SHOT_CREATE]: shotCreateArgsSchema,
   [IPC.SHOT_UPDATE]: shotUpdateArgsSchema,
   [IPC.SHOT_DELETE]: idArgsSchema,
+  [IPC.SHOT_SPLIT]: shotSplitArgsSchema,
+  [IPC.SHOT_MERGE]: shotMergeArgsSchema,
+  [IPC.SHOT_TRIM]: shotTrimArgsSchema,
 
   [IPC.STILL_LIST]: stillListArgsSchema,
   [IPC.STILL_GET]: idArgsSchema,
@@ -422,6 +434,9 @@ const shotApi = {
   create: (args: ShotCreateArgs) => invoke<Shot>(IPC.SHOT_CREATE, [args]),
   update: (args: ShotUpdateArgs) => invoke<Shot>(IPC.SHOT_UPDATE, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.SHOT_DELETE, [args]),
+  split: (args: ShotSplitArgs) => invoke<ShotSplitResult>(IPC.SHOT_SPLIT, [args]),
+  merge: (args: ShotMergeArgs) => invoke<ShotMergeResult>(IPC.SHOT_MERGE, [args]),
+  trim: (args: ShotTrimArgs) => invoke<ShotTrimResult>(IPC.SHOT_TRIM, [args]),
 };
 
 const stillApi = {

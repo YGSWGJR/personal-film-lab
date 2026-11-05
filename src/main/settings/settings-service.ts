@@ -9,6 +9,7 @@ import type {
   Settings,
   SettingsChooseDirectoryArgs,
   SettingsSetArgs,
+  ShortcutSettings,
   TimelineSettings,
 } from '../../shared/types';
 import {
@@ -20,6 +21,7 @@ import {
   defaultAiSettings,
   defaultRecognitionSettings,
   defaultSettings,
+  defaultShortcutSettings,
   defaultTimelineSettings,
   environmentDataRoot,
 } from '../paths';
@@ -76,6 +78,7 @@ export class SettingsService {
         timeline: this.stored?.timeline ?? defaultTimelineSettings(),
         recognition: this.stored?.recognition ?? defaultRecognitionSettings(),
         ai: this.stored?.ai ?? defaultAiSettings(),
+        shortcuts: this.stored?.shortcuts ?? defaultShortcutSettings(),
         settingsPath: this.settingsPath,
         environmentOverride: true,
       };
@@ -196,6 +199,8 @@ export function verifyStoredSettings(
       stored.timeline?.trackHeight === expected.timeline?.trackHeight &&
       stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond &&
       stored.recognition?.engine === expected.recognition?.engine &&
+      stored.shortcuts?.split === expected.shortcuts?.split &&
+      stored.shortcuts?.merge === expected.shortcuts?.merge &&
       stored.ai?.provider === expected.ai?.provider &&
       stored.ai?.activeProviderId === expected.ai?.activeProviderId &&
       JSON.stringify(stored.ai?.providers ?? []) === JSON.stringify(expected.ai?.providers ?? []) &&
@@ -234,6 +239,7 @@ function normalizeSettings(
     timeline: normalizeTimeline(args.timeline ?? fallback?.timeline),
     recognition: normalizeRecognition(args.recognition ?? fallback?.recognition),
     ai: normalizeAi(args.ai, fallback?.ai, forWrite),
+    shortcuts: normalizeShortcuts(args.shortcuts ?? fallback?.shortcuts),
   };
 }
 
@@ -250,6 +256,20 @@ function normalizeTimeline(value: TimelineSettings | undefined): TimelineSetting
 
 function normalizeRecognition(value: RecognitionSettings | undefined): RecognitionSettings {
   return { engine: value?.engine === 'opencv' ? 'opencv' : 'ai' };
+}
+
+function normalizeShortcuts(value: ShortcutSettings | undefined): ShortcutSettings {
+  const fallback = defaultShortcutSettings();
+  const split = normalizeShortcut(value?.split, fallback.split);
+  const merge = normalizeShortcut(value?.merge, fallback.merge);
+  return split.toLowerCase() === merge.toLowerCase()
+    ? { split, merge: fallback.merge }
+    : { split, merge };
+}
+
+function normalizeShortcut(value: string | undefined, fallback: string): string {
+  const normalized = value?.trim();
+  return normalized && normalized.length <= 40 ? normalized : fallback;
 }
 
 /**

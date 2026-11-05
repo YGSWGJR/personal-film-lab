@@ -10,6 +10,9 @@ const props = defineProps<{
   shots: WorkspaceShot[];
   markers: TimelineMarker[];
   selectedId: string | null;
+  mergePartnerId?: string | null;
+  splitShortcut: string;
+  mergeShortcut: string;
   currentTimeMs: number;
   durationMs: number;
   fps: number;
@@ -28,7 +31,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   seek: [timeMs: number];
-  select: [shot: WorkspaceShot];
+  select: [shot: WorkspaceShot, additive: boolean];
+  split: [];
+  merge: [];
+  contextMenu: [
+    shot: WorkspaceShot | null,
+    position: { x: number; y: number },
+    timeMs: number,
+  ];
   boundaryChange: [change: BoundaryChange];
   boundaryCommit: [change: BoundaryChange];
   updateTrackHeight: [value: number];
@@ -72,6 +82,22 @@ const heightLabel = computed(() => `${props.trackHeight}px`);
 const compactHead = computed(() => props.trackHeight <= 48);
 const mediaLabel = computed(() => props.mediaLabel?.trim() || '影片原声');
 const durationLabel = computed(() => formatDuration(props.durationMs));
+const selectedShot = computed(() => props.shots.find((shot) => shot.id === props.selectedId) ?? null);
+const canSplitSelected = computed(
+  () =>
+    Boolean(selectedShot.value) &&
+    !selectedShot.value?.locked &&
+    !v1Locked.value &&
+    props.currentTimeMs > (selectedShot.value?.startMs ?? 0) &&
+    props.currentTimeMs < (selectedShot.value?.endMs ?? 0),
+);
+const canMergeSelected = computed(() => {
+  const primary = selectedShot.value;
+  const partner = props.shots.find((shot) => shot.id === props.mergePartnerId);
+  if (!primary || !partner || primary.id === partner.id) return false;
+  const [left, right] = primary.startMs <= partner.startMs ? [primary, partner] : [partner, primary];
+  return !left.locked && !right.locked && !v1Locked.value && left.endMs === right.startMs;
+});
 const timelineGridStyle = computed(() => ({
   '--second-px': `${Math.max(8, props.pxPerSecond)}px`,
 }));
@@ -121,6 +147,7 @@ const visibleShots = computed(() => {
       duration: formatDuration(shot.durationMs || shot.endMs - shot.startMs),
       label: shot.title || shot.dialogue || shot.shotSize || '未命名镜头',
       selected: shot.id === props.selectedId,
+      partnerSelected: shot.id === props.mergePartnerId,
       current: props.currentTimeMs >= shot.startMs && props.currentTimeMs < shot.endMs,
       canTrimLeft: index > 0 && !v1Locked.value && !shot.locked,
       canTrimRight: index < props.shots.length - 1 && !v1Locked.value && !shot.locked,
@@ -435,9 +462,9 @@ function onTimelineBlankPointerDown(event: PointerEvent): void {
   beginScrub(event, event.currentTarget as HTMLElement);
 }
 
-function selectShotAt(shot: WorkspaceShot): void {
-  emit('select', shot);
-  emit('seek', shot.startMs);
+function selectShotAt(shot: WorkspaceShot, additive = false): void {
+  emit('select', shot, additive);
+  if (!additive) emit('seek', shot.startMs);
 }
 
 function onShotClipPointerDown(index: number, event: PointerEvent): void {
@@ -450,7 +477,25 @@ function onShotClipPointerDown(index: number, event: PointerEvent): void {
     selectShotAt(shot);
     return;
   }
-  selectShotAt(shot);
+  selectShotAt(
+    shot,
+    event.shiftKey || event.ctrlKey || event.metaKey,
+  );
+}
+
+function onTimelineContextMenu(shot: WorkspaceShot | null, event: MouseEvent): void {
+  const timeMs = timelineViewportEl.value
+    ? timeFromClientX(event.clientX, timelineViewportEl.value)
+    : props.currentTimeMs;
+  emit('contextMenu', shot, { x: event.clientX, y: event.clientY }, timeMs);
+}
+
+function requestSplit(): void {
+  if (canSplitSelected.value) emit('split');
+}
+
+function requestMerge(): void {
+  if (canMergeSelected.value) emit('merge');
 }
 
 function beginTrim(index: number, side: 'left' | 'right', event: PointerEvent): void {
@@ -500,7 +545,7 @@ function onMarkerPointerDown(marker: TimelineMarker, event: PointerEvent): void 
   event.preventDefault();
   event.stopPropagation();
   const shot = props.shots.find((item) => item.id === marker.shotId);
-  if (shot) emit('select', shot);
+  if (shot) emit('select', shot, false);
   emit('seek', marker.timeMs);
 }
 
@@ -628,6 +673,28 @@ onBeforeUnmount(() => {
         <em>{{ shots.length }} 镜头</em>
       </div>
       <span class="source-chip">单视频源 · V2 参考轨</span>
+      <div class="timeline-actions">
+        <button
+          type="button"
+          class="timeline-action"
+          :title="`在播放头切分当前镜头（${splitShortcut}）`"
+          :disabled="!canSplitSelected"
+          @click="requestSplit"
+        >
+          <AppIcon name="scissors" :size="12" />
+          切分
+        </button>
+        <button
+          type="button"
+          class="timeline-action"
+          :title="`合并双选中的相邻镜头（${mergeShortcut}）`"
+          :disabled="!canMergeSelected"
+          @click="requestMerge"
+        >
+          <AppIcon name="link" :size="12" />
+          合并
+        </button>
+      </div>
       <span class="timeline-duration">{{ durationLabel }}</span>
     </div>
 
@@ -807,7 +874,11 @@ onBeforeUnmount(() => {
           <strong>视频 1</strong>
           <small>{{ shots.length }} 个剪辑 · 边界可调</small>
         </div>
-        <div class="lane v1-lane" @pointerdown="onTimelineBlankPointerDown">
+        <div
+          class="lane v1-lane"
+          @pointerdown="onTimelineBlankPointerDown"
+          @contextmenu.prevent="onTimelineContextMenu(null, $event)"
+        >
           <div v-if="selectionRange" class="selection-range" :style="selectionRange"></div>
           <div
             v-for="item in visibleShots"
@@ -815,11 +886,13 @@ onBeforeUnmount(() => {
             class="v1-clip"
             :class="{
               selected: item.selected,
+              'partner-selected': item.partnerSelected,
               current: item.current,
               dragging: draggingBoundary === item.index || draggingBoundary === item.index - 1,
             }"
             :style="{ left: item.left, width: item.width }"
             @pointerdown="onShotClipPointerDown(item.index, $event)"
+            @contextmenu.prevent.stop="onTimelineContextMenu(item.shot, $event)"
           >
             <button
               v-if="item.canTrimLeft"
@@ -952,6 +1025,36 @@ onBeforeUnmount(() => {
   border-radius: 3px;
   color: #687b90;
   font-size: 8px;
+}
+
+.timeline-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.timeline-action {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid rgba(91, 112, 135, 0.28);
+  border-radius: 4px;
+  background: rgba(16, 28, 41, 0.85);
+  color: #a8bacd;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.timeline-action:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #dcecff;
+}
+
+.timeline-action:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .timeline-duration {
@@ -1323,6 +1426,11 @@ onBeforeUnmount(() => {
     inset 0 0 0 1px rgba(255, 255, 255, 0.48),
     0 0 0 1px rgba(255, 255, 255, 0.28);
   z-index: 4;
+}
+
+.v1-clip.partner-selected:not(.selected) {
+  border-color: rgba(244, 200, 74, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(244, 200, 74, 0.35);
 }
 
 .v1-clip.current {

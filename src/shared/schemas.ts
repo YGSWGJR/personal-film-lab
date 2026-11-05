@@ -64,6 +64,12 @@ export const settingsSchema = z.object({
       localBatchSize: z.number().int().min(1).max(4).optional(),
     })
     .optional(),
+  shortcuts: z
+    .object({
+      split: z.string().trim().min(1).max(40),
+      merge: z.string().trim().min(1).max(40),
+    })
+    .optional(),
 });
 
 export const settingsSetArgsSchema = settingsSchema;
@@ -426,6 +432,25 @@ export const shotUpdateArgsSchema = z.object({
     dialogue: nullableText(20000),
     remark: nullableText(20000),
   }),
+});
+
+export const shotSplitArgsSchema = z.object({
+  projectId: z.string().min(1),
+  shotId: z.string().min(1),
+  cutMs: z.number().int().min(0),
+});
+
+export const shotMergeArgsSchema = z.object({
+  projectId: z.string().min(1),
+  shotIdA: z.string().min(1),
+  shotIdB: z.string().min(1),
+});
+
+export const shotTrimArgsSchema = z.object({
+  projectId: z.string().min(1),
+  leftShotId: z.string().min(1),
+  rightShotId: z.string().min(1),
+  cutMs: z.number().int().min(0),
 });
 
 export const stillCreateArgsSchema = z.object({

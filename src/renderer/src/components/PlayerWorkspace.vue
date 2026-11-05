@@ -17,6 +17,9 @@ const props = defineProps<{
   shots: WorkspaceShot[];
   markers: TimelineMarker[];
   selectedShot: WorkspaceShot | null;
+  mergePartnerId?: string | null;
+  splitShortcut: string;
+  mergeShortcut: string;
   poster: string;
   displayDurationMs: number;
   displayTimeMs: number;
@@ -35,7 +38,10 @@ const emit = defineEmits<{
   toggle: [];
   step: [dir: 1 | -1];
   seek: [timeMs: number];
-  selectShot: [shot: WorkspaceShot];
+  selectShot: [shot: WorkspaceShot, additive: boolean];
+  splitShot: [];
+  mergeShots: [];
+  shotContextMenu: [shot: WorkspaceShot | null, position: { x: number; y: number }, timeMs: number];
   boundaryChange: [change: BoundaryChange];
   boundaryCommit: [change: BoundaryChange];
   bounds: [bounds: RenderBounds];
@@ -244,6 +250,9 @@ onBeforeUnmount(() => {
       :shots="shots"
       :markers="markers"
       :selected-id="selectedShot?.id ?? null"
+      :merge-partner-id="mergePartnerId"
+      :split-shortcut="splitShortcut"
+      :merge-shortcut="mergeShortcut"
       :current-time-ms="displayTimeMs"
       :duration-ms="displayDurationMs"
       :fps="player.hasFile ? player.fps : 500 / 21"
@@ -255,7 +264,10 @@ onBeforeUnmount(() => {
       :in-point-ms="inPointMs"
       :out-point-ms="outPointMs"
       @seek="emit('seek', $event)"
-      @select="emit('selectShot', $event)"
+      @select="(shot, additive) => emit('selectShot', shot, additive)"
+      @split="emit('splitShot')"
+      @merge="emit('mergeShots')"
+      @context-menu="(shot, position, timeMs) => emit('shotContextMenu', shot, position, timeMs)"
       @boundary-change="emit('boundaryChange', $event)"
       @boundary-commit="emit('boundaryCommit', $event)"
       @update-track-height="emit('updateTrackHeight', $event)"

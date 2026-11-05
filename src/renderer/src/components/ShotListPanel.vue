@@ -6,13 +6,14 @@ import type { WorkspaceShot } from '../types/workspace';
 const props = defineProps<{
   shots: WorkspaceShot[];
   selectedId: string | null;
+  mergePartnerId?: string | null;
   currentTimeMs: number;
   emptyImage: string;
   initialScrollTop?: number;
 }>();
 
 const emit = defineEmits<{
-  select: [shot: WorkspaceShot];
+  select: [shot: WorkspaceShot, additive: boolean];
   addShot: [];
   detect: [];
   collapse: [];
@@ -91,13 +92,14 @@ function durationText(ms: number): string {
           class="shot-row"
           :class="{
             selected: shot.id === selectedId,
+            'partner-selected': shot.id === mergePartnerId,
             current: currentTimeMs >= shot.startMs && currentTimeMs < shot.endMs,
           }"
           :style="{ top: `${(startIndex + offset) * ROW_HEIGHT}px` }"
           type="button"
           role="option"
-          :aria-selected="shot.id === selectedId"
-          @click="emit('select', shot)"
+          :aria-selected="shot.id === selectedId || shot.id === mergePartnerId"
+          @click="emit('select', shot, $event.shiftKey || $event.ctrlKey || $event.metaKey)"
           @contextmenu.prevent="emit('contextMenu', shot, { x: $event.clientX, y: $event.clientY })"
         >
           <span class="shot-thumb">
@@ -245,6 +247,11 @@ function durationText(ms: number): string {
 .shot-row.selected {
   border-color: var(--red);
   background: var(--red-soft);
+}
+
+.shot-row.partner-selected:not(.selected) {
+  border-color: rgba(244, 200, 74, 0.7);
+  background: rgba(244, 200, 74, 0.1);
 }
 
 .shot-row.current:not(.selected) {

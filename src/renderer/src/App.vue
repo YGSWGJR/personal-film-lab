@@ -65,7 +65,7 @@ import type {
   WorkspaceState,
 } from '../../shared/types';
 import { PLAYBACK_SPEEDS, PX_PER_SEC_LEVELS } from '../../shared/types';
-import { frameToMs } from '../../shared/time';
+import { formatTimeMs, frameToMs } from '../../shared/time';
 
 const info = ref<AppInfo | null>(null);
 const bridgeReady = ref(false);
@@ -79,6 +79,8 @@ const demoShots = createDemoShots();
 const shots = ref<WorkspaceShot[]>(demoShots);
 const markers = ref<TimelineMarker[]>(createDemoMarkers(demoShots));
 const selectedId = ref<string | null>(demoShots[2]?.id ?? null);
+const mergePartnerId = ref<string | null>(null);
+const shotEditing = ref(false);
 const previewTimeMs = ref(demoShots[2]?.startMs ?? 0);
 const notes = reactive<Record<string, string>>(
   Object.fromEntries(demoShots.map((shot) => [shot.id, shot.remark ?? ''])),
@@ -166,6 +168,9 @@ const confirmState = reactive({
   open: false,
   title: '',
   message: '',
+  warning: '',
+  confirmLabel: '',
+  cancelLabel: '',
   resolve: (_confirmed: boolean): void => {},
 });
 /** 删除用户内容前是否二次确认，由设置 confirmUserContent 驱动，缺省开启 */
@@ -182,10 +187,17 @@ const outPointMs = ref<number | null>(null);
  * 弹出删除确认弹窗并等待用户选择。
  * @returns 用户点击「删除」返回 true；点击取消 / Esc / 点击遮罩返回 false。
  */
-function confirmUserDelete(title: string, message: string): Promise<boolean> {
+function confirmUserDelete(
+  title: string,
+  message: string,
+  options: { warning?: string; confirmLabel?: string; cancelLabel?: string } = {},
+): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     confirmState.title = title;
     confirmState.message = message;
+    confirmState.warning = options.warning ?? '';
+    confirmState.confirmLabel = options.confirmLabel ?? '';
+    confirmState.cancelLabel = options.cancelLabel ?? '';
     confirmState.resolve = resolve;
     confirmState.open = true;
   });
@@ -241,6 +253,28 @@ const skeleton: SkeletonState = {
 window.__SKELETON_STATE__ = skeleton;
 
 const selectedShot = computed(() => shots.value.find((shot) => shot.id === selectedId.value) ?? null);
+const selectedMergePair = computed<[WorkspaceShot, WorkspaceShot] | null>(() => {
+  const primary = selectedShot.value;
+  const partner = shots.value.find((shot) => shot.id === mergePartnerId.value) ?? null;
+  if (!primary || !partner || primary.id === partner.id) return null;
+  const pair: [WorkspaceShot, WorkspaceShot] =
+    primary.startMs <= partner.startMs ? [primary, partner] : [partner, primary];
+  return pair[0].endMs === pair[1].startMs ? pair : null;
+});
+const canSplitAtPlayhead = computed(() => {
+  const shot = selectedShot.value;
+  return Boolean(
+    shot &&
+      !shot.locked &&
+      !demoMode.value &&
+      displayTimeMs.value > shot.startMs &&
+      displayTimeMs.value < shot.endMs,
+  );
+});
+const shortcutSettings = computed(() => settings.value?.shortcuts ?? {
+  split: 'Ctrl+K',
+  merge: 'Ctrl+Shift+G',
+});
 const selectedNote = computed(() => (selectedId.value ? notes[selectedId.value] ?? '' : ''));
 const selectedStill = computed(() => {
   if (!selectedShot.value) return null;
@@ -540,6 +574,7 @@ async function loadProject(
     ? mapped.find((shot) => shot.id === restoreState.selectedShotId) ?? null
     : null;
   selectedId.value = restoredShot?.id ?? mapped[0]?.id ?? null;
+  mergePartnerId.value = null;
   previewTimeMs.value = restoreState?.timeMs ?? mapped[0]?.startMs ?? 0;
   await Promise.all([loadTerms(true, true), loadTags()]);
 
@@ -593,6 +628,7 @@ async function refreshProjectData(projectId: string, preferredShotId?: string | 
     mapped[0] ??
     null;
   selectedId.value = preferred?.id ?? null;
+  mergePartnerId.value = null;
   previewTimeMs.value = preferred?.startMs ?? 0;
   await loadTags();
   return true;
@@ -1013,7 +1049,24 @@ async function seekTo(timeMs: number): Promise<void> {
   if (state) Object.assign(player, state);
 }
 
-async function selectShot(shot: WorkspaceShot): Promise<void> {
+async function selectShot(shot: WorkspaceShot, additive = false): Promise<void> {
+  if (additive) {
+    const primary = selectedShot.value;
+    if (!primary || primary.id === shot.id) {
+      mergePartnerId.value = null;
+      return;
+    }
+    const [left, right] =
+      primary.startMs <= shot.startMs ? [primary, shot] : [shot, primary];
+    if (left.endMs !== right.startMs || left.locked || right.locked) {
+      showToast('合并只能选择时间上相邻且未锁定的两个镜头。');
+      mergePartnerId.value = null;
+      return;
+    }
+    mergePartnerId.value = shot.id;
+    return;
+  }
+  mergePartnerId.value = null;
   const switched = selectedId.value !== shot.id;
   selectedId.value = shot.id;
   previewTimeMs.value = shot.startMs;
@@ -1028,7 +1081,11 @@ async function selectShot(shot: WorkspaceShot): Promise<void> {
 function openShotContextMenu(
   shot: WorkspaceShot,
   position: { x: number; y: number },
+  splitTimeMs = displayTimeMs.value,
 ): void {
+  const index = shots.value.findIndex((item) => item.id === shot.id);
+  const previous = index > 0 ? shots.value[index - 1] : null;
+  const next = index >= 0 && index < shots.value.length - 1 ? shots.value[index + 1] : null;
   const stillCount = projectStills.value.filter((still) => still.shotId === shot.id).length;
   const hasNote = Boolean(notes[shot.id]?.trim());
   const suffix =
@@ -1037,17 +1094,148 @@ function openShotContextMenu(
       : '';
   contextMenu.x = position.x;
   contextMenu.y = position.y;
-  contextMenu.items = [
-    {
-      label: demoMode.value ? '示例镜头不可删除' : `删除镜头${suffix}`,
-      danger: true,
-      disabled: demoMode.value,
-      action: () => {
-        void deleteShot(shot);
-      },
+  const items: ContextMenuItem[] = [{
+    label: `在 ${formatTimeMs(splitTimeMs)} 切分`,
+    disabled:
+      demoMode.value ||
+      shotEditing.value ||
+      shot.locked ||
+      splitTimeMs <= shot.startMs ||
+      splitTimeMs >= shot.endMs,
+    action: () => {
+      void splitShotAtTime(shot, splitTimeMs);
     },
-  ];
+  }];
+  if (selectedMergePair.value?.some((item) => item.id === shot.id)) {
+    items.push({
+      label: '合并已选两个镜头',
+      disabled: demoMode.value || shotEditing.value,
+      action: () => {
+        if (selectedMergePair.value) void mergeShotPair(selectedMergePair.value);
+      },
+    });
+  } else {
+    if (previous && previous.endMs === shot.startMs) {
+      items.push({
+        label: '合并前一镜头',
+        disabled: demoMode.value || shotEditing.value || shot.locked || previous.locked,
+        action: () => {
+          void mergeShotPair([previous, shot]);
+        },
+      });
+    }
+    if (next && shot.endMs === next.startMs) {
+      items.push({
+        label: '合并后一镜头',
+        disabled: demoMode.value || shotEditing.value || shot.locked || next.locked,
+        action: () => {
+          void mergeShotPair([shot, next]);
+        },
+      });
+    }
+  }
+  items.push({
+    label: demoMode.value ? '示例镜头不可删除' : `删除镜头${suffix}`,
+    danger: true,
+    disabled: demoMode.value || shotEditing.value,
+    action: () => {
+      void deleteShot(shot);
+    },
+  });
+  contextMenu.items = items;
   contextMenu.visible = true;
+}
+
+function openTimelineContextMenu(
+  shot: WorkspaceShot | null,
+  position: { x: number; y: number },
+  timeMs: number,
+): void {
+  const target =
+    shot ?? shots.value.find((item) => timeMs >= item.startMs && timeMs < item.endMs) ?? null;
+  if (!target) {
+    showToast('当前时码没有可编辑的镜头。');
+    return;
+  }
+  openShotContextMenu(target, position, timeMs);
+}
+
+function canSplitShot(shot: WorkspaceShot, cutMs: number): boolean {
+  return !demoMode.value && !shot.locked && cutMs > shot.startMs && cutMs < shot.endMs;
+}
+
+async function splitShotAtTime(shot: WorkspaceShot, cutMs: number): Promise<void> {
+  if (!activeProject.value || shotEditing.value) return;
+  if (!canSplitShot(shot, cutMs)) {
+    showToast('播放头必须位于镜头内部，且镜头不能锁定。');
+    return;
+  }
+  shotEditing.value = true;
+  try {
+    const result = unwrap(
+      await window.api.shot.split({
+        projectId: activeProject.value.id,
+        shotId: shot.id,
+        cutMs,
+      }),
+    );
+    if (!result) return;
+    mergePartnerId.value = null;
+    await refreshProjectData(activeProject.value.id, result.right.id);
+    previewTimeMs.value = cutMs;
+    if (player.hasFile) await seekTo(cutMs);
+    showToast(`已在 ${formatTimeMs(cutMs)} 切分镜头。`, 'success');
+  } finally {
+    shotEditing.value = false;
+  }
+}
+
+async function mergeShotPair(pair: [WorkspaceShot, WorkspaceShot]): Promise<void> {
+  if (!activeProject.value || shotEditing.value) return;
+  if (pair[0].endMs !== pair[1].startMs || pair[0].locked || pair[1].locked) {
+    showToast('只能合并时间相邻且未锁定的两个镜头。');
+    return;
+  }
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '合并镜头',
+      `将镜头 ${String(pair[0].index).padStart(2, '0')} 与 ${String(pair[1].index).padStart(2, '0')} 合并，第二段镜头记录会删除，笔记、标签与静帧会保留。`,
+      {
+        warning: '原镜头记录会被删除，但标签、笔记和静帧会迁移到合并后的镜头。',
+        confirmLabel: '合并',
+      },
+    );
+    if (!confirmed) return;
+  }
+  shotEditing.value = true;
+  try {
+    const result = unwrap(
+      await window.api.shot.merge({
+        projectId: activeProject.value.id,
+        shotIdA: pair[0].id,
+        shotIdB: pair[1].id,
+      }),
+    );
+    if (!result) return;
+    mergePartnerId.value = null;
+    await refreshProjectData(activeProject.value.id, result.shot.id);
+    previewTimeMs.value = result.shot.startMs;
+    if (player.hasFile) await seekTo(result.shot.startMs);
+    showToast('相邻镜头已合并。', 'success');
+  } finally {
+    shotEditing.value = false;
+  }
+}
+
+async function splitSelectedAtPlayhead(): Promise<void> {
+  const shot = selectedShot.value;
+  if (!shot) return;
+  await splitShotAtTime(shot, displayTimeMs.value);
+}
+
+async function mergeSelectedShots(): Promise<void> {
+  if (!selectedMergePair.value) return;
+  await mergeShotPair(selectedMergePair.value);
 }
 
 function openStillContextMenu(still: Still, position: { x: number; y: number }): void {
@@ -1150,18 +1338,20 @@ async function commitBoundary(change: BoundaryChange): Promise<void> {
   if (!shot || !next) return;
   busy.value = true;
   try {
-    const [updatedShot, updatedNext] = await Promise.all([
-      window.api.shot.update({ id: shot.id, patch: { endMs: change.timeMs } }),
-      window.api.shot.update({ id: next.id, patch: { startMs: change.timeMs } }),
-    ]);
-    if (!updatedShot.ok || !updatedNext.ok) {
-      const failure = !updatedShot.ok ? updatedShot.error : !updatedNext.ok ? updatedNext.error : null;
-      showToast(failure?.message ?? '镜头边界保存失败', 'error', failure?.code);
+    const updated = await window.api.shot.trim({
+      projectId: activeProject.value?.id ?? shot.projectId,
+      leftShotId: shot.id,
+      rightShotId: next.id,
+      cutMs: change.timeMs,
+    });
+    if (!updated.ok) {
+      showToast(updated.error.message, 'error', updated.error.code);
       if (activeProject.value) await loadProject(activeProject.value);
       return;
     }
-    Object.assign(shot, updatedShot.data);
-    Object.assign(next, updatedNext.data);
+    if (activeProject.value) {
+      await refreshProjectData(activeProject.value.id, selectedId.value);
+    }
     showToast('镜头边界已保存。', 'success');
   } finally {
     busy.value = false;
@@ -2223,6 +2413,11 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     boundaryFallback: detectionBoundaryFallback.value,
     boundaryWarning: detectionBoundaryWarning.value,
     jobId: detectionJobId.value,
+    selectedId: selectedId.value,
+    mergePartnerId: mergePartnerId.value,
+    canSplitAtPlayhead: canSplitAtPlayhead.value,
+    canMergeSelected: Boolean(selectedMergePair.value),
+    shotEditing: shotEditing.value,
   }),
   collapse: () => closeDetection(),
   openResult: () => viewDetectionResult(),
@@ -2235,6 +2430,55 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
   timeline: { ...timelineSettings.value },
   settingsTimeline: settings.value?.timeline ? { ...settings.value.timeline } : null,
 });
+
+(window as unknown as Record<string, unknown>).__S40_SHOT_EDIT_TEST__ = {
+  openProject: async (projectId: string) => {
+    const result = await window.api.project.get({ id: projectId });
+    if (!result.ok) return { ok: false, error: result.error };
+    await loadProject(result.data);
+    return { ok: true };
+  },
+  state: () => ({
+    shots: shots.value.map((shot) => ({
+      id: shot.id,
+      index: shot.index,
+      startMs: shot.startMs,
+      endMs: shot.endMs,
+      locked: shot.locked,
+      thumbnail: shot.thumbnail,
+    })),
+    selectedId: selectedId.value,
+    mergePartnerId: mergePartnerId.value,
+    canSplitAtPlayhead: canSplitAtPlayhead.value,
+    canMergeSelected: Boolean(selectedMergePair.value),
+    shotEditing: shotEditing.value,
+    timeMs: displayTimeMs.value,
+    busy: busy.value,
+    overlayOpen: overlayOpen.value,
+  }),
+  setTime: async (timeMs: number) => {
+    previewTimeMs.value = timeMs;
+    player.timeMs = timeMs;
+    if (player.hasFile) await seekTo(timeMs);
+  },
+  select: async (shotId: string, additive = false) => {
+    const shot = shots.value.find((item) => item.id === shotId);
+    if (!shot) return false;
+    await selectShot(shot, additive);
+    return true;
+  },
+  splitAt: async (timeMs = displayTimeMs.value) => {
+    const shot = selectedShot.value;
+    if (!shot) return false;
+    await splitShotAtTime(shot, timeMs);
+    return true;
+  },
+  mergeSelected: async () => {
+    if (!selectedMergePair.value) return false;
+    await mergeShotPair(selectedMergePair.value);
+    return true;
+  },
+};
 
 watch(
   [
@@ -2444,6 +2688,23 @@ async function applyPlayerLayer(level: OverlayLayer): Promise<void> {
   if (state) Object.assign(player, state);
 }
 
+function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
+  const parts = shortcut
+    .split('+')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  const key = parts.at(-1);
+  if (!key) return false;
+  const command = parts.includes('ctrl') || parts.includes('cmd') || parts.includes('meta');
+  const hasCommand = event.ctrlKey || event.metaKey;
+  return (
+    event.key.toLowerCase() === key &&
+    hasCommand === command &&
+    event.shiftKey === parts.includes('shift') &&
+    event.altKey === parts.includes('alt')
+  );
+}
+
 function handleKeydown(event: KeyboardEvent): void {
   // S36-1b：删除确认弹窗打开时，全部按键交给 ConfirmDialog（Esc 取消 / Enter 确认），
   // 避免空格播放、Delete 删除等全局快捷键与弹窗互相干扰。
@@ -2471,6 +2732,18 @@ function handleKeydown(event: KeyboardEvent): void {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     void saveCurrentNote();
+    return;
+  }
+  if (matchesShortcut(event, shortcutSettings.value.merge)) {
+    if (overlayOpen.value || contextMenu.visible || busy.value || shotEditing.value) return;
+    event.preventDefault();
+    void mergeSelectedShots();
+    return;
+  }
+  if (matchesShortcut(event, shortcutSettings.value.split)) {
+    if (overlayOpen.value || contextMenu.visible || busy.value || shotEditing.value) return;
+    event.preventDefault();
+    void splitSelectedAtPlayhead();
     return;
   }
   if (event.key.toLowerCase() === 'm' && !event.ctrlKey && !event.metaKey) {
@@ -2630,7 +2903,10 @@ onMounted(async () => {
       const active = shots.value.find(
         (shot) => event.timeMs >= shot.startMs && event.timeMs < shot.endMs,
       );
-      if (active && active.id !== selectedId.value) selectedId.value = active.id;
+      if (active && active.id !== selectedId.value) {
+        selectedId.value = active.id;
+        mergePartnerId.value = null;
+      }
     }),
     api.player.onLoaded((media: MediaInfo) => {
       loadedPlaybackPath.value = media.path;
@@ -2836,6 +3112,7 @@ onBeforeUnmount(() => {
       <ShotListPanel
         :shots="shots"
         :selected-id="selectedId"
+        :merge-partner-id="mergePartnerId"
         :current-time-ms="displayTimeMs"
         :empty-image="emptyShotsImage"
         :initial-scroll-top="shotScrollTop"
@@ -2852,6 +3129,9 @@ onBeforeUnmount(() => {
         :shots="shots"
         :markers="markers"
         :selected-shot="selectedShot"
+        :merge-partner-id="mergePartnerId"
+        :split-shortcut="shortcutSettings.split"
+        :merge-shortcut="shortcutSettings.merge"
         :poster="videoPoster"
         :display-duration-ms="displayDurationMs"
         :display-time-ms="displayTimeMs"
@@ -2868,6 +3148,9 @@ onBeforeUnmount(() => {
         @step="stepFrame"
         @seek="seekTo"
         @select-shot="selectShot"
+        @split-shot="splitSelectedAtPlayhead"
+        @merge-shots="mergeSelectedShots"
+        @shot-context-menu="openTimelineContextMenu"
         @boundary-change="updateBoundary"
         @boundary-commit="commitBoundary"
         @bounds="setPlayerBounds"
@@ -3093,6 +3376,9 @@ onBeforeUnmount(() => {
       :open="confirmState.open"
       :title="confirmState.title"
       :message="confirmState.message"
+      :warning="confirmState.warning || undefined"
+      :confirm-label="confirmState.confirmLabel || undefined"
+      :cancel-label="confirmState.cancelLabel || undefined"
       @confirm="resolveConfirm(true)"
       @cancel="resolveConfirm(false)"
     />

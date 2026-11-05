@@ -18,6 +18,11 @@ export interface TimelineSettings {
   pxPerSecond: number;
 }
 
+export interface ShortcutSettings {
+  split: string;
+  merge: string;
+}
+
 /** S36-2：镜头识别引擎。 */
 export type RecognitionEngine = 'ai' | 'opencv';
 
@@ -120,6 +125,8 @@ export interface Settings {
   recognition?: RecognitionSettings;
   /** AI 识别配置（S36-2） */
   ai?: AiSettings;
+  /** S40：镜头编辑快捷键 */
+  shortcuts?: ShortcutSettings;
 }
 
 export interface SettingsSetArgs {
@@ -142,6 +149,8 @@ export interface SettingsSetArgs {
   recognition?: RecognitionSettings;
   /** AI 识别配置（S36-2） */
   ai?: AiSettings;
+  /** S40：镜头编辑快捷键 */
+  shortcuts?: ShortcutSettings;
 }
 
 export interface SettingsChooseDirectoryArgs {
@@ -935,6 +944,39 @@ export interface ShotUpdateArgs {
   };
 }
 
+export interface ShotSplitArgs {
+  projectId: string;
+  shotId: string;
+  cutMs: number;
+}
+
+export interface ShotSplitResult {
+  left: Shot;
+  right: Shot;
+}
+
+export interface ShotMergeArgs {
+  projectId: string;
+  shotIdA: string;
+  shotIdB: string;
+}
+
+export interface ShotMergeResult {
+  shot: Shot;
+}
+
+export interface ShotTrimArgs {
+  projectId: string;
+  leftShotId: string;
+  rightShotId: string;
+  cutMs: number;
+}
+
+export interface ShotTrimResult {
+  left: Shot;
+  right: Shot;
+}
+
 export type AnnotationType = 'box' | 'arrow' | 'text';
 export interface Annotation {
   type: AnnotationType;
@@ -1188,6 +1230,9 @@ export interface ShotApi {
   create(args: ShotCreateArgs): Promise<IpcResult<Shot>>;
   update(args: ShotUpdateArgs): Promise<IpcResult<Shot>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
+  split(args: ShotSplitArgs): Promise<IpcResult<ShotSplitResult>>;
+  merge(args: ShotMergeArgs): Promise<IpcResult<ShotMergeResult>>;
+  trim(args: ShotTrimArgs): Promise<IpcResult<ShotTrimResult>>;
 }
 
 export interface StillApi {

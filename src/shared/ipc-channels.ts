@@ -100,6 +100,9 @@ export const IPC = {
   SHOT_CREATE: 'shot:create',
   SHOT_UPDATE: 'shot:update',
   SHOT_DELETE: 'shot:delete',
+  SHOT_SPLIT: 'shot:split',
+  SHOT_MERGE: 'shot:merge',
+  SHOT_TRIM: 'shot:trim',
 
   STILL_LIST: 'still:list',
   STILL_GET: 'still:get',

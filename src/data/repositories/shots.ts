@@ -1,5 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import type { Shot, ShotCreateArgs, ShotPreview, ShotUpdateArgs } from '../../shared/types';
+import type {
+  Shot,
+  ShotCreateArgs,
+  ShotMergeArgs,
+  ShotMergeResult,
+  ShotPreview,
+  ShotSplitArgs,
+  ShotSplitResult,
+  ShotTrimArgs,
+  ShotTrimResult,
+  ShotUpdateArgs,
+} from '../../shared/types';
+import { frameFromMs, frameToMs, safeFps } from '../../shared/time';
 import type { DataLayer } from '../db';
 import { DataError, isSqliteConstraintError } from '../errors';
 import { removeProjectFiles } from '../paths';
@@ -109,7 +121,7 @@ export class ShotRepository {
           `UPDATE shots SET
             shot_index = @index, start_ms = @startMs, end_ms = @endMs, duration_ms = @durationMs,
             shot_size = @shotSize, camera_method = @cameraMethod, dialogue = @dialogue, remark = @remark,
-            updated_at = @updatedAt
+            origin = 'manual', updated_at = @updatedAt
           WHERE id = @id`,
         )
         .run({
@@ -128,6 +140,169 @@ export class ShotRepository {
     });
 
     return this.get(current.id);
+  }
+
+  split(args: ShotSplitArgs): ShotSplitResult {
+    this.assertProject(args.projectId);
+    const source = this.getEditableRow(args.projectId, args.shotId);
+    const cutMs = this.alignCutMs(args.projectId, args.cutMs, source.start_ms, source.end_ms);
+    const now = nowIso();
+    const rightId = randomUUID();
+
+    this.layer.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE shots SET
+            end_ms = ?, duration_ms = ?, origin = 'manual', updated_at = ?
+          WHERE id = ?`,
+        )
+        .run(cutMs, cutMs - source.start_ms, now, source.id);
+
+      this.db
+        .prepare(
+          `INSERT INTO shots (
+            id, project_id, shot_index, start_ms, end_ms, duration_ms,
+            shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, NULL, ?, ?)`,
+        )
+        .run(
+          rightId,
+          source.project_id,
+          source.shot_index + 1,
+          cutMs,
+          source.end_ms,
+          source.end_ms - cutMs,
+          source.shot_size,
+          source.camera_method,
+          source.dialogue,
+          source.remark,
+          now,
+          now,
+        );
+
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO shot_tags (shot_id, tag_id)
+           SELECT ?, tag_id FROM shot_tags WHERE shot_id = ?`,
+        )
+        .run(rightId, source.id);
+      this.db
+        .prepare('UPDATE stills SET shot_id = ?, updated_at = ? WHERE shot_id = ? AND time_ms >= ?')
+        .run(rightId, now, source.id, cutMs);
+      this.renumber(source.project_id);
+      this.layer.projects.touch(source.project_id);
+    });
+
+    return {
+      left: this.get(source.id),
+      right: this.get(rightId),
+    };
+  }
+
+  merge(args: ShotMergeArgs): ShotMergeResult {
+    this.assertProject(args.projectId);
+    const first = this.getEditableRow(args.projectId, args.shotIdA);
+    const second = this.getEditableRow(args.projectId, args.shotIdB);
+    if (first.id === second.id) {
+      throw new DataError('NOT_ADJACENT', '不能合并同一个镜头', { shotId: first.id });
+    }
+    const [left, right] =
+      first.start_ms <= second.start_ms ? [first, second] : [second, first];
+    if (left.end_ms !== right.start_ms) {
+      throw new DataError(
+        left.end_ms < right.start_ms ? 'MERGE_GAP' : 'NOT_ADJACENT',
+        left.end_ms < right.start_ms ? '镜头之间存在间隙，无法合并' : '镜头存在重叠，无法合并',
+        { leftShotId: left.id, rightShotId: right.id },
+      );
+    }
+    const now = nowIso();
+    this.layer.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE shots SET
+            end_ms = ?, duration_ms = ?, shot_size = ?, camera_method = ?, dialogue = ?,
+            remark = ?, thumbnail = ?, origin = 'manual', updated_at = ?
+          WHERE id = ?`,
+        )
+        .run(
+          right.end_ms,
+          right.end_ms - left.start_ms,
+          this.pickText(left.shot_size, right.shot_size),
+          this.pickText(left.camera_method, right.camera_method),
+          this.pickText(left.dialogue, right.dialogue),
+          this.pickText(left.remark, right.remark),
+          left.thumbnail ?? right.thumbnail,
+          now,
+          left.id,
+        );
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO shot_tags (shot_id, tag_id)
+           SELECT ?, tag_id FROM shot_tags WHERE shot_id = ?`,
+        )
+        .run(left.id, right.id);
+      this.db
+        .prepare('UPDATE notes SET shot_id = ?, updated_at = ? WHERE shot_id = ?')
+        .run(left.id, now, right.id);
+      this.db
+        .prepare('UPDATE stills SET shot_id = ?, updated_at = ? WHERE shot_id = ?')
+        .run(left.id, now, right.id);
+      this.db.prepare('DELETE FROM shot_tags WHERE shot_id = ?').run(right.id);
+      this.db.prepare('DELETE FROM shots WHERE id = ?').run(right.id);
+      this.renumber(left.project_id);
+      this.layer.projects.touch(left.project_id);
+    });
+    return { shot: this.get(left.id) };
+  }
+
+  trim(args: ShotTrimArgs): ShotTrimResult {
+    this.assertProject(args.projectId);
+    const first = this.getEditableRow(args.projectId, args.leftShotId);
+    const second = this.getEditableRow(args.projectId, args.rightShotId);
+    const [left, right] =
+      first.start_ms <= second.start_ms ? [first, second] : [second, first];
+    if (left.end_ms !== right.start_ms) {
+      throw new DataError(
+        left.end_ms < right.start_ms ? 'MERGE_GAP' : 'NOT_ADJACENT',
+        left.end_ms < right.start_ms ? '镜头之间存在间隙，无法调整边界' : '镜头存在重叠，无法调整边界',
+        { leftShotId: left.id, rightShotId: right.id },
+      );
+    }
+    const cutMs = this.alignCutMs(
+      args.projectId,
+      args.cutMs,
+      left.start_ms,
+      right.end_ms,
+    );
+    const now = nowIso();
+    this.layer.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE shots SET end_ms = ?, duration_ms = ?, origin = 'manual', updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(cutMs, cutMs - left.start_ms, now, left.id);
+      this.db
+        .prepare(
+          `UPDATE shots SET start_ms = ?, duration_ms = ?, origin = 'manual', updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(cutMs, right.end_ms - cutMs, now, right.id);
+      this.db
+        .prepare(
+          `UPDATE stills SET shot_id = ?, updated_at = ?
+           WHERE shot_id IN (?, ?) AND time_ms >= ?`,
+        )
+        .run(right.id, now, left.id, right.id, cutMs);
+      this.db
+        .prepare(
+          `UPDATE stills SET shot_id = ?, updated_at = ?
+           WHERE shot_id IN (?, ?) AND time_ms < ?`,
+        )
+        .run(left.id, now, left.id, right.id, cutMs);
+      this.layer.projects.touch(args.projectId);
+    });
+    return { left: this.get(left.id), right: this.get(right.id) };
   }
 
   /** S36-2：写入镜头封面缩略图路径（可由 AI/OpenCV 预览或按需抽帧生成）。 */
@@ -235,6 +410,54 @@ export class ShotRepository {
         assignTag.run(shotId, tagId);
       }
     }
+  }
+
+  private getEditableRow(projectId: string, id: string): ShotRow {
+    const row = this.db.prepare('SELECT * FROM shots WHERE id = ?').get(id) as ShotRow | undefined;
+    if (!row) throw new DataError('SHOT_NOT_FOUND', `镜头不存在：${id}`, { id });
+    if (row.project_id !== projectId) {
+      throw new DataError('SHOT_NOT_FOUND', '镜头不属于该项目', { id, projectId });
+    }
+    if (row.locked !== 0) {
+      throw new DataError('SHOT_LOCKED', '镜头已锁定，无法手动编辑', { id });
+    }
+    return row;
+  }
+
+  private alignCutMs(projectId: string, rawCutMs: number, startMs: number, endMs: number): number {
+    if (!Number.isFinite(rawCutMs) || rawCutMs <= startMs || rawCutMs >= endMs) {
+      throw new DataError('CUT_OUT_OF_RANGE', '切点必须位于镜头内部', {
+        projectId,
+        rawCutMs,
+        startMs,
+        endMs,
+      });
+    }
+    const project = this.layer.projects.get(projectId);
+    const fps = safeFps(project.media.fps ?? 24);
+    const cutMs = frameToMs(frameFromMs(rawCutMs, fps), fps);
+    if (cutMs <= startMs || cutMs >= endMs) {
+      throw new DataError('CUT_TOO_CLOSE_TO_EDGE', '切点距镜头边缘不足 1 帧', {
+        rawCutMs,
+        cutMs,
+        startMs,
+        endMs,
+        fps,
+      });
+    }
+    return cutMs;
+  }
+
+  private pickText(left: string | null, right: string | null): string | null {
+    return left && left.trim() ? left : right;
+  }
+
+  private renumber(projectId: string): void {
+    const rows = this.db
+      .prepare('SELECT id FROM shots WHERE project_id = ? ORDER BY start_ms ASC, id ASC')
+      .all(projectId) as Array<{ id: string }>;
+    const update = this.db.prepare('UPDATE shots SET shot_index = ? WHERE id = ?');
+    rows.forEach((row, index) => update.run(index + 1, row.id));
   }
 
   private validateRange(startMs: number, endMs: number): void {
