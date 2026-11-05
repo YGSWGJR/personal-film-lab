@@ -21,6 +21,8 @@
 
 本项目的运行时下载脚本使用公开项目
 [`zhongfly/mpv-winbuild`](https://github.com/zhongfly/mpv-winbuild)。
+FFmpeg 二进制来自
+[`BtbN/FFmpeg-Builds`](https://github.com/BtbN/FFmpeg-Builds)。
 本地模型的上游参考为
 [`nif0/Qwen3-VL-8B-W4A8-GPTQ-ConvRot`](https://huggingface.co/nif0/Qwen3-VL-8B-W4A8-GPTQ-ConvRot)。
 随包模型的最终来源和校验值应由发布维护者在每次打包前复核。

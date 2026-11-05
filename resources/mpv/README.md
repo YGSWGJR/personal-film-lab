@@ -23,8 +23,8 @@
 npm run prepare:runtime
 ```
 
-脚本从 `zhongfly/mpv-winbuild` 最新公开 Release 下载 x64 的 `mpv-dev` 和 FFmpeg
-压缩包，按同页 `sha256.txt` 校验后提取：
+脚本从 `zhongfly/mpv-winbuild` 最新公开 Release 下载 x64 的 `mpv-dev`，
+并从 `BtbN/FFmpeg-Builds` 获取 FFmpeg，按各自发布页校验后提取：
 
 - `resources/mpv/libmpv-2.dll`
 - `resources/ffmpeg/ffmpeg.exe`
