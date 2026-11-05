@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$Tag = "v0.1.9",
   [string]$Destination = ".\downloads"
@@ -12,12 +12,13 @@ $releaseUri = "https://api.github.com/repos/$repo/releases/tags/$Tag"
 $release = Invoke-RestMethod -Uri $releaseUri -Headers @{ "User-Agent" = "Personal-Film-Lab-Downloader" }
 $Destination = [System.IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+$Version = $Tag.TrimStart("v")
 
 $downloads = @(
-  @{ Asset = "PersonalFilmLab-Setup-0.1.9.exe"; Local = "个人拉片工作台 Setup 0.1.9.exe" },
-  @{ Asset = "PersonalFilmLab-Uninstaller-0.1.9.exe"; Local = "个人拉片工作台卸载工具-0.1.9.exe" },
-  @{ Asset = "PersonalFilmLab-User-Guide-0.1.9.docx"; Local = "个人拉片工作台使用说明-0.1.9.docx" },
-  @{ Asset = "PersonalFilmLab-0.1.9-Install-zh-CN.txt"; Local = "个人拉片工作台-0.1.9-安装说明.txt" },
+  @{ Asset = "PersonalFilmLab-Setup-$Version.exe"; Local = "个人拉片工作台 Setup $Version.exe" },
+  @{ Asset = "PersonalFilmLab-Uninstaller-$Version.exe"; Local = "个人拉片工作台卸载工具-$Version.exe" },
+  @{ Asset = "PersonalFilmLab-User-Guide-$Version.docx"; Local = "个人拉片工作台使用说明-$Version.docx" },
+  @{ Asset = "PersonalFilmLab-$Version-Install-zh-CN.txt"; Local = "个人拉片工作台-$Version-安装说明.txt" },
   @{ Asset = "SHA256SUMS.txt"; Local = "SHA256SUMS.txt" }
 )
 
@@ -32,8 +33,9 @@ foreach ($entry in $downloads) {
   Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing
 }
 
-$parts = @($release.assets | Where-Object { $_.name -match '^PersonalFilmLab-local-ai-0\.1\.9\.7z\.part\.\d{3}$' } | Sort-Object name)
-$localArchiveName = "个人拉片工作台-0.1.9-local-ai.7z"
+$partPattern = "^PersonalFilmLab-local-ai-$([regex]::Escape($Version))\.7z\.part\.\d{3}$"
+$parts = @($release.assets | Where-Object { $_.name -match $partPattern } | Sort-Object name)
+$localArchiveName = "个人拉片工作台-$Version-local-ai.7z"
 if ($parts.Count -gt 0) {
   $localParts = @()
   foreach ($part in $parts) {
@@ -61,7 +63,7 @@ if ($parts.Count -gt 0) {
     $output.Dispose()
   }
 } else {
-  $single = $release.assets | Where-Object { $_.name -eq "PersonalFilmLab-local-ai-$Tag.7z" } | Select-Object -First 1
+  $single = $release.assets | Where-Object { $_.name -eq "PersonalFilmLab-local-ai-$Version.7z" } | Select-Object -First 1
   if ($single) {
     Invoke-WebRequest -Uri $single.browser_download_url -OutFile (Join-Path $Destination $localArchiveName) -UseBasicParsing
   } else {
