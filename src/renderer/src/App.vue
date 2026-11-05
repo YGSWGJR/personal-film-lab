@@ -37,6 +37,7 @@ import type {
   CandidateProject,
   CandidateSource,
   DetectEnvCheck,
+  DetectJobSnapshot,
   DetectProgressEvent,
   DetectResult,
   ExportProgressEvent,
@@ -55,6 +56,7 @@ import type {
   SettingsDataRootChangingEvent,
   SettingsSetArgs,
   Shot,
+  ShotBoundaryEngine,
   Still,
   StoryboardExportArgs,
   Tag,
@@ -113,6 +115,24 @@ const detectionCapsuleHidden = ref(false);
 /** 用户在 run 返回 jobId 之前就点了取消时，等 jobId 到手后立即补发取消。 */
 const detectionCancelRequested = ref(false);
 const detectionJobId = ref<string | null>(null);
+const detectionBoundaryEngine = ref<ShotBoundaryEngine | null>(null);
+const detectionBoundaryFallback = ref(false);
+const detectionBoundaryWarning = ref<string | null>(null);
+const detectionStageLabel = computed(() => {
+  const progress = detectionProgress.value;
+  const percent = progress?.percent ?? 0;
+  if (!progress || progress.stage === 'extractFrames' || percent < 58) {
+    return '提取画面';
+  }
+  if (percent >= 94) {
+    return (settings.value?.recognition?.engine ?? 'ai') === 'ai'
+      ? 'Qwen 标签识别'
+      : '整理镜头';
+  }
+  if (detectionBoundaryEngine.value === 'transnetv2') return 'TransNetV2 切分';
+  if (detectionBoundaryEngine.value === 'opencv') return 'OpenCV 补充';
+  return percent < 82 ? 'TransNetV2 切分' : 'OpenCV 补充';
+});
 interface ContextMenuItem {
   label: string;
   danger?: boolean;
@@ -2198,6 +2218,10 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     capsuleHidden: detectionCapsuleHidden.value,
     layer: player.layer,
     progress: detectionProgress.value?.percent ?? 0,
+    stageLabel: detectionStageLabel.value,
+    boundaryEngine: detectionBoundaryEngine.value,
+    boundaryFallback: detectionBoundaryFallback.value,
+    boundaryWarning: detectionBoundaryWarning.value,
     jobId: detectionJobId.value,
   }),
   collapse: () => closeDetection(),
@@ -2243,6 +2267,9 @@ async function startDetection(): Promise<void> {
   applyingDetection.value = false;
   detectionError.value = null;
   detectionResult.value = null;
+  detectionBoundaryEngine.value = null;
+  detectionBoundaryFallback.value = false;
+  detectionBoundaryWarning.value = null;
   detectionProgress.value = {
     jobId: '',
     stage: engine === 'ai' ? 'analyze' : 'extractFrames',
@@ -2294,6 +2321,7 @@ async function startDetection(): Promise<void> {
       showToast(result.error.message, 'error', result.error.code);
       return;
     }
+    updateDetectionBoundaryState(result.data);
     if (result.data.status === 'error') {
       detectionError.value = result.data.error ?? '镜头检测失败';
       detecting.value = false;
@@ -2318,6 +2346,9 @@ async function cancelDetection(): Promise<void> {
     detecting.value = false;
     detectionOpen.value = false;
     detectionResult.value = null;
+    detectionBoundaryEngine.value = null;
+    detectionBoundaryFallback.value = false;
+    detectionBoundaryWarning.value = null;
     detectionCapsuleHidden.value = false;
     void syncTranscodeConcurrency();
     showToast('正在取消镜头检测…');
@@ -2327,6 +2358,9 @@ async function cancelDetection(): Promise<void> {
   stopDetectionPolling();
   detecting.value = false;
   detectionResult.value = null;
+  detectionBoundaryEngine.value = null;
+  detectionBoundaryFallback.value = false;
+  detectionBoundaryWarning.value = null;
   detectionCapsuleHidden.value = false;
   void syncTranscodeConcurrency();
   detectionOpen.value = false;
@@ -2348,6 +2382,12 @@ function closeDetection(): void {
 function viewDetectionResult(): void {
   if (!detectionResult.value && !detectionError.value) return;
   detectionOpen.value = true;
+}
+
+function updateDetectionBoundaryState(snapshot: DetectJobSnapshot): void {
+  if (snapshot.boundaryEngine) detectionBoundaryEngine.value = snapshot.boundaryEngine;
+  detectionBoundaryFallback.value = snapshot.boundaryFallback === true;
+  detectionBoundaryWarning.value = snapshot.boundaryWarning ?? null;
 }
 
 function showDetectionCapsule(): void {
@@ -2616,9 +2656,11 @@ onMounted(async () => {
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
       detectionProgress.value = event;
     }),
-    api.detect.onDone((event) => {
+    api.detect.onDone(async (event) => {
       if (!detecting.value) return;
       if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      const snapshot = await window.api.detect.getJob({ jobId: event.jobId });
+      if (snapshot.ok) updateDetectionBoundaryState(snapshot.data);
       detectionResult.value = event.result;
       detectionProgress.value = { jobId: event.jobId, stage: 'analyze', percent: 100 };
       detecting.value = false;
@@ -2626,11 +2668,19 @@ onMounted(async () => {
       detectionOpen.value = false;
       void syncTranscodeConcurrency();
       stopDetectionPolling();
-      showToast(
-        `检测完成，${event.result.shots.length} 个镜头待确认。`,
-        'success',
-        '镜头检测完成',
-      );
+      if (detectionBoundaryFallback.value) {
+        showToast(
+          `检测完成，${event.result.shots.length} 个合并镜头待确认。已使用 OpenCV 备用切分。`,
+          'default',
+          '已使用 OpenCV 备用切分',
+        );
+      } else {
+        showToast(
+          `检测完成，${event.result.shots.length} 个合并镜头待确认。`,
+          'success',
+          '镜头检测完成',
+        );
+      }
     }),
     api.still.onCreated((still) => upsertStill(still)),
     api.export.onProgress((event) => {
@@ -2729,7 +2779,7 @@ onBeforeUnmount(() => {
       <div class="topbar-right">
         <div v-if="detecting && !detectionCapsuleHidden" class="detect-status-chip">
           <span class="detect-chip-dot"></span>
-          <strong>检测中 {{ detectionProgress?.percent ?? 0 }}%</strong>
+          <strong>{{ detectionStageLabel }} · {{ detectionProgress?.percent ?? 0 }}%</strong>
           <div class="detect-chip-track">
             <i :style="{ width: `${detectionProgress?.percent ?? 0}%` }"></i>
           </div>
@@ -2742,7 +2792,7 @@ onBeforeUnmount(() => {
           type="button"
           @click="showDetectionCapsule"
         >
-          检测中 {{ detectionProgress?.percent ?? 0 }}%
+          {{ detectionStageLabel }} · {{ detectionProgress?.percent ?? 0 }}%
         </button>
         <button
           v-else-if="detectionResult"
@@ -3076,6 +3126,10 @@ onBeforeUnmount(() => {
       :result="detectionResult"
       :error="detectionError"
       :engine="settings?.recognition?.engine ?? 'ai'"
+      :stage-label="detectionStageLabel"
+      :boundary-engine="detectionBoundaryEngine"
+      :boundary-fallback="detectionBoundaryFallback"
+      :boundary-warning="detectionBoundaryWarning"
       @close="closeDetection"
       @cancel="cancelDetection"
       @retry="openDetection"

@@ -344,7 +344,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
     }
 
     if (process.env['SMOKE_DETECT_BG'] === '1') {
-      detectBgChecks = await runDetectBgChecks(win, deps, process.env['SMOKE_VIDEO'] ?? '');
+      detectBgChecks = await runDetectBgChecks(
+        win,
+        deps,
+        process.env['SMOKE_DETECT_BG_VIDEO'] ?? process.env['SMOKE_VIDEO'] ?? '',
+      );
       Object.assign(checks, detectBgChecksAssertions(detectBgChecks));
     }
 
@@ -3212,6 +3216,15 @@ async function runMcpToolChecks(
 }
 
 function detectBgChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  const expectFallback = process.env['SMOKE_TRANSNET_EXPECT_FALLBACK'] === '1';
+  const allowedStageLabels = new Set([
+    '提取画面',
+    'TransNetV2 切分',
+    'OpenCV 补充',
+    'Qwen 标签识别',
+    '整理镜头',
+  ]);
+  const stageLabels = Array.isArray(result.stageLabels) ? result.stageLabels : [];
   return {
     bgStart: result.startOk === true,
     bgRunning: result.running === true,
@@ -3231,6 +3244,13 @@ function detectBgChecksAssertions(result: Record<string, any>): Record<string, b
     bgRestoredNormal: result.restoredNormal === true,
     bgCancelStopped: result.cancelStopped === true,
     bgCancelStatus: result.cancelJobStatus === 'cancelled',
+    bgStageLabelsObserved: stageLabels.length > 0,
+    bgStageLabelsKnown: stageLabels.every((label) => allowedStageLabels.has(label)),
+    bgMergedShotLabel: String(result.resultSummaryText ?? '').includes('合并镜头'),
+    bgFallbackPrompt: expectFallback
+      ? result.fallbackVisible === true &&
+        String(result.fallbackText ?? '').includes('已使用 OpenCV 备用切分')
+      : true,
   };
 }
 
@@ -3245,6 +3265,8 @@ async function runDetectBgChecks(
     (async () => {
       const out = {};
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const stageLabels = new Set();
+      let stageTimer = null;
       const waitFor = async (check, timeoutMs = 15000) => {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
@@ -3295,6 +3317,10 @@ async function runDetectBgChecks(
         if (!created.ok) { out.createError = created.error; return out; }
         const projectId = created.data.id;
         out.projectId = projectId;
+        stageTimer = setInterval(() => {
+          const label = state()?.stageLabel;
+          if (label) stageLabels.add(label);
+        }, 50);
         const started = await ui().start(projectId);
         out.startOk = started?.ok === true;
         const running = await waitFor(() => {
@@ -3337,7 +3363,7 @@ async function runDetectBgChecks(
         const done = await waitFor(() => {
           const s = state();
           return s && !s.detecting && s.resultReady ? s : null;
-        }, 30000);
+        }, ${JSON.stringify(Number(process.env['SMOKE_DETECT_DONE_MS'] ?? '30000') || 30_000)});
         out.done = Boolean(done);
         out.doneLayer = (await layer()) === 'normal';
         out.resultChipVisible = Boolean(document.querySelector('.detect-result-chip'));
@@ -3349,6 +3375,9 @@ async function runDetectBgChecks(
         await waitFor(async () => (await layer()) === 'hidden', 8000);
         out.resultModalOpen = Boolean(document.querySelector('.detect-modal'));
         out.resultLayerHidden = (await layer()) === 'hidden';
+        out.resultSummaryText = document.querySelector('.result-summary')?.textContent ?? '';
+        out.fallbackVisible = Boolean(document.querySelector('.detect-fallback'));
+        out.fallbackText = document.querySelector('.detect-fallback')?.textContent ?? '';
         document.querySelector('.detect-modal .modal-head button[aria-label="关闭"]')?.click();
         await waitFor(async () => (await layer()) === 'normal', 8000);
         out.restoredNormal = (await layer()) === 'normal';
@@ -3390,6 +3419,9 @@ async function runDetectBgChecks(
       } catch (error) {
         out.exception = String(error && error.stack ? error.stack : error);
         return out;
+      } finally {
+        if (stageTimer) clearInterval(stageTimer);
+        out.stageLabels = [...stageLabels];
       }
     })()
   `)) as Record<string, any>;
