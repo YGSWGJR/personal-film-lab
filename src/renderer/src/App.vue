@@ -2808,7 +2808,9 @@ async function applyLabelPreview(policy: LabelApplyPolicy): Promise<void> {
     const result = unwrap(
       await window.api.detect.applyLabels({
         jobId: labelPreview.value.jobId,
-        shotIds: labelSelected.value,
+        // 展开为普通数组：ref 的 .value 是响应式 Proxy，Electron 结构化克隆会抛
+        // "An object could not be cloned."
+        shotIds: [...labelSelected.value],
         policy,
       }),
     );
