@@ -99,6 +99,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let timelineWheelZoomChecks: Record<string, unknown> = {};
   let wallChecks: Record<string, unknown> = {};
   let wallUiChecks: Record<string, unknown> = {};
+  let boardChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
@@ -110,7 +111,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -455,6 +456,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, wallChecksAssertions(wallChecks));
     }
 
+    if (process.env['SMOKE_BOARD'] === '1') {
+      boardChecks = await runBoardChecks(deps);
+      Object.assign(checks, boardChecksAssertions(boardChecks));
+    }
+
     if (process.env['SMOKE_WALL_UI'] === '1') {
       wallUiChecks = await runWallUiChecks(win, deps);
       Object.assign(checks, wallUiChecksAssertions(wallUiChecks));
@@ -490,7 +496,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -4855,6 +4861,9 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     wallUiPlayer: result.player === true,
     wallUiTools: result.tools === true,
     wallUiEsc: result.escClosed === true,
+    boardUiOpen: result.boardOpen === true,
+    boardUiCard: result.boardCard === true,
+    boardUiEsc: result.boardEsc === true,
   };
 }
 
@@ -4921,6 +4930,20 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
           await sleep(300);
           out.escClosed = hook.state().playerOpen === false;
           out.afterEsc = hook.state();
+          // S44：独立分镜本——无项目上下文创建文本节点并出现墙卡
+          await hook.openIndependent();
+          await waitFor(() => hook.state().wallOpen);
+          const nodeId = await hook.addTextNode();
+          await sleep(400);
+          const bs = hook.state();
+          out.boardOpen = bs.wallOpen === true;
+          out.boardCard = nodeId !== null && bs.cards === 1;
+
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(200);
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(300);
+          out.boardEsc = hook.state().wallOpen === false;
           return out;
         } catch (error) {
           out.exception = String(error && error.stack ? error.stack : error);
@@ -4932,6 +4955,66 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
     try {
       data.projects.delete(project.id);
     } catch { /* ignore */ }
+  }
+}
+
+/** S44：独立分镜本数据层验收 */
+function boardChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    boardCreateList: result.createList === true,
+    boardNodeCrud: result.nodeCrud === true,
+    boardEdges: result.edges === true,
+    boardAnnotations: result.annotations === true,
+    boardImportInvalid: result.importInvalid === true,
+  };
+}
+
+async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const out: Record<string, any> = {};
+  try {
+    const created = data.wallBoards.createBoard(`S44 Board ${Date.now()}`);
+    const boardId = created.id;
+    const boards = data.wallBoards.listBoards();
+    out.createList = boards.some((b) => b.id === boardId && b.nodeCount === 0);
+    const n1 = data.wallBoards.addNode(boardId, {
+      source: 'text',
+      title: '黑底分镜',
+      x: 40,
+      y: 40,
+    });
+    const n2 = data.wallBoards.addNode(boardId, {
+      source: 'image',
+      assetPath: 'boards/' + boardId + '/a.jpg',
+      title: '照片节点',
+      x: 300,
+      y: 40,
+    });
+    out.nodeCrud =
+      n1.source === 'text' &&
+      n2.source === 'image' &&
+      data.wallBoards.updateNode(n1.id, { durationMs: 4500, note: '备注A' }).durationMs === 4500;
+    data.wallBoards.addNodeEdge(boardId, n1.id, n2.id, 'solid');
+    out.edges = data.wallBoards.listNodeEdges(boardId).length === 1;
+    data.wallBoards.saveNodeAnnotations(boardId, n1.id, [
+      { type: 'arrow', color: '#ff0000', data: { pts: [{ x: 1, y: 1 }, { x: 9, y: 9 }] } },
+    ]);
+    out.annotations = (data.wallBoards.listNodeAnnotations(boardId)[n1.id]?.length ?? 0) === 1;
+    // 节点删除 → 连线 CASCADE
+    data.wallBoards.deleteNode(n2.id);
+    out.edges = out.edges && data.wallBoards.listNodeEdges(boardId).length === 0;
+    try {
+      data.wallBoards.registerImage(boardId, 'bad-name.exe');
+      out.importInvalid = false;
+    } catch (error) {
+      out.importInvalid = (error as { code?: string }).code === 'WALL_ITEM_INVALID';
+    }
+    data.wallBoards.deleteBoard(boardId);
+    return out;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+    return out;
   }
 }
 

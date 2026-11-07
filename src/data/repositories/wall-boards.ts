@@ -101,7 +101,7 @@ export class WallBoardsRepository {
         .prepare(
           'INSERT INTO wall_nodes (id, board_id, source, asset_path, title, duration_ms, note, shot_size, camera_method, x, y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 3000, ?, NULL, NULL, ?, ?, strftime(\'%s\',\'now\') * 1000, strftime(\'%s\',\'now\') * 1000)',
         )
-        .run(id, boardId, input.source, input.assetPath ?? null, input.title ?? '', input.x, input.y);
+        .run(id, boardId, input.source, input.assetPath ?? null, input.title ?? '', '', input.x, input.y);
     });
     return this.getNode(id);
   }
