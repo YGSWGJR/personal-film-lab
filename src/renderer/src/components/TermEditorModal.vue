@@ -104,6 +104,8 @@ function submit(): void {
 .term-modal {
   width: 480px;
   max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  overflow: hidden auto;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -177,6 +179,7 @@ input {
 
 textarea {
   resize: vertical;
+  max-height: 40vh;
   padding-top: 8px;
   line-height: 1.5;
 }

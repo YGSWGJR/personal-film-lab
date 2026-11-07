@@ -76,19 +76,8 @@ function applyResult(): void {
 
 <template>
   <transition name="modal">
-    <div v-if="open && running" class="detect-capsule" role="status" aria-live="polite">
-      <span class="capsule-dot"></span>
-      <div class="capsule-copy">
-        <strong class="detect-stage-label">{{ stageLabel }} · {{ progress?.percent ?? 0 }}%</strong>
-        <div class="capsule-track"><i :style="{ width: `${progress?.percent ?? 0}%` }"></i></div>
-      </div>
-      <button type="button" class="capsule-close" title="收起，后台继续检测" @click="emit('close')">
-        收起
-      </button>
-      <button type="button" class="capsule-cancel" @click="emit('cancel')">取消</button>
-    </div>
-
-    <div v-else-if="open" class="modal-mask" @pointerdown.self="emit('close')">
+    <!-- 0.3.0：移除永不成立的运行态胶囊死代码（S41 起进度胶囊在顶栏） -->
+    <div v-if="open" class="modal-mask" @pointerdown.self="emit('close')">
       <section class="detect-modal">
         <header class="modal-head">
           <div>
@@ -166,82 +155,6 @@ function applyResult(): void {
 </template>
 
 <style scoped>
-.detect-capsule {
-  position: fixed;
-  top: 8px;
-  right: 16px;
-  z-index: 120;
-  display: flex;
-  max-width: min(460px, calc(100vw - 32px));
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--bg-panel);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
-.capsule-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--amber);
-  animation: capsule-pulse 1s ease-in-out infinite;
-}
-
-.capsule-copy {
-  display: flex;
-  min-width: 120px;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.capsule-copy strong {
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.capsule-track {
-  width: 140px;
-  height: 3px;
-  overflow: hidden;
-  border-radius: 2px;
-  background: var(--bg-raised);
-}
-
-.capsule-track i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--blue-hi);
-  transition: width 180ms ease;
-}
-
-.capsule-close,
-.capsule-cancel {
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-raised);
-  color: var(--text-muted);
-  font-size: 9px;
-}
-
-.capsule-cancel {
-  border-color: rgba(239, 68, 68, 0.35);
-  color: #fca5a5;
-}
-
-@keyframes capsule-pulse {
-  50% {
-    opacity: 0.35;
-  }
-}
-
 .modal-mask {
   position: fixed;
   inset: 0;

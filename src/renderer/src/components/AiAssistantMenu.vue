@@ -57,6 +57,7 @@ function toggleTask(id: AiTaskId): void {
       AI 助手
     </button>
 
+    <teleport to="body">
     <div v-if="open" class="ai-menu-mask" @pointerdown.self="emit('close')">
       <section class="ai-menu" role="dialog" aria-modal="true" aria-labelledby="ai-menu-title">
         <header class="ai-menu-head">
@@ -137,7 +138,9 @@ function toggleTask(id: AiTaskId): void {
         </div>
       </section>
     </div>
+    </teleport>
 
+    <teleport to="body">
     <div v-if="authRequest" class="ai-auth-mask">
       <section class="ai-auth-card" role="alertdialog" aria-modal="true" aria-labelledby="ai-auth-title">
         <header>
@@ -164,6 +167,7 @@ function toggleTask(id: AiTaskId): void {
         </footer>
       </section>
     </div>
+    </teleport>
   </div>
 </template>
 
@@ -180,6 +184,7 @@ function toggleTask(id: AiTaskId): void {
 .ai-auth-mask {
   position: fixed;
   inset: 0;
+  /* 0.3.0：已 teleport 到 body，脱离 .topbar stacking context；高于 ConfirmDialog(120) */
   z-index: 92;
   display: grid;
   padding: 18px;
@@ -188,7 +193,7 @@ function toggleTask(id: AiTaskId): void {
 }
 
 .ai-auth-mask {
-  z-index: 96;
+  z-index: 140;
   align-items: center;
 }
 
@@ -196,7 +201,8 @@ function toggleTask(id: AiTaskId): void {
 .ai-auth-card {
   width: min(660px, calc(100vw - 36px));
   margin-top: 54px;
-  overflow: hidden;
+  max-height: calc(100vh - 84px);
+  overflow: hidden auto;
   border: 1px solid var(--border-strong);
   border-radius: 10px;
   background: var(--bg-panel);

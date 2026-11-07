@@ -208,9 +208,7 @@ onBeforeUnmount(() => {
           <AppIcon name="layers" :size="12" />
           {{ layerLabel }}
         </button>
-        <button class="meta-action" type="button" title="全屏预览">
-          <AppIcon name="expand" :size="13" />
-        </button>
+        <!-- 0.3.0：移除无事件死按钮 -->
       </div>
 
       <div class="video-frame">

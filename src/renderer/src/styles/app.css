@@ -110,6 +110,10 @@ select:focus-visible {
   z-index: 10;
 }
 
+.topbar-right {
+  min-width: 0;
+}
+
 .brand {
   display: flex;
   min-width: 0;
@@ -171,6 +175,13 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.main-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .nav-item,
@@ -453,7 +464,7 @@ select:focus-visible {
   color: var(--text-soft);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(12px);
-  z-index: 50;
+  z-index: 130;
 }
 
 .toast-icon {
@@ -534,7 +545,7 @@ select:focus-visible {
 .transfer-toast {
   position: fixed;
   right: 16px;
-  bottom: 39px;
+  bottom: 84px;
   width: 300px;
   padding: 12px;
   border: 1px solid rgba(245, 158, 11, 0.35);
@@ -542,7 +553,7 @@ select:focus-visible {
   background: rgba(30, 41, 59, 0.97);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(12px);
-  z-index: 70;
+  z-index: 130;
 }
 
 .transfer-head {
@@ -587,32 +598,7 @@ select:focus-visible {
   font-family: var(--mono);
 }
 
-@media (max-width: 1180px) {
-  .workbench {
-    grid-template-columns: 240px minmax(480px, 1fr) 280px;
-  }
-
-  .topbar-right .project-clock {
-    display: none;
-  }
-}
-
-@media (max-width: 1020px) {
-  .workbench {
-    grid-template-columns: 220px minmax(480px, 1fr) 260px;
-    gap: 6px;
-    padding: 6px;
-  }
-
-  .nav-item {
-    padding: 0 8px;
-  }
-
-  .brand-copy strong {
-    letter-spacing: 0.8px;
-  }
-}
-
+@media (max-height: 720px) {
 @media (max-height: 720px) {
   .app-shell {
     grid-template-rows: 40px minmax(0, 1fr) 24px;

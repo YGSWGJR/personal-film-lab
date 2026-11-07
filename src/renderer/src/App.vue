@@ -2887,6 +2887,47 @@ function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
   );
 }
 
+/** 0.3.0：按层级关闭最上层的弹层（Esc）；返回是否有弹层被关闭 */
+function closeTopOverlay(): boolean {
+  if (aiAuthRequest.value) {
+    aiAuthRequest.value = null;
+    return true;
+  }
+  if (labelPreviewOpen.value) {
+    labelPreviewOpen.value = false;
+    return true;
+  }
+  if (settingsOpen.value) {
+    closeSettings();
+    return true;
+  }
+  if (statsOpen.value) {
+    closeStats();
+    return true;
+  }
+  if (exportOpen.value) {
+    exportOpen.value = false;
+    return true;
+  }
+  if (detectionOpen.value) {
+    closeDetection();
+    return true;
+  }
+  if (termEditorOpen.value) {
+    termEditorOpen.value = false;
+    return true;
+  }
+  if (importWizardOpen.value) {
+    importWizardOpen.value = false;
+    return true;
+  }
+  if (aiMenuOpen.value) {
+    aiMenuOpen.value = false;
+    return true;
+  }
+  return false;
+}
+
 function handleKeydown(event: KeyboardEvent): void {
   // S36-1b：删除确认弹窗打开时，全部按键交给 ConfirmDialog（Esc 取消 / Enter 确认），
   // 避免空格播放、Delete 删除等全局快捷键与弹窗互相干扰。
@@ -2901,6 +2942,16 @@ function handleKeydown(event: KeyboardEvent): void {
   ) {
     return;
   }
+
+  // 0.3.0 修复：任意弹层打开时，Esc 关闭最上层，其余快捷键全部让位
+  //（此前空格会播放/暂停——画面被隐藏但声音照响，s 会误截图）。
+  if (event.key === 'Escape') {
+    if (closeTopOverlay()) {
+      event.preventDefault();
+    }
+    return;
+  }
+  if (overlayOpen.value) return;
 
   if (event.key === 'Delete') {
     if (overlayOpen.value || contextMenu.visible || busy.value) return;
