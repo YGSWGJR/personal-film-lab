@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { copyFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { app, ipcMain, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import { withEnvelope } from '../../shared/ipc-result';
@@ -33,6 +36,17 @@ import type {
   WallAnnotationListArgs,
   WallAnnotationSaveArgs,
   WallExportArgs,
+  WallBoardCreateArgs,
+  WallBoardDeleteArgs,
+  WallBoardRenameArgs,
+  WallNodeListArgs,
+  WallNodeAddArgs,
+  WallNodeUpdateArgs,
+  WallNodeDeleteArgs,
+  WallNodeEdgeAddArgs,
+  WallNodeEdgeRemoveArgs,
+  WallNodeAnnotationSaveArgs,
+  WallImportImageArgs,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -514,6 +528,85 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireData().wall.exportImages(args.projectId, requireData().dataRoot),
     ),
   );
+  // ---------- S44 独立分镜本 ----------
+  ipcMain.handle(IPC.WALL_LIST_BOARDS, withEnvelope(() => requireData().wallBoards.listBoards()));
+  ipcMain.handle(
+    IPC.WALL_CREATE_BOARD,
+    withEnvelope((args: WallBoardCreateArgs) => requireData().wallBoards.createBoard(args.name)),
+  );
+  ipcMain.handle(
+    IPC.WALL_DELETE_BOARD,
+    withEnvelope((args: WallBoardDeleteArgs): void => requireData().wallBoards.deleteBoard(args.boardId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_RENAME_BOARD,
+    withEnvelope((args: WallBoardRenameArgs): void =>
+      requireData().wallBoards.renameBoard(args.boardId, args.name),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_LIST_NODES,
+    withEnvelope((args: WallNodeListArgs) => requireData().wallBoards.listNodes(args.boardId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_ADD_NODE,
+    withEnvelope((args: WallNodeAddArgs) => requireData().wallBoards.addNode(args.boardId, args)),
+  );
+  ipcMain.handle(
+    IPC.WALL_UPDATE_NODE,
+    withEnvelope((args: WallNodeUpdateArgs) =>
+      requireData().wallBoards.updateNode(args.nodeId, args.patch),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_DELETE_NODE,
+    withEnvelope((args: WallNodeDeleteArgs): void => requireData().wallBoards.deleteNode(args.nodeId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_LIST_NODE_EDGES,
+    withEnvelope((args: WallNodeListArgs) => requireData().wallBoards.listNodeEdges(args.boardId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_ADD_NODE_EDGE,
+    withEnvelope((args: WallNodeEdgeAddArgs): void =>
+      requireData().wallBoards.addNodeEdge(args.boardId, args.fromNodeId, args.toNodeId, args.kind),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_REMOVE_NODE_EDGE,
+    withEnvelope((args: WallNodeEdgeRemoveArgs): void =>
+      requireData().wallBoards.removeNodeEdge(args.boardId, args.fromNodeId, args.toNodeId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_LIST_NODE_ANNOTATIONS,
+    withEnvelope((args: WallNodeListArgs) => requireData().wallBoards.listNodeAnnotations(args.boardId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_SAVE_NODE_ANNOTATIONS,
+    withEnvelope((args: WallNodeAnnotationSaveArgs): void =>
+      requireData().wallBoards.saveNodeAnnotations(args.boardId, args.nodeId, args.items),
+    ),
+  );
+  ipcMain.handle(IPC.WALL_IMPORT_IMAGE, withEnvelope((args: WallImportImageArgs) => {
+    const boards = requireData().wallBoards;
+    // 校验源文件存在且为图片扩展名，再复制进 projects/boards/<boardId>/（lapian-asset 白名单）
+    const src = String(args.srcPath || '');
+    if (!/\.(jpe?g|png|webp|gif)$/i.test(src) || !existsSync(src)) {
+      throw new DataError('WALL_ITEM_INVALID', '仅支持本地 jpg/png/webp/gif 图片', { srcPath: src });
+    }
+    boards.assertBoard(args.boardId);
+    mkdirSync(join(requireData().dataRoot, 'projects', 'boards', args.boardId), { recursive: true });
+    const fileName = randomUUID() + src.slice(src.lastIndexOf('.')).toLowerCase();
+    copyFileSync(src, join(requireData().dataRoot, 'projects', 'boards', args.boardId, fileName));
+    const registered = boards.registerImage(args.boardId, fileName);
+    const nodeId = requireData().wallBoards
+      .addNode(args.boardId, { source: 'image', assetPath: registered.assetPath, x: 80, y: 80 }).id;
+    return {
+      nodeId,
+      assetUrl: 'lapian-asset://boards/' + registered.assetPath.slice('boards/'.length),
+    };
+  }));
 
   // ---------- data: external project import ----------
   ipcMain.handle(

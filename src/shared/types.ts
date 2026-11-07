@@ -334,6 +334,20 @@ export interface WallApi {
   listAnnotations(args: WallAnnotationListArgs): Promise<IpcResult<Record<string, WallAnnotation[]>>>;
   saveAnnotations(args: WallAnnotationSaveArgs): Promise<IpcResult<void>>;
   exportImages(args: WallExportArgs): Promise<IpcResult<WallExportResult>>;
+  listBoards(): Promise<IpcResult<WallBoardInfo[]>>;
+  createBoard(args: WallBoardCreateArgs): Promise<IpcResult<{ id: string }>>;
+  deleteBoard(args: WallBoardDeleteArgs): Promise<IpcResult<void>>;
+  renameBoard(args: WallBoardRenameArgs): Promise<IpcResult<void>>;
+  listNodes(args: WallNodeListArgs): Promise<IpcResult<WallBoardNodeInfo[]>>;
+  addNode(args: WallNodeAddArgs): Promise<IpcResult<WallBoardNodeInfo>>;
+  updateNode(args: WallNodeUpdateArgs): Promise<IpcResult<WallBoardNodeInfo>>;
+  deleteNode(args: WallNodeDeleteArgs): Promise<IpcResult<void>>;
+  listNodeEdges(args: WallNodeEdgeListArgs): Promise<IpcResult<WallEdge[]>>;
+  addNodeEdge(args: WallNodeEdgeAddArgs): Promise<IpcResult<void>>;
+  removeNodeEdge(args: WallNodeEdgeRemoveArgs): Promise<IpcResult<void>>;
+  listNodeAnnotations(args: WallNodeAnnotationListArgs): Promise<IpcResult<Record<string, WallAnnotation[]>>>;
+  saveNodeAnnotations(args: WallNodeAnnotationSaveArgs): Promise<IpcResult<void>>;
+  importImage(args: WallImportImageArgs): Promise<IpcResult<WallImportImageResult>>;
 }
 
 export interface WorkspaceState {
@@ -1071,6 +1085,104 @@ export interface WallExportResult {
   dir: string;
   count: number;
   skipped: number;
+}
+
+export type WallBoardNodeSource = 'image' | 'text';
+
+export interface WallBoardNodeInfo {
+  id: string;
+  source: WallBoardNodeSource;
+  assetPath: string | null;
+  title: string;
+  durationMs: number;
+  note: string;
+  shotSize: string | null;
+  cameraMethod: string | null;
+  x: number;
+  y: number;
+}
+
+export interface WallBoardInfo {
+  id: string;
+  name: string;
+  nodeCount: number;
+  updatedAt: string;
+}
+
+export interface WallBoardListArgs {
+  projectId?: string;
+}
+
+export interface WallBoardCreateArgs {
+  name: string;
+}
+
+export interface WallBoardDeleteArgs {
+  boardId: string;
+}
+
+export interface WallBoardRenameArgs {
+  boardId: string;
+  name: string;
+}
+
+export interface WallNodeListArgs {
+  boardId: string;
+}
+
+export interface WallNodeAddArgs {
+  boardId: string;
+  source: WallBoardNodeSource;
+  assetPath?: string | null;
+  title?: string;
+  x: number;
+  y: number;
+}
+
+export interface WallNodeUpdateArgs {
+  nodeId: string;
+  patch: Partial<Pick<WallBoardNodeInfo, 'title' | 'durationMs' | 'note' | 'shotSize' | 'cameraMethod' | 'x' | 'y'>>;
+}
+
+export interface WallNodeDeleteArgs {
+  nodeId: string;
+}
+
+export interface WallNodeEdgeListArgs {
+  boardId: string;
+}
+
+export interface WallNodeEdgeAddArgs {
+  boardId: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: WallEdgeKind;
+}
+
+export interface WallNodeEdgeRemoveArgs {
+  boardId: string;
+  fromNodeId: string;
+  toNodeId: string;
+}
+
+export interface WallNodeAnnotationListArgs {
+  boardId: string;
+}
+
+export interface WallNodeAnnotationSaveArgs {
+  boardId: string;
+  nodeId: string;
+  items: Array<{ type: WallAnnotationType; color: string; data: WallAnnotation['data'] }>;
+}
+
+export interface WallImportImageArgs {
+  boardId: string;
+  srcPath: string;
+}
+
+export interface WallImportImageResult {
+  nodeId: string;
+  assetUrl: string;
 }
 
 /** 分镜墙视图状态（缩放/平移），按项目存 settings.json，不进数据库 */

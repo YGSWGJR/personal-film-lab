@@ -11,6 +11,7 @@ import { StillRepository } from './repositories/stills';
 import { TagRepository } from './repositories/tags';
 import { TermRepository } from './repositories/terms';
 import { WallRepository } from './repositories/wall';
+import { WallBoardsRepository } from './repositories/wall-boards';
 
 /**
  * 数据层（docs/S01 §5.8 / §7.4）：
@@ -30,6 +31,7 @@ export class DataLayer {
   readonly notes: NoteRepository;
   readonly terms: TermRepository;
   readonly wall: WallRepository;
+  readonly wallBoards: WallBoardsRepository;
   private closed = false;
 
   constructor(dataRoot: string) {
@@ -50,6 +52,7 @@ export class DataLayer {
     this.notes = new NoteRepository(this);
     this.terms = new TermRepository(this);
     this.wall = new WallRepository(this);
+    this.wallBoards = new WallBoardsRepository(this);
   }
 
   /** 写事务封装（S01 §7.4：所有写操作必须走事务） */

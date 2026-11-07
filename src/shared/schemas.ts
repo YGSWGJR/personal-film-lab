@@ -358,6 +358,75 @@ export const wallAnnotationListArgsSchema = z.object({
 
 export const wallExportArgsSchema = z.object({ projectId: z.string().min(1) });
 
+export const wallBoardListArgsSchema = z.object({ projectId: z.string().min(1).optional() });
+
+export const wallBoardCreateArgsSchema = z.object({ name: z.string().min(1).max(80) });
+
+export const wallBoardIdArgsSchema = z.object({ boardId: z.string().min(1) });
+
+export const wallBoardRenameArgsSchema = z.object({
+  boardId: z.string().min(1),
+  name: z.string().min(1).max(80),
+});
+
+export const wallNodeListArgsSchema = z.object({ boardId: z.string().min(1) });
+
+export const wallNodeAddArgsSchema = z.object({
+  boardId: z.string().min(1),
+  source: z.enum(['image', 'text']),
+  assetPath: z.string().min(1).max(500).nullable().optional(),
+  title: z.string().max(200).optional(),
+  x: z.number().finite().min(-1_000_000).max(1_000_000),
+  y: z.number().finite().min(-1_000_000).max(1_000_000),
+});
+
+export const wallNodeUpdateArgsSchema = z.object({
+  nodeId: z.string().min(1),
+  patch: z.object({
+    title: z.string().max(200).optional(),
+    durationMs: z.number().int().min(200).max(600_000).optional(),
+    note: z.string().max(20_000).optional(),
+    shotSize: z.string().max(40).nullable().optional(),
+    cameraMethod: z.string().max(40).nullable().optional(),
+    x: z.number().finite().optional(),
+    y: z.number().finite().optional(),
+  }),
+});
+
+export const wallNodeDeleteArgsSchema = z.object({ nodeId: z.string().min(1) });
+
+export const wallNodeEdgeAddArgsSchema = z.object({
+  boardId: z.string().min(1),
+  fromNodeId: z.string().min(1),
+  toNodeId: z.string().min(1),
+  kind: z.enum(['solid', 'dash']),
+});
+
+export const wallNodeEdgeRemoveArgsSchema = z.object({
+  boardId: z.string().min(1),
+  fromNodeId: z.string().min(1),
+  toNodeId: z.string().min(1),
+});
+
+export const wallNodeAnnotationSaveArgsSchema = z.object({
+  boardId: z.string().min(1),
+  nodeId: z.string().min(1),
+  items: z
+    .array(
+      z.object({
+        type: z.enum(['brush', 'smear', 'line', 'arrow', 'rect', 'ellipse', 'text', 'mosaic']),
+        color: z.string().min(1).max(32),
+        data: z.looseObject({}),
+      }),
+    )
+    .max(500),
+});
+
+export const wallImportImageArgsSchema = z.object({
+  boardId: z.string().min(1),
+  srcPath: z.string().min(1).max(1000),
+});
+
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),
   shotId: z.string().min(1),
