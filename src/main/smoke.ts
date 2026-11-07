@@ -4867,6 +4867,11 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     boardUiOpen: result.boardOpen === true,
     boardUiCard: result.boardCard === true,
     boardUiEsc: result.boardEsc === true,
+    boardUiInlineEditor: result.inlineEditor === true,
+    boardUiTextSaved: result.textContentSaved === true,
+    boardUiPortInteractive: result.portInteractive === true,
+    boardUiPendingLine: result.pendingLine === true,
+    boardUiEditEsc: result.boardEditEsc === true,
     boardProjectedMode: result.projectedMode === true,
     boardProjectedRows: result.projectedRows === true,
     boardProjectedGrid: result.projectedGrid === true,
@@ -4877,6 +4882,9 @@ function boardChecksAssertions(result: Record<string, any>): Record<string, bool
   return {
     boardCreateList: result.createList === true,
     boardNodeCrud: result.nodeCrud === true,
+    boardTextContent: result.textContent === true,
+    boardTags: result.tags === true,
+    boardTagInvalid: result.tagInvalid === true,
     boardEdges: result.edges === true,
     boardAnnotations: result.annotations === true,
     boardImportInvalid: result.importInvalid === true,
@@ -4904,6 +4912,24 @@ async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
       n1.source === 'text' &&
       n2.source === 'image' &&
       data.wallBoards.updateNode(n1.id, { durationMs: 4500, note: '备注A' }).durationMs === 4500;
+    // 批次2：textContent 往返（空串清空也合法）
+    out.textContent =
+      data.wallBoards.updateNode(n1.id, { textContent: '第一幕：夜袭' }).textContent === '第一幕：夜袭' &&
+      data.wallBoards.updateNode(n1.id, { textContent: '' }).textContent === '';
+    data.wallBoards.updateNode(n1.id, { textContent: '第一幕：夜袭' });
+    // 批次3：节点标签增/幂等/列/删 + 越权目标报错
+    data.wallBoards.addTag(boardId, n1.id, '景别', '中景');
+    data.wallBoards.addTag(boardId, n1.id, '景别', '中景');
+    const tagMap = data.wallBoards.listTags(boardId);
+    out.tags = (tagMap[n1.id]?.length ?? 0) === 1 && tagMap[n1.id]?.[0]?.name === '中景';
+    data.wallBoards.removeTag(boardId, n1.id, '景别', '中景');
+    out.tags = out.tags && (data.wallBoards.listTags(boardId)[n1.id]?.length ?? 0) === 0;
+    try {
+      data.wallBoards.addTag(boardId, 'missing-node', '景别', '中景');
+      out.tagInvalid = false;
+    } catch (error) {
+      out.tagInvalid = (error as { code?: string }).code === 'WALL_NODE_NOT_FOUND';
+    }
     data.wallBoards.addNodeEdge(boardId, n1.id, n2.id, 'solid');
     out.edges = data.wallBoards.listNodeEdges(boardId).length === 1;
     data.wallBoards.saveNodeAnnotations(boardId, n1.id, [
@@ -5032,6 +5058,41 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       out.boardEsc = hook.state().wallOpen === false;
+    `],
+    ['boardEdit', `
+      const hook = window.__S43_WALL_TEST__;
+      // 批次2/3 UI 门控：新开空白分镜本 → 内联编辑落库 → 左端口拖线
+      await hook.openIndependent();
+      const dEdit = Date.now() + 15000;
+      while (!hook.state().wallOpen && Date.now() < dEdit) await new Promise((r) => setTimeout(r, 100));
+      const editNodeId = await hook.addTextNode();
+      await new Promise((r) => setTimeout(r, 500));
+      hook.dispatchDblClick(0);
+      await new Promise((r) => setTimeout(r, 300));
+      const editArea = document.querySelector('.wall-text-edit');
+      out.inlineEditor = Boolean(editArea);
+      if (editArea) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(editArea, '夜袭城门');
+        editArea.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 1000));
+        const nodeList = (await window.api.wall.listNodes({ boardId: hook.state().boardId })).data ?? [];
+        out.textContentSaved = nodeList.some((n) => n.id === editNodeId && n.textContent === '夜袭城门');
+        editArea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      const portCard = document.querySelector('.wall-card');
+      const portIn = portCard?.querySelector('.wall-port-in');
+      out.portInteractive = portIn ? getComputedStyle(portIn).pointerEvents !== 'none' : false;
+      const portRect = portIn?.getBoundingClientRect();
+      portIn?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 7, clientX: portRect?.left ?? 0, clientY: portRect?.top ?? 0 }));
+      await new Promise((r) => setTimeout(r, 200));
+      out.pendingLine = Boolean(document.querySelector('.wall-edges line'));
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7, clientX: portRect?.left ?? 0, clientY: portRect?.top ?? 0 }));
+      await new Promise((r) => setTimeout(r, 200));
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      out.boardEditEsc = hook.state().wallOpen === false;
     `],
     ['projection', `
       const hook = window.__S43_WALL_TEST__;

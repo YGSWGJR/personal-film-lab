@@ -2578,6 +2578,7 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
   },
   state: () => ({
     wallOpen: wallOpen.value,
+    boardId: wallBoardId.value ?? '',
     cards: document.querySelectorAll('.wall-card').length,
     scale: document.querySelector('.wall-zval')?.textContent ?? '',
     playerOpen: Boolean(document.querySelector('.wall-ppt')),
