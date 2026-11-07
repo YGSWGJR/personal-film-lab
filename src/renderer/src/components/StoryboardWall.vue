@@ -23,10 +23,12 @@ const props = withDefaults(
     viewState: WallViewState | null;
     projectId: string;
     boardMode?: boolean;
+    /** 批次6：独立分镜本真实 id（board 模式下 projectId 是 'boards' 字面量） */
+    boardId?: string | null;
     /** 批次3：外部请求选中的节点（导入照片后自动选中并打开标注面板） */
     focusNodeId?: string | null;
   }>(),
-  { boardMode: false, focusNodeId: null },
+  { boardMode: false, boardId: null, focusNodeId: null },
 );
 
 const emit = defineEmits<{
@@ -39,8 +41,13 @@ const emit = defineEmits<{
   deleteNode: [nodeId: string];
   nodeText: [nodeId: string, text: string];
   selectionChange: [ids: string[]];
+  importBoard: [];
+  openBoardDir: [];
   project: [];
 }>();
+
+/** 批次6：board 模式的真实分镜本 id（props.projectId 是 'boards' 字面量，仅作开关判断） */
+const activeBoardId = computed(() => props.boardId ?? props.projectId);
 
 const CARD_W = 220;
 const CARD_H = 142;
@@ -211,6 +218,12 @@ onMounted(() => {
 
 async function reloadGraph(): Promise<void> {
   if (!props.projectId) return;
+  // 批次6 修复：独立分镜本走 node-edge API（此前传 projectId='boards' 给项目 API 必然失败）
+  if (props.boardMode) {
+    const e = await window.api.wall.listNodeEdges({ boardId: activeBoardId.value });
+    if (e.ok) edges.value = e.data;
+    return;
+  }
   const [e, g] = await Promise.all([
     window.api.wall.listEdges({ projectId: props.projectId }),
     window.api.wall.listGroups({ projectId: props.projectId }),
@@ -338,11 +351,17 @@ const groupBoxes = computed(() =>
 
 async function removeEdge(fromShotId: string, toShotId: string): Promise<void> {
   if (!props.projectId) return;
-  const result = await window.api.wall.removeEdge({
-    projectId: props.projectId,
-    fromShotId,
-    toShotId,
-  });
+  const result = props.boardMode
+    ? await window.api.wall.removeNodeEdge({
+        boardId: activeBoardId.value,
+        fromNodeId: fromShotId,
+        toNodeId: toShotId,
+      })
+    : await window.api.wall.removeEdge({
+        projectId: props.projectId,
+        fromShotId,
+        toShotId,
+      });
   if (result.ok) {
     edges.value = edges.value.filter(
       (e) => !(e.fromShotId === fromShotId && e.toShotId === toShotId),
@@ -366,7 +385,12 @@ function onPortDown(event: PointerEvent, shotId: string, side: 'out' | 'in' = 'o
   edgeDragFrom.value = shotId;
   pendingEdge.value = { from: shotId, x: 0, y: 0 };
   const stage = stageEl.value;
-  stage?.setPointerCapture(event.pointerId);
+  // 捕获失败（如自动化合成指针无活动 pointerId）不阻断拖线
+  try {
+    stage?.setPointerCapture(event.pointerId);
+  } catch {
+    // ignore
+  }
   const move = (ev: PointerEvent): void => {
     const rect = stage?.getBoundingClientRect();
     if (!rect || !edgeDrag) return;
@@ -391,25 +415,31 @@ function onPortDown(event: PointerEvent, shotId: string, side: 'out' | 'in' = 'o
       (item) => wx >= item.x && wx <= item.x + CARD_W && wy >= item.y && wy <= item.y + CARD_H,
     );
     if (!target || target.shot.id === from) return;
-    // 防误触 1.2：起点卡中心到释放点距离需超过 1.2 卡宽
-    const start = cardCenter(from);
-    const dist = start ? Math.hypot(wx - start.x, wy - start.y) : 0;
-    if (dist < CARDW * 1.2) return;
+    // 0.4.0 反馈修复：移除「防误触 1.2 卡宽」阈值——邻近卡拖线大多被静默丢弃；
+    // 端口发起的拖拽必须落在另一张卡内才算数，本身已是明确意图。
     const kind: WallEdgeKind = ev.shiftKey ? 'dash' : 'solid';
     // out 端口：this -> target；in 端口：target -> this（本卡的输入来自目标卡）
     const [fromId, toId] =
       edgeDragSide === 'in' ? [target.shot.id, from] : [from, target.shot.id];
-    const result = await window.api.wall.addEdge({
-      projectId: props.projectId,
-      fromShotId: fromId,
-      toShotId: toId,
-      kind,
-    });
+    // 批次6 修复：独立分镜本走 node-edge API（此前 addEdge('boards') 校验项目 shots 必然失败）
+    const result = props.boardMode
+      ? await window.api.wall.addNodeEdge({
+          boardId: activeBoardId.value,
+          fromNodeId: fromId,
+          toNodeId: toId,
+          kind,
+        })
+      : await window.api.wall.addEdge({
+          projectId: props.projectId,
+          fromShotId: fromId,
+          toShotId: toId,
+          kind,
+        });
     if (result.ok) {
       edges.value = edges.value.filter(
         (e) => !(e.fromShotId === fromId && e.toShotId === toId),
       );
-      edges.value.push(result.data);
+      edges.value.push({ fromShotId: fromId, toShotId: toId, kind });
     } else {
       edgeHint.value = result.error.message;
       setTimeout(() => (edgeHint.value = ''), 2400);
@@ -542,10 +572,15 @@ const trackRows = computed(() => {
 });
 
 async function openPlayer(startId: string): Promise<void> {
-  // 放映前刷新连线（可能被 MCP/其他入口修改）
+  // 放映前刷新连线（可能被 MCP/其他入口修改）；独立分镜本走 node API
   if (props.projectId) {
-    const fresh = await window.api.wall.listEdges({ projectId: props.projectId });
-    if (fresh.ok) edges.value = fresh.data;
+    if (props.boardMode) {
+      const fresh = await window.api.wall.listNodeEdges({ boardId: activeBoardId.value });
+      if (fresh.ok) edges.value = fresh.data;
+    } else {
+      const fresh = await window.api.wall.listEdges({ projectId: props.projectId });
+      if (fresh.ok) edges.value = fresh.data;
+    }
   }
   const scope = playerScope(startId);
   if (scope.length === 0) return;
@@ -558,11 +593,22 @@ async function openPlayer(startId: string): Promise<void> {
   };
   annSel.value = null;
   playProgress.value = 0;
-  const result = await window.api.wall.listAnnotations({
-    projectId: props.projectId,
-    shotIds: scope.map((item) => item.id),
-  });
-  if (result.ok) annotations.value = new Map(Object.entries(result.data));
+  if (props.boardMode) {
+    const result = await window.api.wall.listNodeAnnotations({ boardId: activeBoardId.value });
+    if (result.ok) {
+      const scopeIds = new Set(scope.map((item) => item.id));
+      const filtered = Object.fromEntries(
+        Object.entries(result.data).filter(([nodeId]) => scopeIds.has(nodeId)),
+      );
+      annotations.value = new Map(Object.entries(filtered));
+    }
+  } else {
+    const result = await window.api.wall.listAnnotations({
+      projectId: props.projectId,
+      shotIds: scope.map((item) => item.id),
+    });
+    if (result.ok) annotations.value = new Map(Object.entries(result.data));
+  }
 }
 
 const playerScopeLabel = computed(() => {
@@ -676,11 +722,14 @@ function refreshThumbAnn(shotId: string): void {
 }
 function persistAnn(shotId: string): void {
   const list = annListOf(shotId);
-  void window.api.wall
-    .saveAnnotations({ projectId: props.projectId, shotId, items: list.map((o) => ({ type: o.type, color: o.color, data: o.data })) })
-    .then(function () {
-      refreshThumbAnn(shotId);
-    });
+  const items = list.map((o) => ({ type: o.type, color: o.color, data: o.data }));
+  // 批次6 修复：独立分镜本标注走 node API（此前 saveAnnotations('boards') 静默失败）
+  const save = props.boardMode
+    ? window.api.wall.saveNodeAnnotations({ boardId: activeBoardId.value, nodeId: shotId, items })
+    : window.api.wall.saveAnnotations({ projectId: props.projectId, shotId, items });
+  void save.then(function () {
+    refreshThumbAnn(shotId);
+  });
 }
 
 function curAnnSvg(): SVGElement | null {
@@ -843,11 +892,19 @@ async function disconnectAll(shotId: string): Promise<void> {
   if (!props.projectId) return;
   const related = edges.value.filter((e) => e.fromShotId === shotId || e.toShotId === shotId);
   for (const e of related) {
-    await window.api.wall.removeEdge({
-      projectId: props.projectId,
-      fromShotId: e.fromShotId,
-      toShotId: e.toShotId,
-    });
+    if (props.boardMode) {
+      await window.api.wall.removeNodeEdge({
+        boardId: activeBoardId.value,
+        fromNodeId: e.fromShotId,
+        toNodeId: e.toShotId,
+      });
+    } else {
+      await window.api.wall.removeEdge({
+        projectId: props.projectId,
+        fromShotId: e.fromShotId,
+        toShotId: e.toShotId,
+      });
+    }
   }
   edges.value = edges.value.filter((e) => !related.includes(e));
 }
@@ -967,12 +1024,15 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
     const hasEdges = edges.value.some((e) => e.fromShotId === shotId || e.toShotId === shotId);
     items.push({ label: '断开此卡所有连线', disabled: !hasEdges, action: () => void disconnectAll(shotId) });
     items.push({ label: '设为主线起点', action: () => (chainStartId.value = shotId) });
-    if (selectedIds.value.size >= 2) {
+    if (!props.boardMode && selectedIds.value.size >= 2) {
       items.push({ label: '成组（已选 ' + selectedIds.value.size + ' 张）', action: () => void createGroupFromSelection() });
     }
     const g = groups.value.find((item) => item.shotIds.includes(shotId));
     if (g) items.push({ label: '解散所在组（' + g.name + '）', action: () => void dissolveGroup(g.groupId) });
     if (props.boardMode) {
+      // 0.4.0 反馈：右键卡片也要能新增节点
+      items.push({ label: '添加节点 · 导入照片', action: () => emit('createNode', 'image') });
+      items.push({ label: '添加节点 · 黑底+文本', action: () => emit('createNode', 'black') });
       items.push({ label: '编辑节点（名称/时长/笔记）', action: () => emit('editNode', shotId) });
       items.push({
         label: '删除节点',
@@ -989,6 +1049,9 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
     if (props.boardMode) {
       items.push({ label: '添加节点 · 导入照片', action: () => emit('createNode', 'image') });
       items.push({ label: '添加节点 · 黑底+文本', action: () => emit('createNode', 'black') });
+      // 批次8：独立保存入口（导入/打开保存目录）
+      items.push({ label: '导入分镜本（board.json）', action: () => emit('importBoard') });
+      items.push({ label: '打开独立保存目录', action: () => emit('openBoardDir') });
       items.push({
         label: selectedIds.value.size > 0 ? `删除节点（已选 ${selectedIds.value.size} 张）` : '删除节点（先选中卡片）',
         danger: true,

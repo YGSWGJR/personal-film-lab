@@ -156,6 +156,8 @@ const wallBoardId = ref<string | null>(null);
 const wallBoardName = ref('');
 /** S45 分镜本投影：独立分镜本按连线顺序/分层呈现在拉片工作区 */
 const projectionOn = ref(false);
+/** 批次7：用户手动退出过投影时，关墙不自动重开（下次进墙重置） */
+const projectionManuallyExited = ref(false);
 const projectedPlaying = ref(false);
 let projectedRaf = 0;
 let projectedT0 = 0;
@@ -2576,6 +2578,9 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     await loadBoardNodes();
     return created.data.id;
   },
+  reloadNodes: async (): Promise<void> => {
+    await loadBoardNodes();
+  },
   state: () => ({
     wallOpen: wallOpen.value,
     boardId: wallBoardId.value ?? '',
@@ -3011,6 +3016,7 @@ async function pickIndependentBoard(boardId: string | null): Promise<void> {
 
 /** S44：新建/打开独立分镜本并映射为画布节点 */
 async function openIndependentBoard(boardId: string | null): Promise<void> {
+  projectionManuallyExited.value = false;
   let id = boardId;
   if (!id) {
     const created = await window.api.wall.createBoard({
@@ -3184,19 +3190,38 @@ function stopProjectedPlayback(): void {
   projectedRaf = 0;
 }
 
-/** 投影开关（墙 HUD 触发） */
+/** 投影开关（墙 HUD 触发；右上徽标「退出」同此） */
 function toggleProjection(): void {
   projectionOn.value = !projectionOn.value;
   if (projectionOn.value) {
+    projectionManuallyExited.value = false;
     wallOpen.value = false;
+    if (wallMode.value === 'independent') syncProjectionSelection();
     showToast('分镜本投影已开启：时间线/主播放/右侧面板来自分镜本节点。', 'success', '分镜本投影');
+  } else {
+    // 用户手动退出后，本次关墙不再自动重开（下次进墙重置）
+    projectionManuallyExited.value = true;
   }
+}
+
+/** 批次7：投影选中态对齐分镜本首节点 */
+function syncProjectionSelection(): void {
+  if (boardShots.value.length === 0) return;
+  if (!boardShots.value.some((shot) => shot.id === selectedId.value)) {
+    selectedId.value = boardShots.value[0].id;
+  }
+}
+
+/** 分镜本图片节点 → lapian-asset URL（assetPath 自带 boards/ 前缀，协议根已是 projects/，去掉避免双写 404） */
+function boardAssetUrl(assetPath: string): string {
+  const rel = assetPath.startsWith('boards/') ? assetPath.slice('boards/'.length) : assetPath;
+  return assetUrlForPath('boards', rel);
 }
 
 function emptyShotShape(boardId: string, node: WallBoardNodeInfo, startMs: number): WorkspaceShot {
   const url =
     node.source === 'image' && node.assetPath
-      ? assetUrlForPath('boards', node.assetPath)
+      ? boardAssetUrl(node.assetPath)
       : textThumbDataUrl(node.textContent);
   return {
     id: node.id,
@@ -3445,6 +3470,27 @@ function onWallNodePanelChanged(): void {
   void loadBoardNodes();
 }
 
+/** 批次8：导入独立保存的分镜本（board.json） */
+async function importBoardFile(): Promise<void> {
+  const result = await window.api.wall.importBoardFile();
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  if (!result.data.boardId) return;
+  await openIndependentBoard(result.data.boardId);
+  showToast('分镜本已导入（图片资产已复制到数据根）。', 'success', '导入分镜本');
+}
+
+/** 批次8：打开当前分镜本的独立保存目录 */
+async function openBoardSaveDir(): Promise<void> {
+  if (!wallBoardId.value) return;
+  const result = await window.api.wall.openBoardDir({ boardId: wallBoardId.value });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
 /** 批次2：文本节点内联编辑 → 缩略图即时重绘，DB 写入防抖 500ms */
 const nodeTextTimers = new Map<string, number>();
 
@@ -3509,6 +3555,17 @@ async function saveNodeEdit(): Promise<void> {
 
 function closeWall(): void {
   wallOpen.value = false;
+  // 批次7（用户确认 A）：独立分镜本关墙自动投影——主界面时间线/主播放直接显示节点
+  if (
+    wallMode.value === 'independent' &&
+    boardShots.value.length > 0 &&
+    !projectionOn.value &&
+    !projectionManuallyExited.value
+  ) {
+    projectionOn.value = true;
+    syncProjectionSelection();
+    showToast('分镜本投影已开启：主界面正在显示分镜本节点（右上徽标可退出）。', 'success', '分镜本投影');
+  }
 }
 
 async function onWallLayoutChange(items: WallLayoutItem[]): Promise<void> {
@@ -4258,6 +4315,7 @@ onBeforeUnmount(() => {
       :project-id="wallMode === 'independent' ? 'boards' : activeProject?.id ?? ''"
       :view-state="wallViewState"
       :board-mode="wallMode === 'independent'"
+      :board-id="wallBoardId"
       :focus-node-id="boardFocusNodeId"
       @close="closeWall"
       @seek="onWallSeek"
@@ -4268,6 +4326,8 @@ onBeforeUnmount(() => {
       @delete-node="deleteBoardNode"
       @node-text="onBoardNodeText"
       @selection-change="onWallSelectionChange"
+      @import-board="importBoardFile"
+      @open-board-dir="openBoardSaveDir"
       @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">
