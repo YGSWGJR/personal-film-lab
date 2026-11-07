@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { app, ipcMain, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
