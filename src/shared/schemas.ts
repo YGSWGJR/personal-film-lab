@@ -356,6 +356,8 @@ export const wallAnnotationListArgsSchema = z.object({
   shotIds: z.array(z.string().min(1)).max(100_000).optional(),
 });
 
+export const wallExportArgsSchema = z.object({ projectId: z.string().min(1) });
+
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),
   shotId: z.string().min(1),

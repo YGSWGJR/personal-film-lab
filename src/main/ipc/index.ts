@@ -32,6 +32,7 @@ import type {
   WallGroupDissolveArgs,
   WallAnnotationListArgs,
   WallAnnotationSaveArgs,
+  WallExportArgs,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -505,6 +506,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     IPC.WALL_SAVE_ANNOTATIONS,
     withEnvelope((args: WallAnnotationSaveArgs): void =>
       requireData().wall.saveAnnotations(args.projectId, args.shotId, args.items),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_EXPORT_IMAGES,
+    withEnvelope((args: WallExportArgs) =>
+      requireData().wall.exportImages(args.projectId, requireData().dataRoot),
     ),
   );
 

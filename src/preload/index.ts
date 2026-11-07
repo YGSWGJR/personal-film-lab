@@ -29,6 +29,7 @@ import {
   wallGroupDissolveArgsSchema,
   wallAnnotationListArgsSchema,
   wallAnnotationSaveArgsSchema,
+  wallExportArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -118,6 +119,8 @@ import type {
   WallAnnotation,
   WallAnnotationListArgs,
   WallAnnotationSaveArgs,
+  WallExportArgs,
+  WallExportResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -262,6 +265,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.WALL_DISSOLVE_GROUP]: wallGroupDissolveArgsSchema,
   [IPC.WALL_LIST_ANNOTATIONS]: wallAnnotationListArgsSchema,
   [IPC.WALL_SAVE_ANNOTATIONS]: wallAnnotationSaveArgsSchema,
+  [IPC.WALL_EXPORT_IMAGES]: wallExportArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -472,6 +476,7 @@ const wallApi = {
     invoke<Record<string, WallAnnotation[]>>(IPC.WALL_LIST_ANNOTATIONS, [args]),
   saveAnnotations: (args: WallAnnotationSaveArgs) =>
     invoke<void>(IPC.WALL_SAVE_ANNOTATIONS, [args]),
+  exportImages: (args: WallExportArgs) => invoke<WallExportResult>(IPC.WALL_EXPORT_IMAGES, [args]),
 };
 
 const dataApi = {

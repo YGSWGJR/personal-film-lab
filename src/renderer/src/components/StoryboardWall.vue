@@ -196,6 +196,17 @@ function applyInitialState(): void {
   }
 }
 
+async function exportImages(): Promise<void> {
+  if (!props.projectId) return;
+  const result = await window.api.wall.exportImages({ projectId: props.projectId });
+  if (result.ok) {
+    edgeHint.value = `已按连线顺序导出 ${result.data.count} 张图片（跳过 ${result.data.skipped}）→ ${result.data.dir}`;
+  } else {
+    edgeHint.value = result.error.message;
+  }
+  setTimeout(() => (edgeHint.value = ''), 4000);
+}
+
 function onWindowResize(): void {
   measureStage();
 }
@@ -963,6 +974,7 @@ function fmtDuration(ms: number): string {
       <span class="wall-zval">{{ Math.round(scale * 100) }}%</span>
       <button type="button" class="wall-hud-btn" aria-label="放大" @click.stop="zoomBy(1.2)">+</button>
       <button type="button" class="wall-hud-btn" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
+      <button type="button" class="wall-hud-btn wall-export" title="按连线顺序导出镜头图片" @click.stop="exportImages">⇩</button>
     </div>
     <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击卡片回到时间线定位 · Ctrl+0 复位</div>
     <!-- S43 分镜PPT 放映层 -->

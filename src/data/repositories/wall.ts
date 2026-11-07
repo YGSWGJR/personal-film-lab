@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { copyFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DataLayer } from '../db';
 import { DataError } from '../errors';
 
@@ -246,6 +248,77 @@ export class WallRepository {
         insert.run(randomUUID(), projectId, shotId, item.type, item.color, JSON.stringify(item.data ?? {}));
       }
     });
+  }
+
+  /* ---------- S43 分镜PPT：按连线顺序一键导出图片 ---------- */
+
+  /**
+   * 沿连线顺序导出镜头缩略图：每个弱连通分量取无入边的卡为起点，
+   * 主线（solid）优先 DFS，其后备选（dash），分量内未连通卡按镜号补齐。
+   * 隔离卡排在最后（按镜号）。缩略图为 lapian-asset://<projectId>/<rel> 时映射回项目目录复制。
+   */
+  exportImages(
+    projectId: string,
+    dataRoot: string,
+  ): { dir: string; count: number; skipped: number } {
+    this.assertProject(projectId);
+    const shots = this.layer.shots.list(projectId) as Array<{
+      id: string;
+      index: number;
+      thumbnail?: string | null;
+    }>;
+    const edgeRows = this.listEdges(projectId);
+    const byId = new Map(shots.map((shot) => [shot.id, shot]));
+    const solidNext = new Map<string, string[]>();
+    const incoming = new Map<string, number>();
+    for (const shot of shots) {
+      solidNext.set(shot.id, []);
+      incoming.set(shot.id, 0);
+    }
+    for (const e of edgeRows) {
+      if (!byId.has(e.fromShotId) || !byId.has(e.toShotId)) continue;
+      if (e.kind === 'solid') solidNext.get(e.fromShotId)?.push(e.toShotId);
+      incoming.set(e.toShotId, (incoming.get(e.toShotId) ?? 0) + 1);
+    }
+    const order: string[] = [];
+    const seen = new Set<string>();
+    const dfs = (id: string): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      order.push(id);
+      for (const next of solidNext.get(id) ?? []) dfs(next);
+    };
+    for (const shot of shots) {
+      if ((incoming.get(shot.id) ?? 0) === 0) dfs(shot.id);
+    }
+    for (const shot of shots) dfs(shot.id);
+
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const dir = join(dataRoot, 'exports', 'wall', `${projectId}-${stamp}`);
+    mkdirSync(dir, { recursive: true });
+    let count = 0;
+    let skipped = 0;
+    let n = 0;
+    for (const id of order) {
+      const shot = byId.get(id);
+      if (!shot) continue;
+      n += 1;
+      const thumb = shot.thumbnail ?? '';
+      const m = /^lapian-asset:\/\/([^/]+)\/(.+)$/.exec(thumb);
+      const src = m ? join(dataRoot, 'projects', m[1], ...m[2].split('/')) : thumb;
+      let copied = false;
+      try {
+        if (src && !thumb.startsWith('data:')) {
+          copyFileSync(src, join(dir, `${String(n).padStart(3, '0')}-shot${String(shot.index).padStart(2, '0')}.jpg`));
+          copied = true;
+        }
+      } catch {
+        copied = false;
+      }
+      if (copied) count += 1;
+      else skipped += 1;
+    }
+    return { dir, count, skipped };
   }
 
   private assertProject(projectId: string): void {

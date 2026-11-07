@@ -333,6 +333,7 @@ export interface WallApi {
   dissolveGroup(args: WallGroupDissolveArgs): Promise<IpcResult<void>>;
   listAnnotations(args: WallAnnotationListArgs): Promise<IpcResult<Record<string, WallAnnotation[]>>>;
   saveAnnotations(args: WallAnnotationSaveArgs): Promise<IpcResult<void>>;
+  exportImages(args: WallExportArgs): Promise<IpcResult<WallExportResult>>;
 }
 
 export interface WorkspaceState {
@@ -1060,6 +1061,16 @@ export interface WallAnnotationSaveArgs {
   projectId: string;
   shotId: string;
   items: Array<Omit<WallAnnotation, 'id'>>;
+}
+
+export interface WallExportArgs {
+  projectId: string;
+}
+
+export interface WallExportResult {
+  dir: string;
+  count: number;
+  skipped: number;
 }
 
 /** 分镜墙视图状态（缩放/平移），按项目存 settings.json，不进数据库 */
