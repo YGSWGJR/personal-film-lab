@@ -35,6 +35,7 @@ const emit = defineEmits<{
   editNode: [nodeId: string];
   createNode: [kind: 'image' | 'black'];
   deleteNode: [nodeId: string];
+  nodeText: [nodeId: string, text: string];
   project: [];
 }>();
 
@@ -1164,7 +1165,28 @@ function onCardClick(shot: WorkspaceShot, event: PointerEvent): void {
 }
 
 function onCardDblClick(shot: WorkspaceShot): void {
+  // 批次2：文本节点双击=进入内联编辑（图片节点仍双击回放定位）
+  if (shot.textContent !== undefined) {
+    editText.value = shot.textContent;
+    editingTextId.value = shot.id;
+    return;
+  }
   void openPlayer(shot.id);
+}
+
+/** 批次2：文本节点内联编辑态 */
+const editingTextId = ref<string | null>(null);
+const editText = ref('');
+
+function onTextEditInput(): void {
+  if (editingTextId.value) emit('nodeText', editingTextId.value, editText.value);
+}
+
+function onTextEditKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' || (event.key === 'Enter' && (event.ctrlKey || event.metaKey))) {
+    event.preventDefault();
+    editingTextId.value = null;
+  }
 }
 
 function fmtDuration(ms: number): string {
@@ -1263,6 +1285,19 @@ function fmtDuration(ms: number): string {
         <span class="wall-port" title="拖到另一张卡建立连线（Shift=备选虚线）" @pointerdown="onPortDown($event, item.shot.id)"></span>
         <div class="wall-thumb">
           <img :src="item.shot.thumbnail" :alt="item.shot.title" draggable="false" />
+          <textarea
+            v-if="editingTextId === item.shot.id"
+            v-model="editText"
+            class="wall-text-edit"
+            :style="{ fontSize: `${Math.max(5, Math.min(64, 15 / scale))}px` }"
+            placeholder="输入画面文字…"
+            spellcheck="false"
+            @input="onTextEditInput"
+            @blur="editingTextId = null"
+            @pointerdown.stop
+            @dblclick.stop
+            @keydown.stop="onTextEditKeydown"
+          ></textarea>
         </div>
         <div class="wall-meta">
           <b>#{{ String(item.shot.index).padStart(2, '0') }}</b>
@@ -1302,7 +1337,7 @@ function fmtDuration(ms: number): string {
       <b>空白分镜本</b>
       <span>右键画布空白处 → 添加节点（导入照片 / 黑底+文本框）；拖动卡片两侧端口连线编排顺序</span>
     </div>
-    <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击卡片回到时间线定位 · Ctrl+0 复位</div>
+    <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击文本卡输入文字 · 双击图片卡回放定位 · Ctrl+0 复位</div>
     <!-- S43 分镜PPT 放映层 -->
     <div v-if="player.open" class="wall-ppt" :class="{ 'wall-ppt-single': player.single }">
       <div class="wall-ppt-bar">
@@ -1601,8 +1636,28 @@ function fmtDuration(ms: number): string {
 }
 
 .wall-thumb {
+  position: relative;
   height: 116px;
   background: #0d1420;
+}
+
+/* 批次2：文本节点内联编辑——透明叠层，字号按画布缩放反向补偿（视觉≈15px） */
+.wall-text-edit {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  color: #e6edf7;
+  border: 1px dashed rgba(90, 162, 255, 0.85);
+  border-radius: 0;
+  outline: none;
+  resize: none;
+  line-height: 1.5;
+  font-family: 'Microsoft YaHei', sans-serif;
+  text-align: left;
+  box-sizing: border-box;
 }
 
 .wall-thumb img {

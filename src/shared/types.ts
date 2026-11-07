@@ -1095,6 +1095,7 @@ export interface WallBoardNodeInfo {
   source: WallBoardNodeSource;
   assetPath: string | null;
   title: string;
+  textContent: string;
   durationMs: number;
   note: string;
   shotSize: string | null;
@@ -1142,7 +1143,9 @@ export interface WallNodeAddArgs {
 
 export interface WallNodeUpdateArgs {
   nodeId: string;
-  patch: Partial<Pick<WallBoardNodeInfo, 'title' | 'durationMs' | 'note' | 'shotSize' | 'cameraMethod' | 'x' | 'y'>>;
+  patch: Partial<
+    Pick<WallBoardNodeInfo, 'title' | 'textContent' | 'durationMs' | 'note' | 'shotSize' | 'cameraMethod' | 'x' | 'y'>
+  >;
 }
 
 export interface WallNodeDeleteArgs {

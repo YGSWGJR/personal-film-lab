@@ -3153,7 +3153,7 @@ function emptyShotShape(boardId: string, node: WallBoardNodeInfo, startMs: numbe
   const url =
     node.source === 'image' && node.assetPath
       ? assetUrlForPath('boards', node.assetPath)
-      : textThumbDataUrl(node.title || '分镜', node.source === 'text');
+      : textThumbDataUrl(node.textContent);
   return {
     id: node.id,
     projectId: 'board-' + boardId,
@@ -3170,6 +3170,7 @@ function emptyShotShape(boardId: string, node: WallBoardNodeInfo, startMs: numbe
     manualFields: [],
     tagIds: [],
     thumbnail: url,
+    textContent: node.source === 'text' ? node.textContent : undefined,
     title: node.title || `分镜 ${startMs / 1000 + 1}s`,
     scene: '分镜本',
     createdAt: new Date().toISOString(),
@@ -3177,19 +3178,41 @@ function emptyShotShape(boardId: string, node: WallBoardNodeInfo, startMs: numbe
   };
 }
 
-/** 文本节点缩略图：底色+文字渲染为 dataURL */
-function textThumbDataUrl(text: string, dark: boolean): string {
+/** 文本节点画面文字按 12 字/行折行，最多 6 行（超出省略） */
+function wrapThumbText(text: string, perLine = 12, maxLines = 6): string[] {
+  const lines: string[] = [];
+  for (const para of text.split(/\r?\n/)) {
+    if (para === '') {
+      lines.push('');
+      continue;
+    }
+    for (let i = 0; i < para.length; i += perLine) lines.push(para.slice(i, i + perLine));
+  }
+  if (lines.length > maxLines) {
+    return [...lines.slice(0, maxLines - 1), lines[maxLines - 1] + '…'];
+  }
+  return lines;
+}
+
+/** 文本节点缩略图：黑底白字直绘为 dataURL（墙卡/投影宫格/放映大图共用 thumbnail） */
+function textThumbDataUrl(text: string): string {
   const canvas = document.createElement('canvas');
   canvas.width = 320;
   canvas.height = 180;
   const ctx = canvas.getContext('2d');
   if (ctx) {
-    ctx.fillStyle = dark ? '#0a0e16' : '#f8fafc';
+    ctx.fillStyle = '#0a0e16';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = dark ? '#e6edf7' : '#0a0e16';
-    ctx.font = '22px "Microsoft YaHei", sans-serif';
-    const lines = text.split(/\r?\n/).slice(0, 5);
-    lines.forEach((line, i) => ctx.fillText(line.slice(0, 18), 18, 48 + i * 32));
+    const trimmed = text.trim();
+    if (trimmed === '') {
+      ctx.fillStyle = 'rgba(230, 237, 247, 0.35)';
+      ctx.font = '16px "Microsoft YaHei", sans-serif';
+      ctx.fillText('双击输入文字', 18, 96);
+    } else {
+      ctx.fillStyle = '#e6edf7';
+      ctx.font = '20px "Microsoft YaHei", sans-serif';
+      wrapThumbText(trimmed).forEach((line, i) => ctx.fillText(line, 18, 36 + i * 26));
+    }
   }
   return canvas.toDataURL('image/png');
 }
@@ -3227,6 +3250,27 @@ async function addBoardNode(kind: 'image' | 'black'): Promise<void> {
     return;
   }
   await loadBoardNodes();
+}
+
+/** 批次2：文本节点内联编辑 → 缩略图即时重绘，DB 写入防抖 500ms */
+const nodeTextTimers = new Map<string, number>();
+
+function onBoardNodeText(nodeId: string, text: string): void {
+  const shot = boardShots.value.find((s) => s.id === nodeId);
+  if (!shot) return;
+  shot.textContent = text;
+  shot.thumbnail = textThumbDataUrl(text);
+  const existing = nodeTextTimers.get(nodeId);
+  if (existing) window.clearTimeout(existing);
+  nodeTextTimers.set(
+    nodeId,
+    window.setTimeout(() => {
+      nodeTextTimers.delete(nodeId);
+      void window.api.wall.updateNode({ nodeId, patch: { textContent: text } }).then((result) => {
+        if (!result.ok) showToast(result.error.message, 'error', result.error.code);
+      });
+    }, 500),
+  );
 }
 
 /** S44：节点编辑卡保存 */
@@ -3756,6 +3800,8 @@ onBeforeUnmount(() => {
   audioGeneration += 1;
   if (timelinePersistTimer) clearTimeout(timelinePersistTimer);
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  for (const timer of nodeTextTimers.values()) clearTimeout(timer);
+  nodeTextTimers.clear();
 });
 </script>
 
@@ -4022,6 +4068,7 @@ onBeforeUnmount(() => {
       @edit-node="openNodeEditor"
       @create-node="addBoardNode"
       @delete-node="deleteBoardNode"
+      @node-text="onBoardNodeText"
       @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">

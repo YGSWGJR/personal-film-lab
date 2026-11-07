@@ -7,6 +7,7 @@ export interface WallBoardNode {
   source: 'image' | 'text';
   assetPath: string | null;
   title: string;
+  textContent: string;
   durationMs: number;
   note: string;
   shotSize: string | null;
@@ -116,11 +117,14 @@ export class WallBoardsRepository {
 
   updateNode(
     id: string,
-    patch: Partial<Pick<WallBoardNode, 'title' | 'durationMs' | 'note' | 'shotSize' | 'cameraMethod' | 'x' | 'y'>>,
+    patch: Partial<
+      Pick<WallBoardNode, 'title' | 'textContent' | 'durationMs' | 'note' | 'shotSize' | 'cameraMethod' | 'x' | 'y'>
+    >,
   ): WallBoardNode {
     const current = this.getNode(id);
     const next = {
       title: patch.title ?? current.title,
+      textContent: patch.textContent ?? current.textContent,
       durationMs: Math.max(200, Math.round(patch.durationMs ?? current.durationMs)),
       note: patch.note ?? current.note,
       shotSize: patch.shotSize !== undefined ? patch.shotSize : current.shotSize,
@@ -131,9 +135,9 @@ export class WallBoardsRepository {
     this.layer.transaction(() => {
       this.db
         .prepare(
-          'UPDATE wall_nodes SET title = ?, duration_ms = ?, note = ?, shot_size = ?, camera_method = ?, x = ?, y = ?, updated_at = strftime(\'%s\',\'now\') * 1000 WHERE id = ?',
+          'UPDATE wall_nodes SET title = ?, text_content = ?, duration_ms = ?, note = ?, shot_size = ?, camera_method = ?, x = ?, y = ?, updated_at = strftime(\'%s\',\'now\') * 1000 WHERE id = ?',
         )
-        .run(next.title, next.durationMs, next.note, next.shotSize, next.cameraMethod, next.x, next.y, id);
+        .run(next.title, next.textContent, next.durationMs, next.note, next.shotSize, next.cameraMethod, next.x, next.y, id);
     });
     return this.getNode(id);
   }
@@ -245,6 +249,7 @@ function mapNode(row: Record<string, unknown>): WallBoardNode {
     source: row.source === 'text' ? 'text' : 'image',
     assetPath: (row.asset_path as string | null) ?? null,
     title: String(row.title ?? ''),
+    textContent: String(row.text_content ?? ''),
     durationMs: Number(row.duration_ms ?? 3000),
     note: String(row.note ?? ''),
     shotSize: (row.shot_size as string | null) ?? null,

@@ -384,6 +384,7 @@ export const wallNodeUpdateArgsSchema = z.object({
   nodeId: z.string().min(1),
   patch: z.object({
     title: z.string().max(200).optional(),
+    textContent: z.string().max(20_000).optional(),
     durationMs: z.number().int().min(200).max(600_000).optional(),
     note: z.string().max(20_000).optional(),
     shotSize: z.string().max(40).nullable().optional(),

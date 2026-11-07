@@ -6,6 +6,8 @@ export interface WorkspaceShot extends Shot {
   title: string;
   scene: string;
   noteId?: string;
+  /** 独立分镜本文本节点才有：画面文字（双击卡片进入内联编辑） */
+  textContent?: string;
 }
 
 export interface TimelineMarker {
