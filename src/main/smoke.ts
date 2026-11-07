@@ -4711,6 +4711,12 @@ function wallChecksAssertions(result: Record<string, any>): Record<string, boole
     wallInvalidShot: result.invalidShot === true,
     wallInvalidItem: result.invalidItem === true,
     wallShotsUntouched: result.shotsUntouched === true,
+    wallEdgeAddList: result.edgeAddList === true,
+    wallEdgeSelfRejected: result.edgeSelfRejected === true,
+    wallEdgeCascade: result.edgeCascade === true,
+    wallGroupAutoDisconnect: result.groupAutoDisconnect === true,
+    wallAnnotations: result.annotations === true,
+    wallExportOrder: result.exportOrder === true,
   };
 }
 
@@ -4768,9 +4774,56 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
       out.invalidItem = (error as { code?: string }).code === 'WALL_ITEM_INVALID';
     }
     // shots 表零变化（V-12）
-    const before = data.db.prepare('SELECT COUNT(*) AS n FROM shots').get() as { n: number };
-    void before;
     out.shotsUntouched = data.shots.list(project.id).length === 1;
+
+    // ---- S43 二期：edges / groups / annotations / export ----
+    const w1 = data.shots.create({ projectId: project.id, startMs: 1000, endMs: 1500 });
+    const w2 = data.shots.create({ projectId: project.id, startMs: 1500, endMs: 2000 });
+    const w3 = data.shots.create({ projectId: project.id, startMs: 2000, endMs: 2500 });
+    data.wall.addEdge(project.id, w1.id, w2.id, 'solid');
+    data.wall.addEdge(project.id, w2.id, w3.id, 'dash');
+    out.edgeAddList =
+      data.wall.listEdges(project.id).length === 2 &&
+      data.wall.listEdges(project.id).some((e) => e.kind === 'dash');
+    try {
+      data.wall.addEdge(project.id, w1.id, w1.id, 'solid');
+      out.edgeSelfRejected = false;
+    } catch (error) {
+      out.edgeSelfRejected = (error as { code?: string }).code === 'WALL_EDGE_SELF';
+    }
+    data.shots.delete(w3.id);
+    out.edgeCascade = !data.wall
+      .listEdges(project.id)
+      .some((e) => e.toShotId === w3.id || e.fromShotId === w3.id);
+    // 分组自动断连：组 = {w2, g1}；组外 w1 与组内 w2 的边必须断开；组内边（无）保留
+    const g1 = data.shots.create({ projectId: project.id, startMs: 2500, endMs: 3000 });
+    data.wall.addEdge(project.id, w2.id, g1.id, 'solid'); // 组内边
+    data.wall.addEdge(project.id, w1.id, w2.id, 'solid'); // 跨组边（w1 在组外）→ 应断
+    data.wall.createGroup(project.id, '场景 X', [g1.id, w2.id]);
+    const edgesAfter = data.wall.listEdges(project.id);
+    out.groupAutoDisconnect =
+      !edgesAfter.some((e) => (e.fromShotId === w1.id && e.toShotId === w2.id) || (e.fromShotId === w2.id && e.toShotId === w1.id)) &&
+      edgesAfter.some((e) => e.fromShotId === w2.id && e.toShotId === g1.id);
+    // 标注
+    data.wall.saveAnnotations(project.id, w1.id, [
+      { type: 'arrow', color: '#ff0000', data: { pts: [{ x: 10, y: 10 }, { x: 40, y: 30 }] } },
+      { type: 'mosaic', color: '#000000', data: { x: 5, y: 5, w: 10, h: 6 } },
+    ]);
+    const anns = data.wall.listAnnotations(project.id);
+    out.annotations =
+      (anns[w1.id]?.length ?? 0) === 2 &&
+      anns[w1.id]?.[0]?.type === 'arrow';
+    // 导出：给 w1 塞真实缩略图文件（lapian-asset 协议路径），主线 DFS 顺序 w1 → w2 → g1
+    const thumbDir = 'G:/__s43_wall_export__/projects';
+    mkdirSync(join(thumbDir, project.id), { recursive: true });
+    writeFileSync(join(thumbDir, project.id, 'thumb.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    data.shots.update({ id: w1.id, patch: {} });
+    data.db.prepare('UPDATE shots SET thumbnail = ? WHERE id = ?').run(
+      `lapian-asset://${project.id}/thumb.jpg`,
+      w1.id,
+    );
+    const exported = data.wall.exportImages(project.id, 'G:/__s43_wall_export__');
+    out.exportOrder = exported.count === 1 && exported.skipped === 3 && exported.dir.includes('wall');
     try {
       data.projects.delete(other.id);
     } catch { /* ignore */ }

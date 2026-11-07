@@ -150,6 +150,21 @@ export class WallRepository {
            )`,
         )
         .run(projectId, groupId, groupId, groupId, groupId);
+      // 防御断言：断连后组内外不应再有边
+      const leftover = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM shot_edges WHERE project_id = ? AND (
+             (from_shot IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?)
+               AND to_shot NOT IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?))
+             OR
+             (to_shot IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?)
+               AND from_shot NOT IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?))
+           )`,
+        )
+        .get(projectId, groupId, groupId, groupId, groupId) as { n: number };
+      if (leftover.n > 0) {
+        throw new DataError('WALL_GROUP_DISCONNECT_FAILED', '分组断连失败', { groupId, leftover: leftover.n });
+      }
     });
     return { groupId };
   }
