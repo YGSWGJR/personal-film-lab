@@ -348,6 +348,7 @@ export interface WallApi {
   listNodeAnnotations(args: WallNodeAnnotationListArgs): Promise<IpcResult<Record<string, WallAnnotation[]>>>;
   saveNodeAnnotations(args: WallNodeAnnotationSaveArgs): Promise<IpcResult<void>>;
   importImage(args: WallImportImageArgs): Promise<IpcResult<WallImportImageResult>>;
+  pickImage(): Promise<IpcResult<WallPickImageResult>>;
 }
 
 export interface WorkspaceState {
@@ -1183,6 +1184,10 @@ export interface WallImportImageArgs {
 export interface WallImportImageResult {
   nodeId: string;
   assetUrl: string;
+}
+
+export interface WallPickImageResult {
+  path: string | null;
 }
 
 /** 分镜墙视图状态（缩放/平移），按项目存 settings.json，不进数据库 */

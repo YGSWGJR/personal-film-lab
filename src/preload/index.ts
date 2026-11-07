@@ -150,6 +150,7 @@ import type {
   WallNodeAnnotationSaveArgs,
   WallImportImageArgs,
   WallImportImageResult,
+  WallPickImageResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -537,6 +538,7 @@ const wallApi = {
   saveNodeAnnotations: (args: WallNodeAnnotationSaveArgs) =>
     invoke<void>(IPC.WALL_SAVE_NODE_ANNOTATIONS, [args]),
   importImage: (args: WallImportImageArgs) => invoke<WallImportImageResult>(IPC.WALL_IMPORT_IMAGE, [args]),
+  pickImage: () => invoke<WallPickImageResult>(IPC.WALL_PICK_IMAGE, [{}]),
 };
 
 const dataApi = {

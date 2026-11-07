@@ -48,6 +48,7 @@ import type {
   LabelPreviewResult,
   WallLayoutItem,
   WallViewState,
+  WallBoardNodeInfo,
   ExportProgressEvent,
   GpuStatus,
   IpcResult,
@@ -148,6 +149,13 @@ const labelSelected = ref<string[]>([]);
 /** S43：分镜墙画布（看板一期） */
 const wallOpen = ref(false);
 const wallViewState = ref<WallViewState | null>(null);
+/** S44 分镜本：independent=独立分镜本（节点来自 wall_boards），project=现有镜头分镜本 */
+const wallMode = ref<'project' | 'independent'>('project');
+const wallBoardId = ref<string | null>(null);
+const wallBoardName = ref('');
+/** 独立分镜本节点映射为 WorkspaceShot 供画布/放映复用 */
+const boardShots = ref<WorkspaceShot[]>([]);
+const wallNodeEdit = ref<{ nodeId: string; title: string; durationMs: number; note: string } | null>(null);
 let wallViewStateTimer: ReturnType<typeof setTimeout> | null = null;
 const detectionStageLabel = computed(() => {
   const progress = detectionProgress.value;
@@ -2893,15 +2901,177 @@ async function applyLabelPreview(policy: LabelApplyPolicy): Promise<void> {
   }
 }
 
-/** S43：分镜墙打开（含布局预取） */
+/** S43/S44：分镜墙打开。有素材=项目分镜本；无素材=直接新建独立分镜本创作 */
 async function openWall(): Promise<void> {
   if (demoMode.value || !activeProject.value || shots.value.length === 0) {
-    showToast('请先导入影片并完成镜头切分，再打开分镜墙。');
+    await openIndependentBoard(null);
     return;
   }
+  wallMode.value = 'project';
+  wallBoardId.value = null;
   const base = settings.value?.wallViewState?.[activeProject.value.id] ?? null;
   wallViewState.value = base;
   wallOpen.value = true;
+}
+
+/** S44：新建/打开独立分镜本并映射为画布节点 */
+async function openIndependentBoard(boardId: string | null): Promise<void> {
+  let id = boardId;
+  if (!id) {
+    const created = await window.api.wall.createBoard({
+      name: `分镜本 ${new Date().toLocaleDateString('zh-CN')}`,
+    });
+    if (!created.ok) {
+      showToast(created.error.message, 'error', created.error.code);
+      return;
+    }
+    id = created.data.id;
+  }
+  const boards = await window.api.wall.listBoards();
+  const board = boards.ok ? boards.data.find((b) => b.id === id) : null;
+  wallMode.value = 'independent';
+  wallBoardId.value = id;
+  wallBoardName.value = board?.name ?? '独立分镜本';
+  await loadBoardNodes();
+  wallViewState.value = null;
+  wallOpen.value = true;
+}
+
+/** 独立分镜本节点 → WorkspaceShot 映射（文本节点缩略图=canvas 渲染） */
+async function loadBoardNodes(): Promise<void> {
+  if (!wallBoardId.value) return;
+  const [nodes, edges] = await Promise.all([
+    window.api.wall.listNodes({ boardId: wallBoardId.value }),
+    window.api.wall.listNodeEdges({ boardId: wallBoardId.value }),
+  ]);
+  if (!nodes.ok) {
+    showToast(nodes.error.message, 'error', nodes.error.code);
+    return;
+  }
+  const mapped: WorkspaceShot[] = [];
+  for (const [i, node] of nodes.data.entries()) {
+    const startMs = mapped.length > 0 ? mapped[i - 1].endMs : 0;
+    mapped.push({
+      ...emptyShotShape(wallBoardId.value, node, startMs),
+    });
+  }
+  boardShots.value = mapped;
+  void edges;
+}
+
+function emptyShotShape(boardId: string, node: WallBoardNodeInfo, startMs: number): WorkspaceShot {
+  const url =
+    node.source === 'image' && node.assetPath
+      ? assetUrlForPath('boards', node.assetPath)
+      : textThumbDataUrl(node.title || '分镜', node.source === 'text');
+  return {
+    id: node.id,
+    projectId: 'board-' + boardId,
+    index: 0,
+    startMs,
+    endMs: startMs + node.durationMs,
+    durationMs: node.durationMs,
+    shotSize: node.shotSize,
+    cameraMethod: node.cameraMethod,
+    dialogue: null,
+    remark: node.note || node.title,
+    origin: 'manual',
+    locked: false,
+    manualFields: [],
+    tagIds: [],
+    thumbnail: url,
+    title: node.title || `分镜 ${startMs / 1000 + 1}s`,
+    scene: '分镜本',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** 文本节点缩略图：底色+文字渲染为 dataURL */
+function textThumbDataUrl(text: string, dark: boolean): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 180;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = dark ? '#0a0e16' : '#f8fafc';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = dark ? '#e6edf7' : '#0a0e16';
+    ctx.font = '22px "Microsoft YaHei", sans-serif';
+    const lines = text.split(/\r?\n/).slice(0, 5);
+    lines.forEach((line, i) => ctx.fillText(line.slice(0, 18), 18, 48 + i * 32));
+  }
+  return canvas.toDataURL('image/png');
+}
+
+/** S44：添加节点（导入照片 / 黑底 / 白底） */
+async function addBoardNode(kind: 'image' | 'black' | 'white'): Promise<void> {
+  if (!wallBoardId.value) return;
+  if (kind === 'image') {
+    const picked = await window.api.wall.pickImage();
+    if (!picked.ok || !picked.data.path) return;
+    const imported = await window.api.wall.importImage({
+      boardId: wallBoardId.value,
+      srcPath: picked.data.path,
+    });
+    if (!imported.ok) {
+      showToast(imported.error.message, 'error', imported.error.code);
+      return;
+    }
+    await loadBoardNodes();
+    return;
+  }
+  const created = await window.api.wall.addNode({
+    boardId: wallBoardId.value,
+    source: 'text',
+    title: kind === 'black' ? '黑底分镜' : '白底分镜',
+    x: 80 + (boardShots.value.length % 6) * 60,
+    y: 80 + Math.floor(boardShots.value.length / 6) * 40,
+  });
+  if (!created.ok) {
+    showToast(created.error.message, 'error', created.error.code);
+    return;
+  }
+  await loadBoardNodes();
+}
+
+/** S44：节点编辑卡保存 */
+async function deleteBoardNode(nodeId: string): Promise<void> {
+  if (!wallBoardId.value) return;
+  const result = await window.api.wall.deleteNode({ nodeId });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  await loadBoardNodes();
+}
+
+function openNodeEditor(nodeId: string): void {
+  const shot = boardShots.value.find((item) => item.id === nodeId);
+  if (!shot) return;
+  const nodes = wallBoardId.value ? null : null;
+  void nodes;
+  wallNodeEdit.value = {
+    nodeId,
+    title: shot.title.startsWith('分镜 ') ? shot.title : shot.title,
+    durationMs: shot.durationMs,
+    note: shot.remark ?? '',
+  };
+}
+
+async function saveNodeEdit(): Promise<void> {
+  const edit = wallNodeEdit.value;
+  if (!edit || !wallBoardId.value) return;
+  const result = await window.api.wall.updateNode({
+    nodeId: edit.nodeId,
+    patch: { title: edit.title, durationMs: edit.durationMs, note: edit.note },
+  });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  wallNodeEdit.value = null;
+  await loadBoardNodes();
 }
 
 function closeWall(): void {
@@ -3639,14 +3809,51 @@ onBeforeUnmount(() => {
 
     <StoryboardWall
       v-if="wallOpen"
-      :shots="shots"
-      :project-id="activeProject?.id ?? ''"
+      :shots="wallMode === 'independent' ? boardShots : shots"
+      :project-id="wallMode === 'independent' ? 'boards' : activeProject?.id ?? ''"
       :view-state="wallViewState"
+      :board-mode="wallMode === 'independent'"
       @close="closeWall"
       @seek="onWallSeek"
       @layout-change="onWallLayoutChange"
       @view-state-change="onWallViewStateChange"
-    />
+      @edit-node="openNodeEditor"
+      @create-node="addBoardNode"
+      @delete-node="deleteBoardNode"
+    >
+      <div v-if="wallMode === 'independent'" class="board-badge">
+        {{ wallBoardName }}（独立分镜本）
+      </div>
+    </StoryboardWall>
+
+    <div
+      v-if="wallNodeEdit"
+      class="node-edit-mask"
+      @pointerdown.self="wallNodeEdit = null"
+    >
+      <div class="node-edit-card">
+        <header>
+          <h3>编辑分镜节点</h3>
+          <button type="button" aria-label="关闭" @click="wallNodeEdit = null">×</button>
+        </header>
+        <label class="node-edit-field">
+          名称
+          <input v-model="wallNodeEdit.title" type="text" maxlength="200" />
+        </label>
+        <label class="node-edit-field">
+          持续时间（毫秒）
+          <input v-model.number="wallNodeEdit.durationMs" type="number" min="200" max="600000" step="100" />
+        </label>
+        <label class="node-edit-field">
+          笔记
+          <textarea v-model="wallNodeEdit.note" rows="4" maxlength="20000"></textarea>
+        </label>
+        <footer>
+          <button type="button" @click="wallNodeEdit = null">取消</button>
+          <button type="button" class="primary" @click="saveNodeEdit">保存</button>
+        </footer>
+      </div>
+    </div>
 
     <transition name="toast">
       <div v-if="transcoding" class="transfer-toast">

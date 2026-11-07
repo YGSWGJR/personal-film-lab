@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { app, ipcMain, type BrowserWindow } from 'electron';
+import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import { withEnvelope } from '../../shared/ipc-result';
 import type {
@@ -47,6 +47,7 @@ import type {
   WallNodeEdgeRemoveArgs,
   WallNodeAnnotationSaveArgs,
   WallImportImageArgs,
+  WallPickImageResult,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -588,6 +589,16 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireData().wallBoards.saveNodeAnnotations(args.boardId, args.nodeId, args.items),
     ),
   );
+  ipcMain.handle(IPC.WALL_PICK_IMAGE, withEnvelope(async (): Promise<WallPickImageResult> => {
+    const win = deps.getWindow();
+    if (!win) return { path: null };
+    const result = await dialog.showOpenDialog(win, {
+      title: '导入分镜图片',
+      properties: ['openFile'],
+      filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif'] }],
+    });
+    return { path: result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0] };
+  }));
   ipcMain.handle(IPC.WALL_IMPORT_IMAGE, withEnvelope((args: WallImportImageArgs) => {
     const boards = requireData().wallBoards;
     // 校验源文件存在且为图片扩展名，再复制进 projects/boards/<boardId>/（lapian-asset 白名单）

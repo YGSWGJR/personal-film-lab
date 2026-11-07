@@ -17,17 +17,24 @@ import type { WorkspaceShot } from '../types/workspace';
  * - 视口外卡片不挂载（虚拟化）；缩放只改变换矩阵，不重排、不重取图、不写库；
  * - 打开时视频 HWND 必须已降层（由 App.vue overlayOpen 统一处理）。
  */
-const props = defineProps<{
-  shots: WorkspaceShot[];
-  viewState: WallViewState | null;
-  projectId: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    shots: WorkspaceShot[];
+    viewState: WallViewState | null;
+    projectId: string;
+    boardMode?: boolean;
+  }>(),
+  { boardMode: false },
+);
 
 const emit = defineEmits<{
   close: [];
   seek: [startMs: number];
   layoutChange: [items: WallLayoutItem[]];
   viewStateChange: [view: WallViewState];
+  editNode: [nodeId: string];
+  createNode: [kind: 'image' | 'black' | 'white'];
+  deleteNode: [nodeId: string];
 }>();
 
 const CARD_W = 220;
@@ -843,8 +850,25 @@ function openWallContextMenu(event: MouseEvent, shotId: string | null): void {
     }
     const g = groups.value.find((item) => item.shotIds.includes(shotId));
     if (g) items.push({ label: '解散所在组（' + g.name + '）', action: () => void dissolveGroup(g.groupId) });
-    items.push({ label: '删除节点（仅从墙移除布局）', danger: true, action: () => void removeNodeFromWall(shotId) });
+    if (props.boardMode) {
+      items.push({ label: '编辑节点（名称/时长/笔记）', action: () => emit('editNode', shotId) });
+      items.push({
+        label: '删除节点',
+        danger: true,
+        action: () => {
+          void removeNodeFromWall(shotId);
+          emit('deleteNode', shotId);
+        },
+      });
+    } else {
+      items.push({ label: '删除节点（仅从墙移除布局）', danger: true, action: () => void removeNodeFromWall(shotId) });
+    }
   } else {
+    if (props.boardMode) {
+      items.push({ label: '添加节点 · 导入照片', action: () => emit('createNode', 'image') });
+      items.push({ label: '添加节点 · 黑底+文本', action: () => emit('createNode', 'black') });
+      items.push({ label: '添加节点 · 白底+文本', action: () => emit('createNode', 'white') });
+    }
     items.push({ label: '整理节点', action: () => organizeNodes() });
     items.push({ label: '全选', action: () => selectAllNodes() });
     items.push({ label: '缩放到全部内容', action: () => zoomToFit() });
