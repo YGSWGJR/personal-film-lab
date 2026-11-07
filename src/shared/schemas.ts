@@ -342,6 +342,34 @@ export const wallGroupDissolveArgsSchema = z.object({
   groupId: z.string().min(1),
 });
 
+const wallAnnotationDataSchema = z.looseObject({
+  pts: z.array(z.object({ x: z.number().finite(), y: z.number().finite() })).optional(),
+  x: z.number().finite().optional(),
+  y: z.number().finite().optional(),
+  w: z.number().finite().optional(),
+  h: z.number().finite().optional(),
+  text: z.string().max(500).optional(),
+});
+
+export const wallAnnotationListArgsSchema = z.object({
+  projectId: z.string().min(1),
+  shotIds: z.array(z.string().min(1)).max(100_000).optional(),
+});
+
+export const wallAnnotationSaveArgsSchema = z.object({
+  projectId: z.string().min(1),
+  shotId: z.string().min(1),
+  items: z
+    .array(
+      z.object({
+        type: z.enum(['brush', 'smear', 'line', 'arrow', 'rect', 'ellipse', 'text', 'mosaic']),
+        color: z.string().min(1).max(32),
+        data: wallAnnotationDataSchema,
+      }),
+    )
+    .max(500),
+});
+
 /** S41：标签应用（按策略写库） */
 export const labelApplyArgsSchema = z.object({
   jobId: z.string().min(1),

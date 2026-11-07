@@ -180,6 +180,74 @@ export class WallRepository {
     }));
   }
 
+  /* ---------- S43 分镜PPT：镜头卡标注 ---------- */
+
+  listAnnotations(
+    projectId: string,
+    shotIds?: string[],
+  ): Record<string, Array<{ id: string; type: string; color: string; data: unknown }>> {
+    this.assertProject(projectId);
+    const out: Record<string, Array<{ id: string; type: string; color: string; data: unknown }>> = {};
+    let rows: Array<{ shot_id: string; id: string; type: string; color: string; data_json: string }>;
+    if (shotIds && shotIds.length > 0) {
+      const placeholders = shotIds.map(() => '?').join(',');
+      rows = this.db
+        .prepare(
+          `SELECT shot_id, id, type, color, data_json FROM shot_annotations
+           WHERE project_id = ? AND shot_id IN (${placeholders}) ORDER BY created_at ASC`,
+        )
+        .all(projectId, ...shotIds) as typeof rows;
+    } else {
+      rows = this.db
+        .prepare(
+          'SELECT shot_id, id, type, color, data_json FROM shot_annotations WHERE project_id = ? ORDER BY created_at ASC',
+        )
+        .all(projectId) as typeof rows;
+    }
+    for (const row of rows) {
+      let data: unknown = {};
+      try {
+        data = JSON.parse(row.data_json);
+      } catch {
+        data = {};
+      }
+      (out[row.shot_id] = out[row.shot_id] || []).push({
+        id: row.id,
+        type: row.type,
+        color: row.color,
+        data,
+      });
+    }
+    return out;
+  }
+
+  saveAnnotations(
+    projectId: string,
+    shotId: string,
+    items: Array<{ type: string; color: string; data: unknown }>,
+  ): void {
+    this.assertProject(projectId);
+    const exists = this.db.prepare('SELECT id FROM shots WHERE project_id = ? AND id = ?');
+    if (!exists.get(projectId, shotId)) {
+      throw new DataError('WALL_SHOT_NOT_IN_PROJECT', `镜头不属于该项目：${shotId}`, { shotId });
+    }
+    const TYPES = new Set(['brush', 'smear', 'line', 'arrow', 'rect', 'ellipse', 'text', 'mosaic']);
+    for (const item of items) {
+      if (!TYPES.has(item.type)) {
+        throw new DataError('WALL_ITEM_INVALID', `标注类型无效：${item.type}`, { item });
+      }
+    }
+    this.layer.transaction(() => {
+      this.db.prepare('DELETE FROM shot_annotations WHERE project_id = ? AND shot_id = ?').run(projectId, shotId);
+      const insert = this.db.prepare(
+        "INSERT INTO shot_annotations (id, project_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now') * 1000)",
+      );
+      for (const item of items) {
+        insert.run(randomUUID(), projectId, shotId, item.type, item.color, JSON.stringify(item.data ?? {}));
+      }
+    });
+  }
+
   private assertProject(projectId: string): void {
     if (!this.layer.projects.exists(projectId)) {
       throw new DataError('WALL_PROJECT_NOT_FOUND', `项目不存在：${projectId}`, { projectId });

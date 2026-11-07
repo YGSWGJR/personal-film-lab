@@ -96,6 +96,8 @@ export const IPC = {
   WALL_LIST_GROUPS: 'wall:listGroups',
   WALL_CREATE_GROUP: 'wall:createGroup',
   WALL_DISSOLVE_GROUP: 'wall:dissolveGroup',
+  WALL_LIST_ANNOTATIONS: 'wall:listAnnotations',
+  WALL_SAVE_ANNOTATIONS: 'wall:saveAnnotations',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',

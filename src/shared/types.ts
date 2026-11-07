@@ -331,6 +331,8 @@ export interface WallApi {
   listGroups(args: WallEdgeListArgs): Promise<IpcResult<WallGroup[]>>;
   createGroup(args: WallGroupCreateArgs): Promise<IpcResult<WallGroup>>;
   dissolveGroup(args: WallGroupDissolveArgs): Promise<IpcResult<void>>;
+  listAnnotations(args: WallAnnotationListArgs): Promise<IpcResult<Record<string, WallAnnotation[]>>>;
+  saveAnnotations(args: WallAnnotationSaveArgs): Promise<IpcResult<void>>;
 }
 
 export interface WorkspaceState {
@@ -1022,6 +1024,42 @@ export interface WallGroupCreateArgs {
 export interface WallGroupDissolveArgs {
   projectId: string;
   groupId: string;
+}
+
+export type WallAnnotationType =
+  | 'brush'
+  | 'smear'
+  | 'line'
+  | 'arrow'
+  | 'rect'
+  | 'ellipse'
+  | 'text'
+  | 'mosaic';
+
+/** 归一化标注（x: 0~100, y: 0~56.25，相对 16:9 画面） */
+export interface WallAnnotation {
+  id: string;
+  type: WallAnnotationType;
+  color: string;
+  data: {
+    pts?: Array<{ x: number; y: number }>;
+    x?: number;
+    y?: number;
+    w?: number;
+    h?: number;
+    text?: string;
+  };
+}
+
+export interface WallAnnotationListArgs {
+  projectId: string;
+  shotIds?: string[];
+}
+
+export interface WallAnnotationSaveArgs {
+  projectId: string;
+  shotId: string;
+  items: Array<Omit<WallAnnotation, 'id'>>;
 }
 
 /** 分镜墙视图状态（缩放/平移），按项目存 settings.json，不进数据库 */

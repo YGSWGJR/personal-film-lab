@@ -45,6 +45,31 @@ const groups = ref<WallGroup[]>([]);
 const selectedIds = ref<Set<string>>(new Set());
 const pendingEdge = ref<{ from: string; x: number; y: number } | null>(null);
 const edgeHint = ref('');
+/* S43 分镜PPT 放映 + 镜头卡标注 */
+type AnnType = 'brush' | 'smear' | 'line' | 'arrow' | 'rect' | 'ellipse' | 'text' | 'mosaic';
+interface Ann {
+  id: string;
+  type: AnnType;
+  color: string;
+  data: { pts?: Array<{ x: number; y: number }>; x?: number; y?: number; w?: number; h?: number; text?: string };
+}
+const player = ref({
+  open: false,
+  scope: [] as WorkspaceShot[],
+  idx: 0,
+  single: false,
+  playing: false,
+});
+const annotations = ref<Map<string, Ann[]>>(new Map());
+const annTool = ref<AnnType | 'select' | 'eraser'>('brush');
+const annColor = ref('#ff5a5a');
+const annSel = ref<Ann | null>(null);
+const annDrafting = ref<{ card: WorkspaceShot; o: Ann } | null>(null);
+const playerTrackEl = ref<HTMLElement | null>(null);
+const playProgress = ref(0);
+const ANNC = ['#ff5a5a', '#ffd23d', '#3ddc84', '#5aa2ff', '#ffffff'];
+let annSeq = 1;
+let playRaf = 0;
 const stageW = ref(1280);
 const stageH = ref(720);
 const draggingId = ref<string | null>(null);
@@ -147,6 +172,8 @@ onMounted(() => {
   ensureLayout();
   void reloadGraph();
   window.addEventListener('resize', onWindowResize);
+  window.addEventListener('keydown', onGlobalKey);
+  window.addEventListener('keyup', onGlobalKeyUp);
 });
 
 async function reloadGraph(): Promise<void> {
@@ -171,6 +198,47 @@ function applyInitialState(): void {
 
 function onWindowResize(): void {
   measureStage();
+}
+
+function onGlobalKey(e: KeyboardEvent): void {
+  if (player.value.open) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closePlayer();
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      playerMove(1);
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      playerMove(-1);
+      return;
+    }
+    const map: Record<string, string> = {
+      '1': 'brush', '2': 'smear', '3': 'line', '4': 'arrow', '5': 'rect',
+      '6': 'ellipse', '7': 'text', '8': 'mosaic', '9': 'eraser', a: 'select',
+    };
+    const k = e.key.toLowerCase();
+    if (map[k]) {
+      e.preventDefault();
+      annTool.value = map[k] as AnnType | 'select' | 'eraser';
+    }
+    return;
+  }
+  if (e.code === 'Space') spaceDown = true;
+  if (e.key === '0' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    resetView();
+  }
+  if (e.key === '+' || e.key === '=') zoomBy(1.2);
+  if (e.key === '-') zoomBy(1 / 1.2);
+}
+
+function onGlobalKeyUp(e: KeyboardEvent): void {
+  if (e.code === 'Space') spaceDown = false;
 }
 
 /* ---------- 连线渲染（世界坐标，SVG 曲线 + 箭头） ---------- */
@@ -297,6 +365,281 @@ function onPortDown(event: PointerEvent, shotId: string): void {
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
 }
+
+/* ---------- S43 分镜PPT 放映 ---------- */
+const ANN_TOOLS: Array<{ k: AnnType | 'select' | 'eraser'; n: string; key: string }> = [
+  { k: 'brush', n: '画笔', key: '1' },
+  { k: 'smear', n: '涂抹', key: '2' },
+  { k: 'line', n: '直线', key: '3' },
+  { k: 'arrow', n: '箭头', key: '4' },
+  { k: 'rect', n: '矩形', key: '5' },
+  { k: 'ellipse', n: '圆', key: '6' },
+  { k: 'text', n: '文字', key: '7' },
+  { k: 'mosaic', n: '马赛克', key: '8' },
+  { k: 'eraser', n: '橡皮', key: '9' },
+  { k: 'select', n: '选择', key: 'A' },
+];
+
+/** 作用域：组内沿边可达（不跨分组）；无组=全画布连通分量；孤卡=单张 */
+function playerScope(startId: string): WorkspaceShot[] {
+  const g = groups.value.find((item) => item.shotIds.includes(startId));
+  const poolIds = g ? g.shotIds : props.shots.map((item) => item.id);
+  const pool = new Set(poolIds);
+  const adj = new Map<string, Array<string>>();
+  for (const id of poolIds) adj.set(id, []);
+  for (const e of edges.value) {
+    if (pool.has(e.fromShotId) && pool.has(e.toShotId)) {
+      adj.get(e.fromShotId)?.push(e.toShotId);
+      adj.get(e.toShotId)?.push(e.fromShotId);
+    }
+  }
+  const seen = new Set<string>([startId]);
+  const order: string[] = [startId];
+  let frontier: string[] = [startId];
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const cur of frontier) {
+      for (const nb of adj.get(cur) ?? []) {
+        if (!seen.has(nb)) {
+          seen.add(nb);
+          order.push(nb);
+          next.push(nb);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return order
+    .map((id) => props.shots.find((item) => item.id === id))
+    .filter((item): item is WorkspaceShot => item !== undefined);
+}
+
+async function openPlayer(startId: string): Promise<void> {
+  const scope = playerScope(startId);
+  if (scope.length === 0) return;
+  player.value = {
+    open: true,
+    scope,
+    idx: Math.max(0, scope.findIndex((item) => item.id === startId)),
+    single: false,
+    playing: false,
+  };
+  annSel.value = null;
+  playProgress.value = 0;
+  const result = await window.api.wall.listAnnotations({
+    projectId: props.projectId,
+    shotIds: scope.map((item) => item.id),
+  });
+  if (result.ok) annotations.value = new Map(Object.entries(result.data));
+}
+
+const playerScopeLabel = computed(() => {
+  if (player.value.scope.length === 0) return '';
+  const cur = player.value.scope[player.value.idx];
+  const g = groups.value.find((item) => item.shotIds.includes(cur.id));
+  return g ? '作用域：' + g.name + '（组内 ' + player.value.scope.length + ' 张，不跨组）' : '作用域：孤立卡（仅此一张）';
+});
+
+function closePlayer(): void {
+  stopPlay();
+  player.value.open = false;
+  for (const shot of player.value.scope) refreshThumbAnn(shot.id);
+}
+
+function playerMove(d: number): void {
+  const n = player.value.idx + d;
+  if (n < 0 || n >= player.value.scope.length) return;
+  player.value.idx = n;
+  annSel.value = null;
+  stopPlay();
+}
+
+function stopPlay(): void {
+  player.value.playing = false;
+  if (playRaf) cancelAnimationFrame(playRaf);
+  playRaf = 0;
+  playProgress.value = 0;
+}
+function startPlay(): void {
+  const shot = player.value.scope[player.value.idx];
+  if (!shot) return;
+  playT0 = performance.now();
+  const dur = Math.max(400, shot.durationMs);
+  const tick = (t: number): void => {
+    if (!player.value.playing) return;
+    const k = Math.min(1, (t - playT0) / dur);
+    playProgress.value = k;
+    if (k < 1) {
+      playRaf = requestAnimationFrame(tick);
+    } else if (player.value.idx < player.value.scope.length - 1) {
+      player.value.idx += 1;
+      annSel.value = null;
+      startPlay();
+    } else {
+      stopPlay();
+    }
+  };
+  playRaf = requestAnimationFrame(tick);
+}
+let playT0 = 0;
+
+/* ---------- 标注（归一化坐标，宿主=镜头卡；马赛克置底渲染；保存后墙卡回显） ---------- */
+function annListOf(shotId: string): Ann[] {
+  let list = annotations.value.get(shotId);
+  if (!list) {
+    list = [];
+    annotations.value.set(shotId, list);
+  }
+  return list;
+}
+function annMarkup(shotId: string, interactive: boolean): string {
+  const list = annListOf(shotId);
+  const mosaic = list.filter((o) => o.type === 'mosaic');
+  const rest = list.filter((o) => o.type !== 'mosaic');
+  let out = '';
+  const pts2str = (pts: Array<{ x: number; y: number }>): string =>
+    pts.map((p) => p.x.toFixed(2) + ',' + p.y.toFixed(2)).join(' ');
+  const wrap = (o: Ann, inner: string): string =>
+    '<g data-oid="' + o.id + '"' + (interactive && annSel.value && annSel.value.id === o.id ? ' class="sbg-sel"' : '') + '>' + inner + '</g>';
+  for (const o of [...mosaic, ...rest]) {
+    const d = o.data;
+    if (o.type === 'mosaic' && d.x !== undefined && d.y !== undefined && d.w !== undefined && d.h !== undefined) {
+      let cells = '';
+      const n = 5;
+      const r = 3;
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < r; j++) {
+          const hue = (Math.round(d.x * 7) + i * 13 + j * 29) % 360;
+          cells += '<rect x="' + (d.x + (i * d.w) / n).toFixed(2) + '" y="' + (d.y + (j * d.h) / r).toFixed(2) + '" width="' + (d.w / n + 0.06).toFixed(2) + '" height="' + (d.h / r + 0.06).toFixed(2) + '" fill="hsl(' + hue + ',18%,' + (30 + ((i + j) % 3) * 13) + '%)"/>';
+        }
+      }
+      out += wrap(o, cells + '<rect x="' + d.x + '" y="' + d.y + '" width="' + d.w + '" height="' + d.h + '" fill="none" stroke="rgba(255,255,255,.4)" stroke-width=".35" vector-effect="non-scaling-stroke"/>');
+    } else if ((o.type === 'brush' || o.type === 'smear') && d.pts) {
+      out += wrap(o, '<polyline points="' + pts2str(d.pts) + '" fill="none" stroke="' + o.color + '" stroke-width="' + (o.type === 'smear' ? 3.4 : 1.5) + '" stroke-linecap="round" stroke-linejoin="round"/>');
+    } else if (o.type === 'line' && d.pts && d.pts.length >= 2) {
+      out += wrap(o, '<line x1="' + d.pts[0].x + '" y1="' + d.pts[0].y + '" x2="' + d.pts[1].x + '" y2="' + d.pts[1].y + '" stroke="' + o.color + '" stroke-width="1.7"/>');
+    } else if (o.type === 'arrow' && d.pts && d.pts.length >= 2) {
+      const a = d.pts[0];
+      const b = d.pts[1];
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      const L = 2.6;
+      const Wd = 1.4;
+      const p1 = (b.x - L * Math.cos(ang) + Wd * Math.sin(ang)).toFixed(2) + ',' + (b.y - L * Math.sin(ang) - Wd * Math.cos(ang)).toFixed(2);
+      const p2 = (b.x - L * Math.cos(ang) - Wd * Math.sin(ang)).toFixed(2) + ',' + (b.y - L * Math.sin(ang) + Wd * Math.cos(ang)).toFixed(2);
+      out += wrap(o, '<line x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '" stroke="' + o.color + '" stroke-width="1.7"/><polygon points="' + b.x + ',' + b.y + ' ' + p1 + ' ' + p2 + '" fill="' + o.color + '"/>');
+    } else if (o.type === 'rect' && d.pts && d.pts.length >= 2) {
+      out += wrap(o, '<rect x="' + Math.min(d.pts[0].x, d.pts[1].x) + '" y="' + Math.min(d.pts[0].y, d.pts[1].y) + '" width="' + Math.abs(d.pts[1].x - d.pts[0].x) + '" height="' + Math.abs(d.pts[1].y - d.pts[0].y) + '" fill="none" stroke="' + o.color + '" stroke-width="1.7"/>');
+    } else if (o.type === 'ellipse' && d.pts && d.pts.length >= 2) {
+      out += wrap(o, '<ellipse cx="' + (d.pts[0].x + d.pts[1].x) / 2 + '" cy="' + (d.pts[0].y + d.pts[1].y) / 2 + '" rx="' + Math.abs(d.pts[1].x - d.pts[0].x) / 2 + '" ry="' + Math.abs(d.pts[1].y - d.pts[0].y) / 2 + '" fill="none" stroke="' + o.color + '" stroke-width="1.7"/>');
+    } else if (o.type === 'text' && d.pts && d.pts.length >= 1) {
+      out += wrap(o, '<text x="' + d.pts[0].x + '" y="' + d.pts[0].y + '" font-size="3.4" fill="' + o.color + '">' + (d.text ?? '').replace(/</g, '&lt;') + '</text>');
+    }
+  }
+  return out;
+}
+function refreshThumbAnn(shotId: string): void {
+  const el = document.getElementById('tann-' + shotId);
+  if (!el) return;
+  el.innerHTML = '<svg class="sbg-tann" viewBox="0 0 100 56.25" preserveAspectRatio="none">' + annMarkup(shotId, false) + '</svg>';
+}
+function persistAnn(shotId: string): void {
+  const list = annListOf(shotId);
+  void window.api.wall
+    .saveAnnotations({ projectId: props.projectId, shotId, items: list.map((o) => ({ type: o.type, color: o.color, data: o.data })) })
+    .then(function () {
+      refreshThumbAnn(shotId);
+    });
+}
+
+function curAnnSvg(): SVGElement | null {
+  const slide = playerTrackEl.value ? playerTrackEl.value.children[player.value.idx] : null;
+  return slide ? ((slide as HTMLElement).querySelector('.sbg-annlayer') as SVGElement | null) : null;
+}
+function annSlidePos(event: PointerEvent, svg: SVGElement): { x: number; y: number } {
+  const rect = svg.getBoundingClientRect();
+  return { x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 56.25 };
+}
+function onAnnPointerDown(event: PointerEvent): void {
+  const svg = curAnnSvg();
+  const shot = player.value.scope[player.value.idx];
+  if (!svg || !shot) return;
+  const p0 = annSlidePos(event, svg);
+  if (annTool.value === 'select' || annTool.value === 'eraser') {
+    const hit = (event.target as Element).closest ? ((event.target as Element).closest('[data-oid]') as SVGElement | null) : null;
+    const oid = hit ? hit.dataset.oid : null;
+    const o = oid ? annListOf(shot.id).find(function (x) { return x.id === oid; }) : null;
+    if (o) {
+      if (annTool.value === 'eraser') {
+        annotations.value.set(shot.id, annListOf(shot.id).filter(function (x) { return x !== o; }));
+        persistAnn(shot.id);
+      } else {
+        annSel.value = annSel.value && annSel.value.id === o.id ? null : o;
+      }
+    } else if (annTool.value === 'select' && annSel.value) {
+      annSel.value = null;
+    }
+    return;
+  }
+  if (annTool.value === 'text') {
+    annListOf(shot.id).push({ id: 'a' + Date.now() + annSeq++, type: 'text', color: annColor.value, data: { pts: [p0], text: '标注 ' + annSeq } });
+    persistAnn(shot.id);
+    return;
+  }
+  if (annTool.value === 'mosaic') {
+    annListOf(shot.id).push({ id: 'a' + Date.now() + annSeq++, type: 'mosaic', color: annColor.value, data: { x: p0.x - 8, y: p0.y - 4, w: 16, h: 8 } });
+    persistAnn(shot.id);
+    return;
+  }
+  const o: Ann = { id: 'a' + Date.now() + annSeq++, type: annTool.value as AnnType, color: annColor.value, data: { pts: [p0, p0] } };
+  annListOf(shot.id).push(o);
+  annDrafting.value = { card: shot, o: o };
+  try {
+    svg.setPointerCapture(event.pointerId);
+  } catch {
+    /* ignore */
+  }
+}
+function onAnnPointerMove(event: PointerEvent): void {
+  const drafting = annDrafting.value;
+  if (!drafting) return;
+  const svg = curAnnSvg();
+  if (!svg) return;
+  const p = annSlidePos(event, svg);
+  const o = drafting.o;
+  if ((o.type === 'brush' || o.type === 'smear') && o.data.pts) {
+    const pts = o.data.pts;
+    if (pts.length === 2 && pts[0].x === pts[1].x && pts[0].y === pts[1].y) o.data.pts = [pts[0], p];
+    else pts.push(p);
+  } else if (o.data.pts && o.data.pts.length >= 2) {
+    o.data.pts[1] = p;
+  }
+  refreshPlayerAnn(drafting.card);
+}
+function onAnnPointerUp(): void {
+  const drafting = annDrafting.value;
+  if (!drafting) return;
+  const o = drafting.o;
+  if (o.type !== 'brush' && o.type !== 'smear' && o.data.pts && o.data.pts.length >= 2) {
+    if (Math.abs(o.data.pts[0].x - o.data.pts[1].x) < 0.4 && Math.abs(o.data.pts[0].y - o.data.pts[1].y) < 0.4) {
+      annotations.value.set(drafting.card.id, annListOf(drafting.card.id).filter(function (x) { return x !== o; }));
+    }
+  }
+  annDrafting.value = null;
+  persistAnn(drafting.card.id);
+}
+function refreshPlayerAnn(card: WorkspaceShot): void {
+  const svg = curAnnSvg();
+  if (svg && svg.dataset.card === card.id) svg.innerHTML = annMarkup(card.id, true);
+}
+
+const playerTrackStyle = computed(() => {
+  const slide = playerTrackEl.value?.children[0] as HTMLElement | undefined;
+  const sw = slide ? slide.offsetWidth + 24 : 0;
+  const stW = playerTrackEl.value?.parentElement?.clientWidth ?? 0;
+  if (!sw || !stW) return {};
+  const off = stW / 2 - sw / 2 - player.value.idx * sw;
+  return { transform: `translateX(${off}px)` };
+});
 
 /* ---------- 分组：Shift 多选 → 成组（跨组边由仓储自动断） / 解散 ---------- */
 function toggleSelect(shotId: string, event: PointerEvent): void {
@@ -506,8 +849,7 @@ function onCardClick(shot: WorkspaceShot, event: PointerEvent): void {
 }
 
 function onCardDblClick(shot: WorkspaceShot): void {
-  emit('seek', shot.startMs);
-  emit('close');
+  void openPlayer(shot.id);
 }
 
 function fmtDuration(ms: number): string {
@@ -623,6 +965,85 @@ function fmtDuration(ms: number): string {
       <button type="button" class="wall-hud-btn" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
     </div>
     <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击卡片回到时间线定位 · Ctrl+0 复位</div>
+    <!-- S43 分镜PPT 放映层 -->
+    <div v-if="player.open" class="wall-ppt" :class="{ 'wall-ppt-single': player.single }">
+      <div class="wall-ppt-bar">
+        <div class="wall-ppt-tools">
+          <button
+            v-for="t in ANN_TOOLS"
+            :key="t.k"
+            type="button"
+            class="wall-ppt-tool"
+            :class="{ on: annTool === t.k }"
+            @click="annTool = t.k"
+          >
+            {{ t.n }}<kbd>{{ t.key }}</kbd>
+          </button>
+        </div>
+        <div class="wall-ppt-colors">
+          <button
+            v-for="c in ANNC"
+            :key="c"
+            type="button"
+            class="wall-sw"
+            :class="{ on: annColor === c }"
+            :style="{ background: c }"
+            :aria-label="'颜色 ' + c"
+            @click="annColor = c; annSel ? (annSel.color = c) : null"
+          ></button>
+          <input v-model="annColor" type="color" aria-label="自定义颜色" />
+        </div>
+        <div class="wall-ppt-actions">
+          <button type="button" class="wall-ppt-btn" @click="player.single = !player.single">
+            {{ player.single ? '预览模式' : '单张模式' }}
+          </button>
+          <button type="button" class="wall-ppt-btn acc" @click="player.playing ? stopPlay() : ((player.playing = true), startPlay())">
+            {{ player.playing ? '‖ 停止' : '▶ 跟随播放' }}
+          </button>
+          <span class="wall-ppt-count">{{ player.idx + 1 }} / {{ player.scope.length }}</span>
+          <button type="button" class="wall-ppt-close" aria-label="退出放映" @click="closePlayer">×</button>
+        </div>
+      </div>
+      <div class="wall-ppt-stage">
+        <button type="button" class="wall-ppt-nav l" :disabled="player.idx === 0" aria-label="上一张" @click="playerMove(-1)">‹</button>
+        <div ref="playerTrackEl" class="wall-ppt-track" :style="playerTrackStyle">
+          <div
+            v-for="(shot, i) in player.scope"
+            :key="shot.id"
+            class="wall-ppt-slide"
+            :class="{ cur: i === player.idx }"
+          >
+            <div class="wall-ppt-frame">
+              <img :src="shot.thumbnail" :alt="shot.title" draggable="false" />
+              <svg
+                class="sbg-annlayer"
+                viewBox="0 0 100 56.25"
+                preserveAspectRatio="none"
+                :data-card="shot.id"
+                @pointerdown="onAnnPointerDown"
+                @pointermove="onAnnPointerMove"
+                @pointerup="onAnnPointerUp"
+              >
+                <g v-html="annMarkup(shot.id, true)"></g>
+              </svg>
+            </div>
+            <div class="wall-ppt-meta">
+              <b>#{{ String(shot.index).padStart(2, '0') }}</b>
+              <span v-if="shot.shotSize" class="wall-chip">{{ shot.shotSize }}</span>
+              <span v-if="shot.cameraMethod" class="wall-chip">{{ shot.cameraMethod }}</span>
+              <span class="wall-dur">{{ (shot.durationMs / 1000).toFixed(1) }}s</span>
+              <span class="wall-note">{{ shot.remark ?? shot.title }}</span>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="wall-ppt-nav r" :disabled="player.idx >= player.scope.length - 1" aria-label="下一张" @click="playerMove(1)">›</button>
+        <div class="wall-ppt-progress" :hidden="!player.playing"><i :style="{ width: (playProgress * 100) + '%' }"></i></div>
+      </div>
+      <div class="wall-ppt-foot">
+        <span class="wall-ppt-scope">{{ playerScopeLabel }}</span>
+        <span>← → 沿连线切换 · 1~9 工具 · A 选择 · 拖动绘制 · Esc 退出 · 标注自动保存并回显到分镜墙</span>
+      </div>
+    </div>
     <button type="button" class="wall-close" aria-label="关闭分镜墙" @click="emit('close')">×</button>
   </section>
 </template>
@@ -893,6 +1314,269 @@ function fmtDuration(ms: number): string {
   font-size: 11px;
   max-width: calc(100% - 24px);
 }
+
+.wall-ppt {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: #05070c;
+}
+
+.wall-ppt-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, #2a3a55);
+  background: var(--bg-panel, #131a26);
+}
+
+.wall-ppt-tools {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.wall-ppt-tool {
+  position: relative;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 7px;
+  background: var(--surface-2, #182233);
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.wall-ppt-tool.on {
+  border-color: var(--blue-hi, #5aa2ff);
+  background: rgba(90, 162, 255, 0.22);
+}
+
+.wall-ppt-tool kbd {
+  position: absolute;
+  top: -7px;
+  right: -5px;
+  padding: 0 3px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 4px;
+  background: var(--bg-deep, #0a0e16);
+  color: var(--text-muted, #93a4bd);
+  font-size: 9px;
+}
+
+.wall-ppt-colors {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.wall-sw {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.wall-sw.on {
+  border-color: #fff;
+}
+
+.wall-ppt-colors input[type='color'] {
+  width: 22px;
+  height: 22px;
+  padding: 1px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 5px;
+  background: var(--surface-2, #182233);
+  cursor: pointer;
+}
+
+.wall-ppt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.wall-ppt-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 7px;
+  background: var(--surface-2, #182233);
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.wall-ppt-btn.acc {
+  border-color: var(--green, #34d399);
+  color: var(--green, #34d399);
+}
+
+.wall-ppt-count {
+  font-size: 12px;
+  color: var(--text-muted, #93a4bd);
+  font-variant-numeric: tabular-nums;
+}
+
+.wall-ppt-close {
+  width: 28px;
+  height: 26px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 7px;
+  background: var(--surface-2, #182233);
+  color: inherit;
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.wall-ppt-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  overflow: hidden;
+}
+
+.wall-ppt-track {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  transition: transform 0.32s cubic-bezier(0.25, 0.1, 0.25, 1);
+  will-change: transform;
+}
+
+.wall-ppt-slide {
+  flex: 0 0 auto;
+  width: 62%;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #000;
+  opacity: 0.35;
+  transform: scale(0.72);
+  transition: transform 0.32s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.32s;
+}
+
+.wall-ppt-slide.cur {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.wall-ppt-single .wall-ppt-slide {
+  width: 82%;
+}
+
+.wall-ppt-single .wall-ppt-slide:not(.cur) {
+  display: none;
+}
+
+.wall-ppt-frame {
+  position: relative;
+  aspect-ratio: 16 / 9;
+}
+
+.wall-ppt-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.sbg-annlayer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.sbg-annlayer[data-oid] .sbg-sel,
+.sbg-sel {
+  stroke-dasharray: 2 1.4;
+}
+
+.wall-ppt-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border, #2a3a55);
+  background: var(--bg-panel, #131a26);
+  color: var(--text-muted, #93a4bd);
+  font-size: 11px;
+}
+
+.wall-ppt-meta b {
+  color: var(--text-soft, #e6edf7);
+  font-weight: 500;
+}
+
+.wall-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wall-ppt-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 4;
+  width: 44px;
+  height: 64px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 10px;
+  background: rgba(19, 26, 38, 0.8);
+  color: inherit;
+  cursor: pointer;
+  font-size: 26px;
+  transform: translateY(-50%);
+}
+
+.wall-ppt-nav.l { left: 10px; }
+.wall-ppt-nav.r { right: 10px; }
+.wall-ppt-nav:disabled { opacity: 0.25; cursor: default; }
+
+.wall-ppt-progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 6;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.wall-ppt-progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--green, #34d399);
+}
+
+.wall-ppt-foot {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border, #2a3a55);
+  background: var(--bg-panel, #131a26);
+  color: var(--text-muted, #93a4bd);
+  font-size: 11px;
+}
+
+.wall-ppt-scope { color: var(--blue-hi, #5aa2ff); }
 
 .wall-close {
   position: absolute;

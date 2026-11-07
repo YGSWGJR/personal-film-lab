@@ -6,6 +6,7 @@ import manualFieldsSql from './005_manual_fields.sql?raw';
 import shotLayoutSql from './006_shot_layout.sql?raw';
 import shotEdgesSql from './007_shot_edges.sql?raw';
 import shotGroupsSql from './008_shot_groups.sql?raw';
+import shotAnnotationsSql from './009_shot_annotations.sql?raw';
 
 export interface Migration {
   version: number;
@@ -22,4 +23,5 @@ export const MIGRATIONS: Migration[] = [
   { version: 6, sql: shotLayoutSql },
   { version: 7, sql: shotEdgesSql },
   { version: 8, sql: shotGroupsSql },
+  { version: 9, sql: shotAnnotationsSql },
 ];

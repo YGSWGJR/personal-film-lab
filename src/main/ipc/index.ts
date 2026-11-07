@@ -30,6 +30,8 @@ import type {
   WallEdgeListArgs,
   WallGroupCreateArgs,
   WallGroupDissolveArgs,
+  WallAnnotationListArgs,
+  WallAnnotationSaveArgs,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -491,6 +493,18 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     IPC.WALL_DISSOLVE_GROUP,
     withEnvelope((args: WallGroupDissolveArgs): void =>
       requireData().wall.dissolveGroup(args.projectId, args.groupId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_LIST_ANNOTATIONS,
+    withEnvelope((args: WallAnnotationListArgs) =>
+      requireData().wall.listAnnotations(args.projectId, args.shotIds),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_SAVE_ANNOTATIONS,
+    withEnvelope((args: WallAnnotationSaveArgs): void =>
+      requireData().wall.saveAnnotations(args.projectId, args.shotId, args.items),
     ),
   );
 
