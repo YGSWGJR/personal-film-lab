@@ -335,11 +335,13 @@ async function removeEdge(fromShotId: string, toShotId: string): Promise<void> {
 /* ---------- 端口拖线（1.2 防误触：拖动距离超 1.2 卡宽并落在目标卡上才建立） ---------- */
 let edgeDrag: { from: string; moved: boolean } | null = null;
 const edgeDragFrom = ref<string | null>(null);
+let edgeDragSide: 'out' | 'in' = 'out';
 
-function onPortDown(event: PointerEvent, shotId: string): void {
+function onPortDown(event: PointerEvent, shotId: string, side: 'out' | 'in' = 'out'): void {
   event.stopPropagation();
   if (event.button !== 0) return;
   edgeDrag = { from: shotId, moved: false };
+  edgeDragSide = side;
   edgeDragFrom.value = shotId;
   pendingEdge.value = { from: shotId, x: 0, y: 0 };
   const stage = stageEl.value;
@@ -373,15 +375,18 @@ function onPortDown(event: PointerEvent, shotId: string): void {
     const dist = start ? Math.hypot(wx - start.x, wy - start.y) : 0;
     if (dist < CARDW * 1.2) return;
     const kind: WallEdgeKind = ev.shiftKey ? 'dash' : 'solid';
+    // out 端口：this -> target；in 端口：target -> this（本卡的输入来自目标卡）
+    const [fromId, toId] =
+      edgeDragSide === 'in' ? [target.shot.id, from] : [from, target.shot.id];
     const result = await window.api.wall.addEdge({
       projectId: props.projectId,
-      fromShotId: from,
-      toShotId: target.shot.id,
+      fromShotId: fromId,
+      toShotId: toId,
       kind,
     });
     if (result.ok) {
       edges.value = edges.value.filter(
-        (e) => !(e.fromShotId === from && e.toShotId === target.shot.id),
+        (e) => !(e.fromShotId === fromId && e.toShotId === toId),
       );
       edges.value.push(result.data);
     } else {
@@ -1224,7 +1229,11 @@ function fmtDuration(ms: number): string {
         @dblclick="onCardDblClick(item.shot)"
         @contextmenu.prevent="openWallContextMenu($event, item.shot.id)"
       >
-        <span class="wall-port-in" aria-hidden="true"></span>
+        <span
+          class="wall-port-in"
+          title="拖到另一张卡：建立它到本卡的连线"
+          @pointerdown="onPortDown($event, item.shot.id, 'in')"
+        ></span>
         <span class="wall-port" title="拖到另一张卡建立连线（Shift=备选虚线）" @pointerdown="onPortDown($event, item.shot.id)"></span>
         <div class="wall-thumb">
           <img :src="item.shot.thumbnail" :alt="item.shot.title" draggable="false" />
@@ -1245,10 +1254,10 @@ function fmtDuration(ms: number): string {
     </div>
     <div v-if="edgeHint" class="wall-edge-hint">{{ edgeHint }}</div>
     <div class="wall-hud">
-      <button type="button" class="wall-hud-btn" aria-label="缩小" @click.stop="zoomBy(1 / 1.2)">−</button>
+      <button type="button" class="wall-hud-btn" title="缩小画布" aria-label="缩小" @click.stop="zoomBy(1 / 1.2)">−</button>
       <span class="wall-zval">{{ Math.round(scale * 100) }}%</span>
-      <button type="button" class="wall-hud-btn" aria-label="放大" @click.stop="zoomBy(1.2)">+</button>
-      <button type="button" class="wall-hud-btn" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
+      <button type="button" class="wall-hud-btn" title="放大画布" aria-label="放大" @click.stop="zoomBy(1.2)">+</button>
+      <button type="button" class="wall-hud-btn" title="复位视图（Ctrl+0）" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
       <button type="button" class="wall-hud-btn wall-export" title="按连线顺序导出镜头图片" @click.stop="exportImages">⇩</button>
       <button type="button" class="wall-hud-btn" title="整理节点（连线链成行，未连线按镜号排下方）" @click.stop="organizeNodes">⌗</button>
     </div>
@@ -1259,6 +1268,10 @@ function fmtDuration(ms: number): string {
       :items="ctxMenu.items"
       @close="ctxMenu.visible = false"
     />
+    <div v-if="props.boardMode && laidShots.length === 0" class="wall-empty-guide">
+      <b>空白分镜本</b>
+      <span>右键画布空白处 → 添加节点（导入照片 / 黑白底+文本框）；拖动卡片右侧端口连线编排顺序</span>
+    </div>
     <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击卡片回到时间线定位 · Ctrl+0 复位</div>
     <!-- S43 分镜PPT 放映层 -->
     <div v-if="player.open" class="wall-ppt" :class="{ 'wall-ppt-single': player.single }">
@@ -1641,6 +1654,32 @@ function fmtDuration(ms: number): string {
   color: var(--text-muted, #93a4bd);
   font-size: 11px;
   max-width: calc(100% - 24px);
+}
+
+.wall-empty-guide {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 22px;
+  border: 1px dashed var(--border, #2a3a55);
+  border-radius: 12px;
+  background: rgba(13, 20, 32, 0.8);
+  text-align: center;
+  pointer-events: none;
+}
+
+.wall-empty-guide b {
+  color: var(--blue-hi, #5aa2ff);
+  font-weight: 500;
+}
+
+.wall-empty-guide span {
+  color: var(--text-muted, #93a4bd);
+  font-size: 12px;
 }
 
 .wall-ppt {

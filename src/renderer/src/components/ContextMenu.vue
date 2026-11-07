@@ -51,8 +51,20 @@ function runItem(item: ContextMenuItem): void {
   item.action();
 }
 
+let openedAt = 0;
+
+watch(
+  () => props.visible,
+  (visible) => {
+    if (visible) openedAt = Date.now();
+  },
+);
+
 function onPointerDown(event: PointerEvent): void {
   if (!props.visible || menu.value?.contains(event.target as Node)) return;
+  // 0.3.2 修复：右键的 pointerdown 先于 contextmenu 事件到达，
+  // 刚打开的菜单会被同一次右键的 pointerdown 立即关闭（表现为菜单无法召唤）
+  if (Date.now() - openedAt < 350) return;
   emit('close');
 }
 
