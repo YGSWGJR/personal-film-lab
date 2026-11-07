@@ -350,7 +350,10 @@ const overlayOpen = computed(
     statsOpen.value ||
     importWizardOpen.value ||
     aiMenuOpen.value ||
-    aiAuthRequest.value !== null,
+    aiAuthRequest.value !== null ||
+    // S41 修复：标签预览弹窗与确认框也必须把视频 HWND 降层，否则被画面盖住
+    labelPreviewOpen.value ||
+    confirmState.open,
 );
 const gpuStatusText = computed(() => {
   const status = gpuStatus.value;

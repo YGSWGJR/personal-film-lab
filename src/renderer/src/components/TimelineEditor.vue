@@ -1064,7 +1064,10 @@ onBeforeUnmount(() => {
 .timeline {
   position: relative;
   display: flex;
-  flex: 0 0 auto;
+  /* 0.3.0 修复：矮窗口下允许时间线收缩，保证底部 transport 条始终可见 */
+  flex: 0 1 auto;
+  min-height: 150px;
+  overflow: hidden;
   flex-direction: column;
   border: 1px solid var(--border);
   border-top: 0;

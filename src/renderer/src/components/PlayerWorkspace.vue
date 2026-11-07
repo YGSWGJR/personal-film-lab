@@ -560,7 +560,8 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  min-height: 360px;
+  /* 0.3.0 修复：固定 360px 最小高会在矮窗口下把底部 transport 条挤出屏幕，改为随空间收缩 */
+  min-height: 96px;
   border: 1px solid var(--border);
   border-radius: 8px 8px 0 0;
   background: var(--bg-deep);
