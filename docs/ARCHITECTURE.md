@@ -1,6 +1,6 @@
 # 个人拉片工作台当前架构
 
-本文描述 `0.3.2` 的可维护架构。`S01_开发架构文档.md` 保留为早期设计基线，遇到冲突时以当前源码和本文为准。
+本文描述 `0.4.0` 的可维护架构。`S01_开发架构文档.md` 保留为早期设计基线，遇到冲突时以当前源码和本文为准。
 
 ## 进程结构
 
@@ -22,11 +22,13 @@ Renderer 不直接访问 Node、文件系统或 SQLite。新增能力先从 `src
 - `DetectService`：统一调度 OpenCV 与本地 Qwen3-VL，管理任务、预览和写库。
 - `LocalVisionService`：启动内置 Python 推理进程，分析镜头代表帧。
 - `AiAccessService`：AI 任务快照、提示词、Provider 兼容层和本地 MCP 桥。
-- `DataLayer`：SQLite 连接、迁移、事务仓储和项目包。
+- `DataLayer`：SQLite 连接、迁移、事务仓储和项目包；含 `WallRepository`（项目分镜本）与 `WallBoardsRepository`（独立分镜本：boards/nodes/edges/tags/annotations + 复合节点）。
+- `BoardExportService`：独立分镜本自动保存（board.json + assets 防抖同步到 `boardSaveDir`）与 board.json 导入。
 - `CaptureService`：截图、静帧文件和元数据。
 - `ExportService`：PDF/Word 分镜本导出。
 - `StatsService`：标签、节奏和完成度聚合。
 - `SettingsService` / `SessionService`：配置与工作现场恢复。
+- `lapian-asset` 自定义协议：按 `projects/` 根白名单暴露资产，响应带 CORS 头（渲染层把资产画进 canvas 导出需要）。
 
 ## 数据
 
@@ -48,8 +50,20 @@ Electron userData 优先使用 `G:\拉片\软件数据`，目录不可创建时�
 - `shot_tags`
 - `notes`
 - `terms`
+- 独立分镜本（迁移 010~012）：`wall_boards`、`wall_nodes`（source=image/text/composite，`parent_id` 自引用表达复合节点层级）、`wall_node_edges`、`wall_node_tags`（六类节点标签，与镜头标签同构不混表）、`wall_node_annotations`
+- 项目分镜本（迁移 006~009）：`shot_layout`、`shot_edges`、`shot_groups`、`shot_annotations`
 
 `.lapian` 项目包由 manifest、SQLite 快照和可选资源目录组成。导入时重映射冲突 ID，并对内置标签做幂等合并。
+
+## 分镜墙与独立分镜本（0.3.0~0.4.0）
+
+双轨制：**项目分镜本**基于 `shot_layout` 系（project 维度，依赖已切分镜头）；**独立分镜本**基于 `wall_boards` 系（无素材可创作，图片资产复制到 `projects/boards/<boardId>/`，经 `lapian-asset://boards/…` 协议访问）。
+
+- **时间线语义**：独立分镜本节点经 BFS 分层映射为 WorkspaceShot——同层并行节点共享同一时间段（同时发生），连线跨层才推进；复合节点整体占一个链路位，时长 = 内部子节点按内部连线 BFS 分层的总长（与主链同语义）。
+- **复合节点（组即节点）**：`createComposite` 收编 ≥2 个顶层节点（禁止嵌套），外部连线自动重路由到复合节点（内部连线保留）；`dissolveComposite` 释放成员并删除复合节点及其连线。
+- **API 分流**：`StoryboardWall` 在 board 模式下所有写操作必须走 `wall:addNodeEdge`/`wall:removeNodeEdge`/`wall:saveNodeAnnotations`/`wall:listNodeTags` 等 node 级通道（boardId = 真实分镜本 id）；项目模式走 `wall:addEdge` 等 shot 级通道。混用会因外键校验静默失败（0.4.0 修复的系统性根因）。
+- **投影模式**：`workbenchShots` 数据源切换为分镜本节点映射；编辑路由层把投影下的笔记/标签/景别写回 `wall_nodes`/`wall_node_tags`，结构编辑（拆分/合并/删除）禁用并提示回分镜墙操作。
+- **独立保存**：设置项 `boardSaveDir`（默认 `数据根\exports\boards`）；所有分镜本变更 IPC 在主进程 `boardExport.schedule(boardId)` 防抖 800ms 导出 `board-<id8>/board.json + assets/`；`wall:importBoardFile` 按 idMap 重建为新分镜本（含父子层级/连线/标签/标注与资产复制）。
 
 ## 视频处理
 
