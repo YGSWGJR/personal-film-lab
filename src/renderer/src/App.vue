@@ -302,7 +302,7 @@ const skeleton: SkeletonState = {
 };
 window.__SKELETON_STATE__ = skeleton;
 
-const selectedShot = computed(() => shots.value.find((shot) => shot.id === selectedId.value) ?? null);
+const selectedShot = computed(() => workbenchShots.value.find((shot) => shot.id === selectedId.value) ?? null);
 const selectedMergePair = computed<[WorkspaceShot, WorkspaceShot] | null>(() => {
   const primary = selectedShot.value;
   const partner = shots.value.find((shot) => shot.id === mergePartnerId.value) ?? null;
@@ -2518,6 +2518,21 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     await openIndependentBoard(null);
     return { ok: true };
   },
+  projectToggle: async (): Promise<string> => {
+    await loadBoardNodes();
+    toggleProjection();
+    if (projectedMode.value && boardShots.value.length > 0) {
+      selectedId.value = boardShots.value[0].id;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    return projectedMode.value ? 'on' : 'off';
+  },
+  projectedState: () => ({
+    projectedMode: projectedMode.value,
+    rows: document.querySelectorAll('.shot-row').length,
+    gridCells: document.querySelectorAll('.projection-grid img').length,
+    tracks: document.querySelectorAll('.board-track-block').length,
+  }),
   addTextNode: async (): Promise<string | null> => {
     const created = await window.api.wall.addNode({
       boardId: wallBoardId.value ?? '',

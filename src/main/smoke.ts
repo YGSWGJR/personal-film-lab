@@ -4867,6 +4867,9 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     boardUiOpen: result.boardOpen === true,
     boardUiCard: result.boardCard === true,
     boardUiEsc: result.boardEsc === true,
+    boardProjectedMode: result.projectedMode === true,
+    boardProjectedRows: result.projectedRows === true,
+    boardProjectedGrid: result.projectedGrid === true,
   };
 }
 
@@ -5029,6 +5032,15 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       out.boardEsc = hook.state().wallOpen === false;
+    `],
+    ['projection', `
+      const hook = window.__S43_WALL_TEST__;
+      const mode = await hook.projectToggle();
+      const ps = hook.projectedState();
+      out.projectedMode = mode === 'on' && ps.projectedMode === true;
+      out.projectedRows = ps.rows === 1;
+      out.projectedGrid = ps.gridCells === 1;
+
     `],
   ];
   const out: Record<string, any> = {};
