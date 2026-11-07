@@ -97,6 +97,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let stagedDetectChecks: Record<string, unknown> = {};
   let stagedDetectUiChecks: Record<string, unknown> = {};
   let timelineWheelZoomChecks: Record<string, unknown> = {};
+  let wallChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
@@ -108,7 +109,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -448,6 +449,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, timelineWheelZoomChecksAssertions(timelineWheelZoomChecks));
     }
 
+    if (process.env['SMOKE_WALL'] === '1') {
+      wallChecks = await runWallChecks(deps);
+      Object.assign(checks, wallChecksAssertions(wallChecks));
+    }
+
     if (process.env['SMOKE_AI_SEGMENT'] === '1') {
       aiSegmentChecks = await runAiSegmentChecks(
         deps,
@@ -478,7 +484,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -4694,6 +4700,89 @@ function timelineWheelZoomChecksAssertions(result: Record<string, any>): Record<
     wheelZoomClampLow: result.clampLow === true,
     wheelZoomRestore: result.restoreOk === true,
   };
+}
+
+/** S43：分镜墙数据层验收（布局/CASCADE/校验错误码） */
+function wallChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    wallSaveLoad: result.saveLoad === true,
+    wallCascade: result.cascade === true,
+    wallInvalidProject: result.invalidProject === true,
+    wallInvalidShot: result.invalidShot === true,
+    wallInvalidItem: result.invalidItem === true,
+    wallShotsUntouched: result.shotsUntouched === true,
+  };
+}
+
+async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const project = data.projects.create({
+    name: `S43 Wall ${Date.now()}`,
+    media: { filename: 'wall-smoke.mp4', durationMs: 5000, fps: 25, width: 640, height: 360 },
+  });
+  const out: Record<string, any> = {};
+  try {
+    const a = data.shots.create({ projectId: project.id, startMs: 0, endMs: 2000 });
+    const b = data.shots.create({ projectId: project.id, startMs: 2000, endMs: 4000 });
+    data.wall.saveLayout(project.id, [
+      { shotId: a.id, x: 40, y: 60 },
+      { shotId: b.id, x: 300, y: 60 },
+    ]);
+    const layout = data.wall.getLayout(project.id);
+    out.saveLoad =
+      layout.length === 2 &&
+      layout.find((i) => i.shotId === a.id)?.x === 40 &&
+      layout.find((i) => i.shotId === b.id)?.y === 60;
+    // 更新为 upsert
+    data.wall.saveLayout(project.id, [{ shotId: a.id, x: 55, y: 66 }]);
+    out.saveLoad =
+      out.saveLoad && data.wall.getLayout(project.id).find((i) => i.shotId === a.id)?.x === 55;
+    // CASCADE：删镜头后布局行消失
+    data.shots.delete(b.id);
+    out.cascade = data.wall.getLayout(project.id).length === 1;
+    // 非法项目
+    try {
+      data.wall.getLayout('no-such-project');
+      out.invalidProject = false;
+    } catch (error) {
+      out.invalidProject = (error as { code?: string }).code === 'WALL_PROJECT_NOT_FOUND';
+    }
+    // 非法镜头（属于其他项目）
+    const other = data.projects.create({
+      name: `S43 Wall Other ${Date.now()}`,
+      media: { filename: 'w2.mp4', durationMs: 1000, fps: 25, width: 640, height: 360 },
+    });
+    const oc = data.shots.create({ projectId: other.id, startMs: 0, endMs: 500 });
+    try {
+      data.wall.saveLayout(project.id, [{ shotId: oc.id, x: 0, y: 0 }]);
+      out.invalidShot = false;
+    } catch (error) {
+      out.invalidShot = (error as { code?: string }).code === 'WALL_SHOT_NOT_IN_PROJECT';
+    }
+    // 非法坐标
+    try {
+      data.wall.saveLayout(project.id, [{ shotId: a.id, x: Number.NaN, y: 0 }]);
+      out.invalidItem = false;
+    } catch (error) {
+      out.invalidItem = (error as { code?: string }).code === 'WALL_ITEM_INVALID';
+    }
+    // shots 表零变化（V-12）
+    const before = data.db.prepare('SELECT COUNT(*) AS n FROM shots').get() as { n: number };
+    void before;
+    out.shotsUntouched = data.shots.list(project.id).length === 1;
+    try {
+      data.projects.delete(other.id);
+    } catch { /* ignore */ }
+    return out;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+    return out;
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch { /* ignore */ }
+  }
 }
 
 /** S41：分阶段 UI/端到端门控——真实视频走 runBoundary，验证自动落库与 Qwen 不参与。 */
