@@ -4462,6 +4462,8 @@ async function runTransnetHybridChecks(
 function shotSplitChecksAssertions(result: Record<string, any>): Record<string, boolean> {
   return {
     shotSplitFrameAligned: result.frameAligned === true,
+    shotSplitIndexSequence: result.splitIndexSequence === true,
+    shotMergeIndexSequence: result.mergeIndexSequence === true,
     shotSplitFieldsInherited: result.fieldsInherited === true,
     shotSplitTagsInherited: result.tagsInherited === true,
     shotSplitNotesKeptLeft: result.notesKeptLeft === true,
@@ -5109,6 +5111,12 @@ async function runShotSplitChecks(deps: SmokeDeps): Promise<Record<string, any>>
 
     const split = data.shots.split({ projectId: project.id, shotId: first.id, cutMs: 1010 });
     out.frameAligned = split.left.endMs === 1000 && split.right.startMs === 1000;
+    // 0.3.1 A4：切分序号顺延——右段 = 左段+1，后续镜头全部 +1，无空洞
+    const seqAfter = data.shots.list(project.id).map((shot) => shot.index).sort((a, b) => a - b);
+    out.splitIndexSequence =
+      split.right.index === split.left.index + 1 &&
+      seqAfter[0] === 1 &&
+      seqAfter.every((n, i) => i === 0 || n === seqAfter[i - 1] + 1);
     out.fieldsInherited =
       split.right.shotSize === first.shotSize &&
       split.right.cameraMethod === first.cameraMethod &&
@@ -5136,6 +5144,9 @@ async function runShotSplitChecks(deps: SmokeDeps): Promise<Record<string, any>>
       shotIdA: split.left.id,
       shotIdB: split.right.id,
     }).shot;
+    const mergedSeq = data.shots.list(project.id).map((shot) => shot.index).sort((a, b) => a - b);
+    out.mergeIndexSequence =
+      mergedSeq.length > 0 && mergedSeq.every((n, i) => i === 0 || n === mergedSeq[i - 1] + 1);
     out.mergeEquivalent =
       merged.startMs === 0 &&
       merged.endMs === 2000 &&

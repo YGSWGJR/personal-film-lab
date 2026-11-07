@@ -1816,10 +1816,29 @@ async function captureStill(): Promise<void> {
   }
 }
 
+/** 0.3.1：用新静帧同步镜头缩略图（响应式更新 + 持久化到 shots.thumbnail 列） */
+function syncStillToShotThumbnail(still: Still): void {
+  if (!still.shotId) return;
+  const src = still.thumbPath ?? still.filePath;
+  if (!src) return;
+  const idx = shots.value.findIndex((item) => item.id === still.shotId);
+  if (idx < 0) return;
+  const url = assetUrlForPath(still.projectId, src);
+  if (shots.value[idx].thumbnail === url) return;
+  shots.value[idx] = { ...shots.value[idx], thumbnail: url };
+  void window.api.shot
+    .setThumbnail({ id: still.shotId, thumbnail: src })
+    .then((result) => {
+      if (!result.ok) console.warn(`[still-sync] ${result.error.code}: ${result.error.message}`);
+    });
+}
+
 function upsertStill(still: Still): void {
   const next = projectStills.value.filter((item) => item.id !== still.id);
   next.push(still);
   projectStills.value = next;
+  // 0.3.1：截静帧后同步镜头缩略图（镜头列表 / 分镜墙卡 / 放映大图共用 shots.thumbnail 响应式值）
+  syncStillToShotThumbnail(still);
   if (markers.value.some((marker) => marker.id === `still-${still.id}`)) return;
   const shot = shots.value.find((item) => item.id === still.shotId);
   if (!shot) return;

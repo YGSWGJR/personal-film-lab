@@ -1449,6 +1449,7 @@ export interface ShotApi {
   split(args: ShotSplitArgs): Promise<IpcResult<ShotSplitResult>>;
   merge(args: ShotMergeArgs): Promise<IpcResult<ShotMergeResult>>;
   trim(args: ShotTrimArgs): Promise<IpcResult<ShotTrimResult>>;
+  setThumbnail(args: { id: string; thumbnail: string | null }): Promise<IpcResult<Shot>>;
 }
 
 export interface StillApi {

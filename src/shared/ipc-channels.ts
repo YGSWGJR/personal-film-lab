@@ -121,6 +121,7 @@ export const IPC = {
   SHOT_SPLIT: 'shot:split',
   SHOT_MERGE: 'shot:merge',
   SHOT_TRIM: 'shot:trim',
+  SHOT_SET_THUMBNAIL: 'shot:setThumbnail',
 
   STILL_LIST: 'still:list',
   STILL_GET: 'still:get',

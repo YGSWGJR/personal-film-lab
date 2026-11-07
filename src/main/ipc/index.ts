@@ -609,6 +609,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: ShotMergeArgs): ShotMergeResult => requireData().shots.merge(args)),
   );
   ipcMain.handle(
+    IPC.SHOT_SET_THUMBNAIL,
+    withEnvelope((args: { id: string; thumbnail: string | null }): Shot =>
+      requireData().shots.setThumbnail(args.id, args.thumbnail),
+    ),
+  );
+  ipcMain.handle(
     IPC.SHOT_TRIM,
     withEnvelope((args: ShotTrimArgs): ShotTrimResult => requireData().shots.trim(args)),
   );

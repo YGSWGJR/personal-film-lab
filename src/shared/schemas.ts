@@ -556,6 +556,11 @@ export const stillCreateArgsSchema = z.object({
   annotations: z.array(z.record(z.string(), z.unknown())).max(500).optional(),
 });
 
+export const shotSetThumbnailArgsSchema = z.object({
+  id: z.string().min(1),
+  thumbnail: z.string().nullable(),
+});
+
 export const stillCaptureArgsSchema = z.object({
   projectId: z.string().min(1),
   timeMs: z.number().int().min(0),

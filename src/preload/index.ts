@@ -50,6 +50,7 @@ import {
   shotTrimArgsSchema,
   shotUpdateArgsSchema,
   stillCreateArgsSchema,
+  shotSetThumbnailArgsSchema,
   stillCaptureArgsSchema,
   stillCaptureAtArgsSchema,
   stillListArgsSchema,
@@ -284,6 +285,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SHOT_SPLIT]: shotSplitArgsSchema,
   [IPC.SHOT_MERGE]: shotMergeArgsSchema,
   [IPC.SHOT_TRIM]: shotTrimArgsSchema,
+  [IPC.SHOT_SET_THUMBNAIL]: shotSetThumbnailArgsSchema,
 
   [IPC.STILL_LIST]: stillListArgsSchema,
   [IPC.STILL_GET]: idArgsSchema,
@@ -511,6 +513,8 @@ const shotApi = {
   split: (args: ShotSplitArgs) => invoke<ShotSplitResult>(IPC.SHOT_SPLIT, [args]),
   merge: (args: ShotMergeArgs) => invoke<ShotMergeResult>(IPC.SHOT_MERGE, [args]),
   trim: (args: ShotTrimArgs) => invoke<ShotTrimResult>(IPC.SHOT_TRIM, [args]),
+  setThumbnail: (args: { id: string; thumbnail: string | null }) =>
+    invoke<Shot>(IPC.SHOT_SET_THUMBNAIL, [args]),
 };
 
 const stillApi = {
