@@ -172,8 +172,9 @@ onMounted(() => {
   ensureLayout();
   void reloadGraph();
   window.addEventListener('resize', onWindowResize);
-  window.addEventListener('keydown', onGlobalKey);
-  window.addEventListener('keyup', onGlobalKeyUp);
+  // capture 阶段拦截：放映打开时按键先于 App 全局快捷键（否则 Esc 会连带关掉整面墙）
+  window.addEventListener('keydown', onGlobalKey, true);
+  window.addEventListener('keyup', onGlobalKeyUp, true);
 });
 
 async function reloadGraph(): Promise<void> {
@@ -215,16 +216,19 @@ function onGlobalKey(e: KeyboardEvent): void {
   if (player.value.open) {
     if (e.key === 'Escape') {
       e.preventDefault();
+      e.stopImmediatePropagation();
       closePlayer();
       return;
     }
     if (e.key === 'ArrowRight') {
       e.preventDefault();
+      e.stopImmediatePropagation();
       playerMove(1);
       return;
     }
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
+      e.stopImmediatePropagation();
       playerMove(-1);
       return;
     }
@@ -235,6 +239,7 @@ function onGlobalKey(e: KeyboardEvent): void {
     const k = e.key.toLowerCase();
     if (map[k]) {
       e.preventDefault();
+      e.stopImmediatePropagation();
       annTool.value = map[k] as AnnType | 'select' | 'eraser';
     }
     return;
@@ -426,6 +431,11 @@ function playerScope(startId: string): WorkspaceShot[] {
 }
 
 async function openPlayer(startId: string): Promise<void> {
+  // 放映前刷新连线（可能被 MCP/其他入口修改）
+  if (props.projectId) {
+    const fresh = await window.api.wall.listEdges({ projectId: props.projectId });
+    if (fresh.ok) edges.value = fresh.data;
+  }
   const scope = playerScope(startId);
   if (scope.length === 0) return;
   player.value = {

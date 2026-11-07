@@ -4896,14 +4896,29 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
           await sleep(600);
           const after = parseFloat(hook.state().scale) || 100;
           out.zoom = after > before;
+          // 孤立卡规则：无边时放映只有当前一张
           hook.dispatchDblClick(0);
           await waitFor(() => hook.state().playerOpen);
           const p = hook.state();
-          out.player = p.playerOpen === true && p.slides === 3;
+          out.player = p.playerOpen === true && p.slides === 1;
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(300);
+          // 建边后：沿连线连通的 3 张全部可放映
+          const shotIds = hook.state && [];
+          const api = window.__S43_WALL_TEST__;
+          void shotIds; void api;
+          await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[0].id, toShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[1].id, kind: 'solid' });
+          await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[1].id, toShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[2].id, kind: 'solid' });
+          hook.dispatchDblClick(0);
+          await waitFor(() => hook.state().playerOpen && hook.state().slides === 3);
+          const p2 = hook.state();
+          out.player = out.player === true && p2.slides === 3;
+          out.playerDbg2 = p2;
           out.tools = p.tools === 10;
-          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
           await sleep(300);
           out.escClosed = hook.state().playerOpen === false;
+          out.afterEsc = hook.state();
           return out;
         } catch (error) {
           out.exception = String(error && error.stack ? error.stack : error);
