@@ -834,6 +834,18 @@ function selectAllNodes(): void {
   selectedIds.value = new Set(props.shots.map((shot) => shot.id));
 }
 
+function openNodeMenuButton(): void {
+  const sel = [...selectedIds.value];
+  const rect = stageEl.value?.getBoundingClientRect();
+  const x = rect ? rect.left + 90 : 120;
+  const y = rect ? rect.bottom - 160 : 400;
+  if (sel.length === 1) {
+    openMenuAt(x, y, sel[0]);
+    return;
+  }
+  openMenuAt(x, y, null);
+}
+
 function zoomToFit(): void {
   if (positions.value.size === 0) return;
   const pts = [...positions.value.values()];
@@ -923,6 +935,11 @@ async function removeNodeFromWall(shotId: string): Promise<void> {
 }
 
 function openWallContextMenu(event: MouseEvent, shotId: string | null): void {
+  openMenuAt(event.clientX, event.clientY, shotId);
+}
+
+/** 0.3.3：按钮召唤菜单（右键失效时的可靠入口） */
+function openMenuAt(x: number, y: number, shotId: string | null): void {
   const items: Array<{ label: string; danger?: boolean; disabled?: boolean; action: () => void }> = [];
   if (shotId) {
     const hasEdges = edges.value.some((e) => e.fromShotId === shotId || e.toShotId === shotId);
@@ -951,14 +968,23 @@ function openWallContextMenu(event: MouseEvent, shotId: string | null): void {
       items.push({ label: '添加节点 · 导入照片', action: () => emit('createNode', 'image') });
       items.push({ label: '添加节点 · 黑底+文本', action: () => emit('createNode', 'black') });
       items.push({ label: '添加节点 · 白底+文本', action: () => emit('createNode', 'white') });
+      items.push({
+        label: selectedIds.value.size > 0 ? `删除节点（已选 ${selectedIds.value.size} 张）` : '删除节点（先选中卡片）',
+        danger: true,
+        disabled: selectedIds.value.size === 0,
+        action: () => {
+          for (const id of [...selectedIds.value]) void removeNodeFromWall(id);
+          selectedIds.value = new Set();
+        },
+      });
     }
     items.push({ label: '整理节点', action: () => organizeNodes() });
     items.push({ label: '全选', action: () => selectAllNodes() });
     items.push({ label: '缩放到全部内容', action: () => zoomToFit() });
     if (undoSnapshot) items.push({ label: '撤销整理（Ctrl+Z）', action: () => restoreLayout() });
   }
-  ctxMenu.x = event.clientX;
-  ctxMenu.y = event.clientY;
+  ctxMenu.x = x;
+  ctxMenu.y = y;
   ctxMenu.items = items;
   ctxMenu.visible = true;
 }
@@ -1262,14 +1288,17 @@ function fmtDuration(ms: number): string {
       <button type="button" class="wall-hud-btn wall-export" title="按连线顺序导出镜头图片" @click.stop="exportImages">⇩</button>
       <button type="button" class="wall-hud-btn" title="整理节点（连线链成行，未连线按镜号排下方）" @click.stop="organizeNodes">⌗</button>
       <button type="button" class="wall-hud-btn wall-project" title="投影到拉片界面：按连线顺序把节点呈现在时间线/主播放/右侧面板" @click.stop="emit('project')">▣</button>
+      <button type="button" class="wall-hud-btn" title="节点菜单（添加/删除节点、整理等）" @click.stop="openNodeMenuButton">☰</button>
     </div>
-    <ContextMenu
-      :visible="ctxMenu.visible"
-      :x="ctxMenu.x"
-      :y="ctxMenu.y"
-      :items="ctxMenu.items"
-      @close="ctxMenu.visible = false"
-    />
+    <teleport to="body">
+      <ContextMenu
+        :visible="ctxMenu.visible"
+        :x="ctxMenu.x"
+        :y="ctxMenu.y"
+        :items="ctxMenu.items"
+        @close="ctxMenu.visible = false"
+      />
+    </teleport>
     <div v-if="props.boardMode && laidShots.length === 0" class="wall-empty-guide">
       <b>空白分镜本</b>
       <span>右键画布空白处 → 添加节点（导入照片 / 黑白底+文本框）；拖动卡片右侧端口连线编排顺序</span>
