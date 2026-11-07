@@ -314,6 +314,34 @@ export const wallSaveLayoutArgsSchema = z.object({
   items: z.array(wallLayoutItemSchema).max(100_000),
 });
 
+const wallEdgeKindSchema = z.enum(['solid', 'dash']);
+
+export const wallEdgeListArgsSchema = z.object({ projectId: z.string().min(1) });
+
+export const wallEdgeAddArgsSchema = z.object({
+  projectId: z.string().min(1),
+  fromShotId: z.string().min(1),
+  toShotId: z.string().min(1),
+  kind: wallEdgeKindSchema,
+});
+
+export const wallEdgeRemoveArgsSchema = z.object({
+  projectId: z.string().min(1),
+  fromShotId: z.string().min(1),
+  toShotId: z.string().min(1),
+});
+
+export const wallGroupCreateArgsSchema = z.object({
+  projectId: z.string().min(1),
+  name: z.string().min(1).max(80),
+  shotIds: z.array(z.string().min(1)).min(2).max(100_000),
+});
+
+export const wallGroupDissolveArgsSchema = z.object({
+  projectId: z.string().min(1),
+  groupId: z.string().min(1),
+});
+
 /** S41：标签应用（按策略写库） */
 export const labelApplyArgsSchema = z.object({
   jobId: z.string().min(1),

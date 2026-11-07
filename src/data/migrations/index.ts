@@ -4,6 +4,8 @@ import detectSql from './003_detect.sql?raw';
 import shotThumbnailSql from './004_shot_thumbnail.sql?raw';
 import manualFieldsSql from './005_manual_fields.sql?raw';
 import shotLayoutSql from './006_shot_layout.sql?raw';
+import shotEdgesSql from './007_shot_edges.sql?raw';
+import shotGroupsSql from './008_shot_groups.sql?raw';
 
 export interface Migration {
   version: number;
@@ -18,4 +20,6 @@ export const MIGRATIONS: Migration[] = [
   { version: 4, sql: shotThumbnailSql },
   { version: 5, sql: manualFieldsSql },
   { version: 6, sql: shotLayoutSql },
+  { version: 7, sql: shotEdgesSql },
+  { version: 8, sql: shotGroupsSql },
 ];

@@ -90,6 +90,12 @@ export const IPC = {
   /** S43：分镜墙画布一期 */
   WALL_GET_LAYOUT: 'wall:getLayout',
   WALL_SAVE_LAYOUT: 'wall:saveLayout',
+  WALL_LIST_EDGES: 'wall:listEdges',
+  WALL_ADD_EDGE: 'wall:addEdge',
+  WALL_REMOVE_EDGE: 'wall:removeEdge',
+  WALL_LIST_GROUPS: 'wall:listGroups',
+  WALL_CREATE_GROUP: 'wall:createGroup',
+  WALL_DISSOLVE_GROUP: 'wall:dissolveGroup',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',

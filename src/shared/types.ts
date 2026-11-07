@@ -325,6 +325,12 @@ export interface DataApi {
 export interface WallApi {
   getLayout(args: WallGetLayoutArgs): Promise<IpcResult<WallLayoutItem[]>>;
   saveLayout(args: WallSaveLayoutArgs): Promise<IpcResult<void>>;
+  listEdges(args: WallEdgeListArgs): Promise<IpcResult<WallEdge[]>>;
+  addEdge(args: WallEdgeAddArgs): Promise<IpcResult<WallEdge>>;
+  removeEdge(args: WallEdgeRemoveArgs): Promise<IpcResult<void>>;
+  listGroups(args: WallEdgeListArgs): Promise<IpcResult<WallGroup[]>>;
+  createGroup(args: WallGroupCreateArgs): Promise<IpcResult<WallGroup>>;
+  dissolveGroup(args: WallGroupDissolveArgs): Promise<IpcResult<void>>;
 }
 
 export interface WorkspaceState {
@@ -974,6 +980,48 @@ export interface WallGetLayoutArgs {
 export interface WallSaveLayoutArgs {
   projectId: string;
   items: WallLayoutItem[];
+}
+
+export type WallEdgeKind = 'solid' | 'dash';
+
+export interface WallEdge {
+  fromShotId: string;
+  toShotId: string;
+  kind: WallEdgeKind;
+}
+
+export interface WallEdgeAddArgs {
+  projectId: string;
+  fromShotId: string;
+  toShotId: string;
+  kind: WallEdgeKind;
+}
+
+export interface WallEdgeRemoveArgs {
+  projectId: string;
+  fromShotId: string;
+  toShotId: string;
+}
+
+export interface WallEdgeListArgs {
+  projectId: string;
+}
+
+export interface WallGroup {
+  groupId: string;
+  name: string;
+  shotIds: string[];
+}
+
+export interface WallGroupCreateArgs {
+  projectId: string;
+  name: string;
+  shotIds: string[];
+}
+
+export interface WallGroupDissolveArgs {
+  projectId: string;
+  groupId: string;
 }
 
 /** 分镜墙视图状态（缩放/平移），按项目存 settings.json，不进数据库 */

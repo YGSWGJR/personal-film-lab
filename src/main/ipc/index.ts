@@ -25,6 +25,11 @@ import type {
   WallLayoutItem,
   WallGetLayoutArgs,
   WallSaveLayoutArgs,
+  WallEdgeAddArgs,
+  WallEdgeRemoveArgs,
+  WallEdgeListArgs,
+  WallGroupCreateArgs,
+  WallGroupDissolveArgs,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -455,6 +460,38 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.WALL_SAVE_LAYOUT,
     withEnvelope((args: WallSaveLayoutArgs): void => requireData().wall.saveLayout(args.projectId, args.items)),
+  );
+  ipcMain.handle(
+    IPC.WALL_LIST_EDGES,
+    withEnvelope((args: WallEdgeListArgs) => requireData().wall.listEdges(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_ADD_EDGE,
+    withEnvelope((args: WallEdgeAddArgs) =>
+      requireData().wall.addEdge(args.projectId, args.fromShotId, args.toShotId, args.kind),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_REMOVE_EDGE,
+    withEnvelope((args: WallEdgeRemoveArgs): void =>
+      requireData().wall.removeEdge(args.projectId, args.fromShotId, args.toShotId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_LIST_GROUPS,
+    withEnvelope((args: WallEdgeListArgs) => requireData().wall.listGroups(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_CREATE_GROUP,
+    withEnvelope((args: WallGroupCreateArgs) =>
+      requireData().wall.createGroup(args.projectId, args.name, args.shotIds),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_DISSOLVE_GROUP,
+    withEnvelope((args: WallGroupDissolveArgs): void =>
+      requireData().wall.dissolveGroup(args.projectId, args.groupId),
+    ),
   );
 
   // ---------- data: external project import ----------
