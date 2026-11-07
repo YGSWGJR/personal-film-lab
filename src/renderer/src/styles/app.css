@@ -701,3 +701,38 @@ select:focus-visible {
   border-color: var(--blue-hi);
   color: var(--blue-hi);
 }
+
+
+/* S44 分镜本选择卡 */
+.picker-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.picker-option:hover {
+  border-color: var(--blue-hi);
+}
+
+.picker-option b {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.picker-option small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.picker-title {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
