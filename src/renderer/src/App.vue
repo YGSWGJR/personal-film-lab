@@ -2457,6 +2457,40 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
   settingsTimeline: settings.value?.timeline ? { ...settings.value.timeline } : null,
 });
 
+(window as unknown as Record<string, unknown>).__S43_WALL_TEST__ = {
+  openProject: async (projectId: string) => {
+    const result = await window.api.project.get({ id: projectId });
+    if (!result.ok) return { ok: false, error: result.error };
+    await loadProject(result.data);
+    return { ok: true };
+  },
+  openWall: async () => {
+    await openWall();
+    return { ok: true };
+  },
+  state: () => ({
+    wallOpen: wallOpen.value,
+    cards: document.querySelectorAll('.wall-card').length,
+    scale: document.querySelector('.wall-zval')?.textContent ?? '',
+    playerOpen: Boolean(document.querySelector('.wall-ppt')),
+    slides: document.querySelectorAll('.wall-ppt-slide').length,
+    tools: document.querySelectorAll('.wall-ppt-tool').length,
+  }),
+  dispatchWheel: (deltaY: number, times: number): void => {
+    const stage = document.querySelector('.wall-stage');
+    if (!stage) return;
+    for (let i = 0; i < times; i++) {
+      stage.dispatchEvent(
+        new WheelEvent('wheel', { deltaY, cancelable: true, bubbles: true }),
+      );
+    }
+  },
+  dispatchDblClick: (index: number): void => {
+    const card = document.querySelectorAll('.wall-card')[index];
+    if (card) card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  },
+};
+
 (window as unknown as Record<string, unknown>).__S40_SHOT_EDIT_TEST__ = {
   openProject: async (projectId: string) => {
     const result = await window.api.project.get({ id: projectId });

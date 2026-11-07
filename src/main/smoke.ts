@@ -98,6 +98,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let stagedDetectUiChecks: Record<string, unknown> = {};
   let timelineWheelZoomChecks: Record<string, unknown> = {};
   let wallChecks: Record<string, unknown> = {};
+  let wallUiChecks: Record<string, unknown> = {};
   let timelineZoomChecks: Record<string, unknown> = {};
   let nleTrackChecks: Record<string, unknown> = {};
   let settingsCloseSaveChecks: Record<string, unknown> = {};
@@ -109,7 +110,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, opencvFrameChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -454,6 +455,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, wallChecksAssertions(wallChecks));
     }
 
+    if (process.env['SMOKE_WALL_UI'] === '1') {
+      wallUiChecks = await runWallUiChecks(win, deps);
+      Object.assign(checks, wallUiChecksAssertions(wallUiChecks));
+    }
+
     if (process.env['SMOKE_AI_SEGMENT'] === '1') {
       aiSegmentChecks = await runAiSegmentChecks(
         deps,
@@ -484,7 +490,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, opencvFrameChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -4831,6 +4837,80 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
   } catch (error) {
     out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
     return out;
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch { /* ignore */ }
+  }
+}
+
+/** S43：分镜墙 UI 门控——真实 DOM 打开/缩放/放映/Esc */
+function wallUiChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    wallUiOpen: result.open === true,
+    wallUiCards: result.cards === true,
+    wallUiZoom: result.zoom === true,
+    wallUiPlayer: result.player === true,
+    wallUiTools: result.tools === true,
+    wallUiEsc: result.escClosed === true,
+  };
+}
+
+async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const project = data.projects.create({
+    name: `S43 Wall UI ${Date.now()}`,
+    media: { filename: 'wall-ui.mp4', durationMs: 6000, fps: 25, width: 640, height: 360 },
+  });
+  for (let i = 0; i < 3; i++) {
+    const shot = data.shots.create({ projectId: project.id, startMs: i * 2000, endMs: (i + 1) * 2000 });
+    data.db.prepare('UPDATE shots SET thumbnail = ? WHERE id = ?').run(`lapian-asset://${project.id}/t${i}.jpg`, shot.id);
+  }
+  try {
+    return (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const waitFor = async (check, timeoutMs = 15000) => {
+          const deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            const value = check();
+            if (value) return value;
+            await sleep(100);
+          }
+          return null;
+        };
+        try {
+          const hook = window.__S43_WALL_TEST__;
+          if (!hook) { out.exception = 'S43 hook missing'; return out; }
+          out.projectOpened = (await hook.openProject(${JSON.stringify(project.id)})).ok === true;
+          await sleep(300);
+          await hook.openWall();
+          await waitFor(() => hook.state().wallOpen);
+          out.open = hook.state().wallOpen === true;
+          await waitFor(() => hook.state().cards === 3);
+          out.cards = hook.state().cards === 3;
+          const before = parseFloat(hook.state().scale) || 100;
+          hook.dispatchWheel(-120, 6);
+          await sleep(600);
+          const after = parseFloat(hook.state().scale) || 100;
+          out.zoom = after > before;
+          hook.dispatchDblClick(0);
+          await waitFor(() => hook.state().playerOpen);
+          const p = hook.state();
+          out.player = p.playerOpen === true && p.slides === 3;
+          out.tools = p.tools === 10;
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(300);
+          out.escClosed = hook.state().playerOpen === false;
+          return out;
+        } catch (error) {
+          out.exception = String(error && error.stack ? error.stack : error);
+          return out;
+        }
+      })()
+    `));
   } finally {
     try {
       data.projects.delete(project.id);
