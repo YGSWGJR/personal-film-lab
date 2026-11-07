@@ -1294,13 +1294,22 @@ async function mergeShotPair(pair: [WorkspaceShot, WorkspaceShot]): Promise<void
   }
 }
 
+/** 批次4：投影模式下禁用结构编辑（拆分/合并/删除——分镜本节点结构请在分镜墙维护） */
+function guardProjectedStructureEdit(): boolean {
+  if (!projectedMode.value) return false;
+  showToast('分镜本节点请在分镜墙中编辑结构（投影模式不可拆分/合并/删除）。', 'error', '投影模式');
+  return true;
+}
+
 async function splitSelectedAtPlayhead(): Promise<void> {
+  if (guardProjectedStructureEdit()) return;
   const shot = selectedShot.value;
   if (!shot) return;
   await splitShotAtTime(shot, displayTimeMs.value);
 }
 
 async function mergeSelectedShots(): Promise<void> {
+  if (guardProjectedStructureEdit()) return;
   if (!selectedMergePair.value) return;
   await mergeShotPair(selectedMergePair.value);
 }
@@ -1325,6 +1334,7 @@ function closeContextMenu(): void {
 }
 
 async function deleteShot(shot: WorkspaceShot): Promise<void> {
+  if (guardProjectedStructureEdit()) return;
   if (demoMode.value || !activeProject.value) {
     showToast('示例镜头不会被写入数据库，无需删除。');
     return;
@@ -1497,6 +1507,11 @@ async function updateShotLanguage(patch: { shotSize?: string; cameraMethod?: str
 async function toggleTag(tag: Tag): Promise<void> {
   const shot = selectedShot.value;
   if (!shot) return;
+  if (projectedMode.value) {
+    // 批次4：投影模式编辑路由——标签写 wall_node_tags
+    await toggleProjectedNodeTag(tag);
+    return;
+  }
   const assigned = shot.tagIds.includes(tag.id);
   const exclusive = tag.category === '景别' || tag.category === '运镜';
   const siblingIds = exclusive
@@ -1737,7 +1752,11 @@ async function runStoryboardExport(args: Omit<StoryboardExportArgs, 'projectId'>
 function updateNote(value: string): void {
   if (!selectedId.value) return;
   notes[selectedId.value] = value;
-  if (projectedMode.value) return; // 投影模式笔记仅内存（节点数据由分镜本编辑卡维护）
+  if (projectedMode.value) {
+    // 批次4：投影模式编辑路由——笔记持久化到分镜本节点（不写 shots）
+    queueProjectedNodePatch(selectedId.value, { note: value });
+    return;
+  }
   pendingNoteShotId = selectedId.value;
   if (noteTimer) clearTimeout(noteTimer);
   noteTimer = setTimeout(() => {
@@ -1810,6 +1829,11 @@ function insertTerm(term: DetailTerm): void {
 }
 
 async function captureStill(): Promise<void> {
+  if (projectedMode.value) {
+    // 批次4：投影模式截图=导出当前宫格合成图（不写 stills 表）
+    await exportProjectionComposite();
+    return;
+  }
   const shot = selectedShot.value;
   if (!shot) {
     showToast('请先选择一个镜头，再截取静帧。');
@@ -3023,6 +3047,14 @@ async function loadBoardNodes(): Promise<void> {
     return;
   }
   boardNodesInfo.value = nodes.data;
+  // 批次4：节点标签（wall_node_tags）映射回标签 id，供投影面板 chips 回显
+  if (tags.value.length === 0) await loadTags();
+  const tagListResult = await window.api.wall.listNodeTags({ boardId: wallBoardId.value });
+  const nodeTags: Record<string, Array<{ category: string; name: string }>> = tagListResult.ok ? tagListResult.data : {};
+  const wallTagIds = (nodeId: string): string[] =>
+    (nodeTags[nodeId] ?? [])
+      .map(({ category, name }) => tags.value.find((t) => t.category === category && t.name === name)?.id)
+      .filter((id): id is string => Boolean(id));
   const adj = new Map<string, Array<string>>();
   for (const node of nodes.data) adj.set(node.id, []);
   for (const e of edges.data) {
@@ -3055,6 +3087,7 @@ async function loadBoardNodes(): Promise<void> {
     const shape = emptyShotShape(wallBoardId.value, node, startMs);
     shape.endMs = startMs + node.durationMs;
     shape.durationMs = node.durationMs;
+    shape.tagIds = wallTagIds(node.id);
     mapped.push(shape);
     layerEnd.set(layer, Math.max(layerEnd.get(layer) ?? 0, startMs + node.durationMs));
     // 笔记 → 右侧镜头笔记（投影模式仅内存）
@@ -3065,7 +3098,9 @@ async function loadBoardNodes(): Promise<void> {
   let cursor = lastEnd;
   for (const node of nodes.data) {
     if (mapped.some((m) => m.id === node.id)) continue;
-    mapped.push({ ...emptyShotShape(wallBoardId.value, node, cursor) });
+    const shape = emptyShotShape(wallBoardId.value, node, cursor);
+    shape.tagIds = wallTagIds(node.id);
+    mapped.push(shape);
     cursor += node.durationMs;
   }
   boardShots.value = mapped.map((shot, i) => ({ ...shot, index: i + 1 }));
@@ -3268,6 +3303,138 @@ const wallPanelNode = computed<WallBoardNodeInfo | null>(() =>
     ? (boardNodesInfo.value.find((n) => n.id === wallSelectedIds.value[0]) ?? null)
     : null,
 );
+
+/** 批次4：投影模式截图=当前宫格合成导出（2 列宫格，与 .projection-grid.multi 一致） */
+async function exportProjectionComposite(): Promise<void> {
+  const images = projectionImages.value;
+  if (images.length === 0) {
+    showToast('当前没有可导出的投影画面。');
+    return;
+  }
+  const boardId = wallBoardId.value;
+  if (!boardId) return;
+  busy.value = true;
+  try {
+    const loaded = await Promise.all(
+      images.map(
+        (src) =>
+          new Promise<HTMLImageElement | null>((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = src;
+          }),
+      ),
+    );
+    const ok = loaded.filter((img): img is HTMLImageElement => img !== null);
+    if (ok.length === 0) {
+      showToast('投影画面加载失败，无法导出。', 'error');
+      return;
+    }
+    const cols = ok.length > 1 ? 2 : 1;
+    const rows = Math.ceil(ok.length / cols);
+    const cellW = 960;
+    const cellH = 540;
+    const gap = 8;
+    const canvas = document.createElement('canvas');
+    canvas.width = cols * cellW + (cols - 1) * gap;
+    canvas.height = rows * cellH + (rows - 1) * gap;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#05070c';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ok.forEach((img, i) => {
+      const cx = (i % cols) * (cellW + gap);
+      const cy = Math.floor(i / cols) * (cellH + gap);
+      const coverScale = Math.max(cellW / img.naturalWidth, cellH / img.naturalHeight);
+      const dw = img.naturalWidth * coverScale;
+      const dh = img.naturalHeight * coverScale;
+      ctx.drawImage(img, cx + (cellW - dw) / 2, cy + (cellH - dh) / 2, dw, dh);
+    });
+    const result = await window.api.wall.exportProjection({ boardId, dataUrl: canvas.toDataURL('image/png') });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return;
+    }
+    showToast(`宫格合成图已导出：${result.data.path}`, 'success', '投影截图');
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** 批次4：投影模式编辑路由——字段防抖写回分镜本节点 */const projectedPatchTimers = new Map<string, number>();
+const projectedPatchPending = new Map<string, Record<string, string>>();
+
+function queueProjectedNodePatch(nodeId: string, patch: Record<string, string>): void {
+  projectedPatchPending.set(nodeId, { ...(projectedPatchPending.get(nodeId) ?? {}), ...patch });
+  const existing = projectedPatchTimers.get(nodeId);
+  if (existing) window.clearTimeout(existing);
+  projectedPatchTimers.set(nodeId, window.setTimeout(() => void flushProjectedNodePatch(nodeId), 500));
+}
+
+async function flushProjectedNodePatch(nodeId: string): Promise<void> {
+  projectedPatchTimers.delete(nodeId);
+  const patch = projectedPatchPending.get(nodeId);
+  if (!patch || Object.keys(patch).length === 0) return;
+  projectedPatchPending.delete(nodeId);
+  const result = await window.api.wall.updateNode({ nodeId, patch });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  const info = boardNodesInfo.value.find((n) => n.id === nodeId);
+  if (info) Object.assign(info, patch);
+  const shape = boardShots.value.find((s) => s.id === nodeId);
+  if (shape && patch.note !== undefined) shape.remark = patch.note || shape.title;
+}
+
+/** 批次4：投影模式标签切换 → wall_node_tags（景别/运镜同步镜像到节点字段） */
+async function toggleProjectedNodeTag(tag: Tag): Promise<void> {
+  const shot = selectedShot.value;
+  const boardId = wallBoardId.value;
+  if (!shot || !boardId) return;
+  const node = boardNodesInfo.value.find((n) => n.id === shot.id);
+  if (!node) return;
+  const assigned = shot.tagIds.includes(tag.id);
+  const exclusive = tag.category === '景别' || tag.category === '运镜';
+  const siblingTags = exclusive
+    ? shot.tagIds
+        .map((id) => tags.value.find((item) => item.id === id))
+        .filter((item): item is Tag => Boolean(item) && item!.category === tag.category && item!.id !== tag.id)
+    : [];
+  const baseIds = shot.tagIds.filter((id) => !siblingTags.some((sib) => sib.id === id));
+  const nextIds = assigned ? baseIds.filter((id) => id !== tag.id) : [...baseIds, tag.id];
+  Object.assign(shot, { tagIds: nextIds });
+  for (const sib of siblingTags) {
+    const removed = await window.api.wall.removeNodeTag({
+      boardId,
+      nodeId: shot.id,
+      category: sib.category,
+      name: sib.name,
+    });
+    if (!removed.ok) showToast(removed.error.message, 'error', removed.error.code);
+  }
+  const result = assigned
+    ? await window.api.wall.removeNodeTag({ boardId, nodeId: shot.id, category: tag.category, name: tag.name })
+    : await window.api.wall.addNodeTag({ boardId, nodeId: shot.id, category: tag.category, name: tag.name });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    await loadBoardNodes();
+    return;
+  }
+  const patch: Record<string, string> = {};
+  if (!assigned && tag.category === '景别') {
+    patch.shotSize = tag.name;
+    node.shotSize = tag.name;
+    Object.assign(shot, { shotSize: tag.name });
+  }
+  if (!assigned && tag.category === '运镜') {
+    patch.cameraMethod = tag.name;
+    node.cameraMethod = tag.name;
+    Object.assign(shot, { cameraMethod: tag.name });
+  }
+  if (Object.keys(patch).length > 0) await window.api.wall.updateNode({ nodeId: shot.id, patch });
+}
 
 function onWallSelectionChange(ids: string[]): void {
   wallSelectedIds.value = ids;
@@ -3829,6 +3996,8 @@ onBeforeUnmount(() => {
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
   for (const timer of nodeTextTimers.values()) clearTimeout(timer);
   nodeTextTimers.clear();
+  for (const timer of projectedPatchTimers.values()) clearTimeout(timer);
+  projectedPatchTimers.clear();
 });
 </script>
 

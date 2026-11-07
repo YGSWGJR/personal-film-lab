@@ -228,23 +228,24 @@ onBeforeUnmount(() => {
             />
           </div>
           <img v-else-if="!player.hasFile" class="video-poster" :src="poster" :alt="selectedShot?.title ?? '影片预览'" />
-          <div v-if="!player.hasFile" class="poster-shade"></div>
-          <div v-if="!player.hasFile" class="poster-grade"></div>
-          <div v-if="!player.hasFile" class="poster-badge">REFERENCE FRAME</div>
-          <button
-            v-if="!player.hasFile"
-            class="center-play"
-            type="button"
-            :disabled="busy"
-            aria-label="打开并播放影片"
-            @click="emit('open')"
-          >
-            <AppIcon name="play" :size="24" />
-          </button>
-          <div v-if="!player.hasFile" class="poster-caption">
-            <span>{{ selectedShot ? `SHOT ${String(selectedShot.index).padStart(2, '0')}` : 'PLAYER' }}</span>
-            <strong>{{ selectedShot?.title ?? '打开影片开始拉片' }}</strong>
-          </div>
+          <template v-if="!player.hasFile && (projectionImages?.length ?? 0) === 0">
+            <div class="poster-shade"></div>
+            <div class="poster-grade"></div>
+            <div class="poster-badge">REFERENCE FRAME</div>
+            <button
+              class="center-play"
+              type="button"
+              :disabled="busy"
+              aria-label="打开并播放影片"
+              @click="emit('open')"
+            >
+              <AppIcon name="play" :size="24" />
+            </button>
+            <div class="poster-caption">
+              <span>{{ selectedShot ? `SHOT ${String(selectedShot.index).padStart(2, '0')}` : 'PLAYER' }}</span>
+              <strong>{{ selectedShot?.title ?? '打开影片开始拉片' }}</strong>
+            </div>
+          </template>
           <div v-if="player.hasFile && player.layer === 'hidden'" class="layer-placeholder">
             <AppIcon name="layers" :size="24" />
             <strong>画面已隐藏</strong>

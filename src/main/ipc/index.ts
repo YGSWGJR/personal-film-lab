@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
@@ -48,6 +48,7 @@ import type {
   WallNodeAnnotationSaveArgs,
   WallNodeTagListArgs,
   WallNodeTagMutateArgs,
+  WallExportProjectionArgs,
   WallImportImageArgs,
   WallPickImageResult,
   ExtractFrameArgs,
@@ -636,6 +637,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireData().wallBoards.removeTag(args.boardId, args.nodeId, args.category, args.name),
     ),
   );
+  ipcMain.handle(IPC.WALL_EXPORT_PROJECTION, withEnvelope((args: WallExportProjectionArgs) => {
+    requireData().wallBoards.assertBoard(args.boardId);
+    // 批次4：投影宫格合成图落盘 exports/board/<boardId>/（不写 stills 表）
+    const base64 = args.dataUrl.slice('data:image/png;base64,'.length);
+    const buffer = Buffer.from(base64, 'base64');
+    if (buffer.length < 100) {
+      throw new DataError('WALL_ITEM_INVALID', '投影截图数据无效', {});
+    }
+    const dir = join(requireData().dataRoot, 'exports', 'board', args.boardId);
+    mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const target = join(dir, `projection-${stamp}.png`);
+    writeFileSync(target, buffer);
+    return { path: target };
+  }));
 
   // ---------- data: external project import ----------
   ipcMain.handle(

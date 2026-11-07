@@ -352,6 +352,7 @@ export interface WallApi {
   listNodeTags(args: WallNodeTagListArgs): Promise<IpcResult<Record<string, WallNodeTagInfo[]>>>;
   addNodeTag(args: WallNodeTagMutateArgs): Promise<IpcResult<void>>;
   removeNodeTag(args: WallNodeTagMutateArgs): Promise<IpcResult<void>>;
+  exportProjection(args: WallExportProjectionArgs): Promise<IpcResult<WallExportProjectionResult>>;
 }
 
 export interface WorkspaceState {
@@ -1170,6 +1171,16 @@ export interface WallNodeTagMutateArgs {
   nodeId: string;
   category: string;
   name: string;
+}
+
+/** 批次4：投影宫格合成图导出（写 exports/board/<boardId>/，不写 stills 表） */
+export interface WallExportProjectionArgs {
+  boardId: string;
+  dataUrl: string;
+}
+
+export interface WallExportProjectionResult {
+  path: string;
 }
 
 export interface WallNodeEdgeListArgs {

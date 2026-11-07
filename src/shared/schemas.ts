@@ -439,6 +439,14 @@ export const wallNodeTagMutateArgsSchema = z.object({
   name: z.string().min(1).max(40),
 });
 
+export const wallExportProjectionArgsSchema = z.object({
+  boardId: z.string().min(1),
+  dataUrl: z
+    .string()
+    .regex(/^data:image\/png;base64,/)
+    .max(14_000_000),
+});
+
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),
   shotId: z.string().min(1),
