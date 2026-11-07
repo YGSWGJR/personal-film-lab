@@ -48,6 +48,8 @@ import {
   wallExportProjectionArgsSchema,
   wallImportBoardFileArgsSchema,
   wallOpenBoardDirArgsSchema,
+  wallCreateCompositeArgsSchema,
+  wallDissolveCompositeArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -162,6 +164,9 @@ import type {
   WallImportBoardFileResult,
   WallOpenBoardDirArgs,
   WallOpenBoardDirResult,
+  WallCreateCompositeArgs,
+  WallCreateCompositeResult,
+  WallDissolveCompositeArgs,
   WallImportImageArgs,
   WallImportImageResult,
   WallPickImageResult,
@@ -331,6 +336,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.WALL_EXPORT_PROJECTION]: wallExportProjectionArgsSchema,
   [IPC.WALL_IMPORT_BOARD_FILE]: wallImportBoardFileArgsSchema,
   [IPC.WALL_OPEN_BOARD_DIR]: wallOpenBoardDirArgsSchema,
+  [IPC.WALL_CREATE_COMPOSITE]: wallCreateCompositeArgsSchema,
+  [IPC.WALL_DISSOLVE_COMPOSITE]: wallDissolveCompositeArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -568,6 +575,9 @@ const wallApi = {
     invoke<WallExportProjectionResult>(IPC.WALL_EXPORT_PROJECTION, [args]),
   importBoardFile: () => invoke<WallImportBoardFileResult>(IPC.WALL_IMPORT_BOARD_FILE, [{}]),
   openBoardDir: (args: WallOpenBoardDirArgs) => invoke<WallOpenBoardDirResult>(IPC.WALL_OPEN_BOARD_DIR, [args]),
+  createComposite: (args: WallCreateCompositeArgs) =>
+    invoke<WallCreateCompositeResult>(IPC.WALL_CREATE_COMPOSITE, [args]),
+  dissolveComposite: (args: WallDissolveCompositeArgs) => invoke<void>(IPC.WALL_DISSOLVE_COMPOSITE, [args]),
 };
 
 const dataApi = {

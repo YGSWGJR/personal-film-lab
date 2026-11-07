@@ -4,8 +4,9 @@ import { DataError } from '../errors';
 
 export interface WallBoardNode {
   id: string;
-  source: 'image' | 'text';
+  source: 'image' | 'text' | 'composite';
   assetPath: string | null;
+  parentId: string | null;
   title: string;
   textContent: string;
   durationMs: number;
@@ -87,10 +88,16 @@ export class WallBoardsRepository {
 
   addNode(
     boardId: string,
-    input: { source: 'image' | 'text'; assetPath?: string | null; title?: string; x: number; y: number },
+    input: {
+      source: 'image' | 'text' | 'composite';
+      assetPath?: string | null;
+      title?: string;
+      x: number;
+      y: number;
+    },
   ): WallBoardNode {
     this.assertBoard(boardId);
-    if (input.source !== 'image' && input.source !== 'text') {
+    if (input.source !== 'image' && input.source !== 'text' && input.source !== 'composite') {
       throw new DataError('WALL_ITEM_INVALID', '节点类型无效', { source: input.source });
     }
     if (input.source === 'image' && !input.assetPath) {
@@ -153,6 +160,97 @@ export class WallBoardsRepository {
   deleteNode(id: string): void {
     this.layer.transaction(() => {
       this.db.prepare('DELETE FROM wall_nodes WHERE id = ?').run(id);
+    });
+  }
+
+  /** 批次9：建复合节点——成员收编 + 外部连线重路由到复合节点（内部连线保留） */
+  createComposite(boardId: string, nodeIds: string[]): { id: string } {
+    this.assertBoard(boardId);
+    const uniqueIds = [...new Set(nodeIds)];
+    if (uniqueIds.length < 2) {
+      throw new DataError('WALL_ITEM_INVALID', '复合节点至少需要 2 个节点', { count: uniqueIds.length });
+    }
+    const inBoard = this.db.prepare('SELECT source, parent_id, x, y FROM wall_nodes WHERE board_id = ? AND id = ?');
+    const members = uniqueIds.map((nodeId) => {
+      const row = inBoard.get(boardId, nodeId) as
+        | { source: string; parent_id: string | null; x: number; y: number }
+        | undefined;
+      if (!row) throw new DataError('WALL_NODE_NOT_FOUND', '节点不存在或不属于该分镜本', { nodeId });
+      if (row.source === 'composite' || row.parent_id) {
+        throw new DataError('WALL_ITEM_INVALID', '复合节点不能嵌套或重复收编', { nodeId });
+      }
+      return { nodeId, x: row.x, y: row.y };
+    });
+    const centerX = members.reduce((sum, m) => sum + m.x, 0) / members.length;
+    const centerY = members.reduce((sum, m) => sum + m.y, 0) / members.length;
+    const compositeId = this.addNode(boardId, { source: 'composite', title: '复合节点', x: centerX, y: centerY }).id;
+    const childSet = new Set(uniqueIds);
+    this.layer.transaction(() => {
+      const setParent = this.db.prepare('UPDATE wall_nodes SET parent_id = ?, updated_at = strftime(\'%s\',\'now\') * 1000 WHERE id = ?');
+      for (const nodeId of uniqueIds) setParent.run(compositeId, nodeId);
+      // 外部连线重路由：child↔外部 → composite↔外部（ON CONFLICT 幂等去重）
+      const edges = this.db
+        .prepare('SELECT from_node, to_node, kind FROM wall_node_edges WHERE board_id = ?')
+        .all(boardId) as Array<{ from_node: string; to_node: string; kind: string }>;
+      const deleteEdge = this.db.prepare('DELETE FROM wall_node_edges WHERE board_id = ? AND from_node = ? AND to_node = ?');
+      const insertEdge = this.db.prepare(
+        'INSERT INTO wall_node_edges (board_id, from_node, to_node, kind, created_at) VALUES (?, ?, ?, ?, strftime(\'%s\',\'now\') * 1000) ON CONFLICT(board_id, from_node, to_node) DO NOTHING',
+      );
+      for (const edge of edges) {
+        const fromChild = childSet.has(edge.from_node);
+        const toChild = childSet.has(edge.to_node);
+        if (fromChild === toChild) continue; // 内部边或无关边
+        deleteEdge.run(boardId, edge.from_node, edge.to_node);
+        insertEdge.run(boardId, fromChild ? compositeId : edge.from_node, toChild ? compositeId : edge.to_node, edge.kind);
+      }
+    });
+    return { id: compositeId };
+  }
+
+  /** 批次9：解散复合节点——成员释放回画布，复合节点及其连线删除（外部连线不回接） */
+  dissolveComposite(boardId: string, compositeId: string): void {
+    this.assertBoard(boardId);
+    const node = this.db
+      .prepare('SELECT source FROM wall_nodes WHERE board_id = ? AND id = ?')
+      .get(boardId, compositeId) as { source: string } | undefined;
+    if (!node) throw new DataError('WALL_NODE_NOT_FOUND', '节点不存在', { compositeId });
+    if (node.source !== 'composite') {
+      throw new DataError('WALL_ITEM_INVALID', '仅复合节点可解散', { compositeId });
+    }
+    this.layer.transaction(() => {
+      this.db
+        .prepare('DELETE FROM wall_node_edges WHERE board_id = ? AND (from_node = ? OR to_node = ?)')
+        .run(boardId, compositeId, compositeId);
+      this.db
+        .prepare('UPDATE wall_nodes SET parent_id = NULL, updated_at = strftime(\'%s\',\'now\') * 1000 WHERE parent_id = ?')
+        .run(compositeId);
+      this.db.prepare('DELETE FROM wall_nodes WHERE id = ?').run(compositeId);
+    });
+  }
+
+  listCompositeMembers(boardId: string, compositeId: string): string[] {
+    this.assertBoard(boardId);
+    const rows = this.db
+      .prepare('SELECT id FROM wall_nodes WHERE parent_id = ? ORDER BY created_at ASC')
+      .all(compositeId) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  /** 批次9：设置节点所属复合节点（导入 board.json 还原层级用） */
+  setParentNode(boardId: string, nodeId: string, parentId: string | null): void {
+    this.assertBoard(boardId);
+    if (parentId) {
+      const parent = this.db
+        .prepare("SELECT id FROM wall_nodes WHERE board_id = ? AND id = ? AND source = 'composite'")
+        .get(boardId, parentId);
+      if (!parent) {
+        throw new DataError('WALL_NODE_NOT_FOUND', '目标复合节点不存在', { parentId });
+      }
+    }
+    this.layer.transaction(() => {
+      this.db
+        .prepare('UPDATE wall_nodes SET parent_id = ?, updated_at = strftime(\'%s\',\'now\') * 1000 WHERE id = ?')
+        .run(parentId, nodeId);
     });
   }
 
@@ -298,10 +396,12 @@ export class WallBoardsRepository {
 }
 
 function mapNode(row: Record<string, unknown>): WallBoardNode {
+  const source = row.source === 'text' ? 'text' : row.source === 'composite' ? 'composite' : 'image';
   return {
     id: String(row.id),
-    source: row.source === 'text' ? 'text' : 'image',
+    source,
     assetPath: (row.asset_path as string | null) ?? null,
+    parentId: (row.parent_id as string | null) ?? null,
     title: String(row.title ?? ''),
     textContent: String(row.text_content ?? ''),
     durationMs: Number(row.duration_ms ?? 3000),

@@ -36,7 +36,16 @@ export function registerAssetProtocol(getAllowedRoots: () => string[]): void {
       if (!allowed) {
         return new Response('Forbidden', { status: 403 });
       }
-      return net.fetch(pathToFileURL(target).toString());
+      const fileResponse = await net.fetch(pathToFileURL(target).toString());
+      // 批次9：补 CORS 头——渲染层把资产画进 canvas（复合缩略图/投影截图导出）需要跨域许可，
+      // 否则 toDataURL 抛 SecurityError（tainted canvas）。
+      const headers = new Headers(fileResponse.headers);
+      headers.set('Access-Control-Allow-Origin', '*');
+      return new Response(fileResponse.body, {
+        status: fileResponse.status,
+        statusText: fileResponse.statusText,
+        headers,
+      });
     } catch {
       return new Response('Not found', { status: 404 });
     }

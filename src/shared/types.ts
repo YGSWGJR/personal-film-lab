@@ -359,6 +359,8 @@ export interface WallApi {
   exportProjection(args: WallExportProjectionArgs): Promise<IpcResult<WallExportProjectionResult>>;
   importBoardFile(): Promise<IpcResult<WallImportBoardFileResult>>;
   openBoardDir(args: WallOpenBoardDirArgs): Promise<IpcResult<WallOpenBoardDirResult>>;
+  createComposite(args: WallCreateCompositeArgs): Promise<IpcResult<WallCreateCompositeResult>>;
+  dissolveComposite(args: WallDissolveCompositeArgs): Promise<IpcResult<void>>;
 }
 
 export interface WorkspaceState {
@@ -1098,12 +1100,16 @@ export interface WallExportResult {
   skipped: number;
 }
 
-export type WallBoardNodeSource = 'image' | 'text';
+export type WallBoardNodeSource = 'image' | 'text' | 'composite';
 
 export interface WallBoardNodeInfo {
   id: string;
   source: WallBoardNodeSource;
   assetPath: string | null;
+  /** 批次9：所属复合节点（null=顶层节点） */
+  parentId: string | null;
+  /** 批次9：复合节点的子节点数（App 映射层填充） */
+  childCount?: number;
   title: string;
   textContent: string;
   durationMs: number;
@@ -1192,8 +1198,10 @@ export interface WallExportProjectionResult {
 /** 批次8：分镜本独立保存（board.json + assets/） */
 export interface WallBoardFileNodePayload {
   id: string;
-  source: 'image' | 'text';
+  source: 'image' | 'text' | 'composite';
   assetPath?: string | null;
+  /** 批次9：所属复合节点 id（导出内引用，导入时按 idMap 映射） */
+  parentId?: string | null;
   /** 导出文件内的资产文件名（assets/ 下），导入时据此复制 */
   assetFile?: string | null;
   title?: string;
@@ -1233,6 +1241,21 @@ export interface WallOpenBoardDirArgs {
 
 export interface WallOpenBoardDirResult {
   path: string;
+}
+
+/** 批次9：复合节点（组即节点） */
+export interface WallCreateCompositeArgs {
+  boardId: string;
+  nodeIds: string[];
+}
+
+export interface WallCreateCompositeResult {
+  compositeId: string;
+}
+
+export interface WallDissolveCompositeArgs {
+  boardId: string;
+  compositeId: string;
 }
 
 export interface WallNodeEdgeListArgs {

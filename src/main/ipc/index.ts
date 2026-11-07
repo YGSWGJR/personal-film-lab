@@ -52,6 +52,8 @@ import type {
   WallBoardFilePayload,
   WallImportBoardFileResult,
   WallOpenBoardDirArgs,
+  WallCreateCompositeArgs,
+  WallDissolveCompositeArgs,
   WallImportImageArgs,
   WallPickImageResult,
   ExtractFrameArgs,
@@ -764,6 +766,18 @@ export function registerIpcHandlers(deps: IpcDeps): void {
         // 单节点失败（如资产缺失且非法）跳过，不阻断导入
       }
     }
+    // 批次9：还原复合节点父子关系（父节点已全部建好后再挂）
+    for (const node of payload.nodes) {
+      const newId = idMap.get(String(node.id));
+      const parentId = node.parentId ? idMap.get(String(node.parentId)) : null;
+      if (newId && parentId) {
+        try {
+          boards.setParentNode(newBoardId, newId, parentId);
+        } catch {
+          // 跳过坏层级
+        }
+      }
+    }
     for (const edge of payload.edges ?? []) {
       const from = idMap.get(String(edge.fromNodeId));
       const to = idMap.get(String(edge.toNodeId));
@@ -809,6 +823,21 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     void shell.openPath(dir);
     return { path: dir };
   }));
+  ipcMain.handle(
+    IPC.WALL_CREATE_COMPOSITE,
+    withEnvelope((args: WallCreateCompositeArgs) => {
+      const created = requireData().wallBoards.createComposite(args.boardId, args.nodeIds);
+      boardExport.schedule(args.boardId);
+      return { compositeId: created.id };
+    }),
+  );
+  ipcMain.handle(
+    IPC.WALL_DISSOLVE_COMPOSITE,
+    withEnvelope((args: WallDissolveCompositeArgs): void => {
+      requireData().wallBoards.dissolveComposite(args.boardId, args.compositeId);
+      boardExport.schedule(args.boardId);
+    }),
+  );
 
   // ---------- data: external project import ----------
   ipcMain.handle(

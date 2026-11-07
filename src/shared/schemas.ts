@@ -452,6 +452,16 @@ export const wallImportBoardFileArgsSchema = z.object({});
 
 export const wallOpenBoardDirArgsSchema = z.object({ boardId: z.string().min(1) });
 
+export const wallCreateCompositeArgsSchema = z.object({
+  boardId: z.string().min(1),
+  nodeIds: z.array(z.string().min(1)).min(2).max(50),
+});
+
+export const wallDissolveCompositeArgsSchema = z.object({
+  boardId: z.string().min(1),
+  compositeId: z.string().min(1),
+});
+
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),
   shotId: z.string().min(1),

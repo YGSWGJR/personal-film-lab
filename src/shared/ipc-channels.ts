@@ -120,6 +120,8 @@ export const IPC = {
   WALL_EXPORT_PROJECTION: 'wall:exportProjection',
   WALL_IMPORT_BOARD_FILE: 'wall:importBoardFile',
   WALL_OPEN_BOARD_DIR: 'wall:openBoardDir',
+  WALL_CREATE_COMPOSITE: 'wall:createComposite',
+  WALL_DISSOLVE_COMPOSITE: 'wall:dissolveComposite',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',
