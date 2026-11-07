@@ -87,6 +87,9 @@ export const IPC = {
   DETECT_APPLY_LABELS: 'detect:applyLabels',
   DETECT_EVENT_BOUNDARY_APPLIED: 'detect:event:boundaryApplied',
   DETECT_EVENT_LABELS_DONE: 'detect:event:labelsDone',
+  /** S43：分镜墙画布一期 */
+  WALL_GET_LAYOUT: 'wall:getLayout',
+  WALL_SAVE_LAYOUT: 'wall:saveLayout',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',

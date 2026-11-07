@@ -20,6 +20,8 @@ import {
   boundaryDetectRunArgsSchema,
   labelDetectRunArgsSchema,
   labelApplyArgsSchema,
+  wallGetLayoutArgsSchema,
+  wallSaveLayoutArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -96,6 +98,9 @@ import type {
   LabelApplyArgs,
   LabelApplyResult,
   LabelsDoneEvent,
+  WallGetLayoutArgs,
+  WallLayoutItem,
+  WallSaveLayoutArgs,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -230,6 +235,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.DETECT_RUN_BOUNDARY]: boundaryDetectRunArgsSchema,
   [IPC.DETECT_RUN_LABELS]: labelDetectRunArgsSchema,
   [IPC.DETECT_APPLY_LABELS]: labelApplyArgsSchema,
+  [IPC.WALL_GET_LAYOUT]: wallGetLayoutArgsSchema,
+  [IPC.WALL_SAVE_LAYOUT]: wallSaveLayoutArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -427,6 +434,11 @@ const detectApi = {
     subscribe<LabelsDoneEvent>(EVENT_WHITELIST.onLabelsDone, listener),
 };
 
+const wallApi = {
+  getLayout: (args: WallGetLayoutArgs) => invoke<WallLayoutItem[]>(IPC.WALL_GET_LAYOUT, [args]),
+  saveLayout: (args: WallSaveLayoutArgs) => invoke<void>(IPC.WALL_SAVE_LAYOUT, [args]),
+};
+
 const dataApi = {
   scanCandidates: () => invoke<CandidateSource[]>(IPC.DATA_SCAN_CANDIDATES, [{}]),
   importProject: (args: { root: string; projectId: string }) =>
@@ -529,6 +541,7 @@ const api: WindowApi = {
   gpu: gpuApi,
   scope: scopeApi,
   detect: detectApi,
+  wall: wallApi,
   project: projectApi,
   shot: shotApi,
   still: stillApi,

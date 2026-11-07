@@ -127,6 +127,8 @@ export interface Settings {
   ai?: AiSettings;
   /** S40：镜头编辑快捷键 */
   shortcuts?: ShortcutSettings;
+  /** S43：分镜墙视图状态（scale/pan 按项目分组），存 settings.json 不进库 */
+  wallViewState?: Record<string, WallViewState>;
 }
 
 export interface SettingsSetArgs {
@@ -151,6 +153,8 @@ export interface SettingsSetArgs {
   ai?: AiSettings;
   /** S40：镜头编辑快捷键 */
   shortcuts?: ShortcutSettings;
+  /** S43：分镜墙视图状态（与 Settings 同形） */
+  wallViewState?: Record<string, WallViewState>;
 }
 
 export interface SettingsChooseDirectoryArgs {
@@ -315,6 +319,12 @@ export interface SettingsApi {
 export interface DataApi {
   scanCandidates(): Promise<IpcResult<CandidateSource[]>>;
   importProject(args: { root: string; projectId: string }): Promise<IpcResult<ImportResult>>;
+}
+
+/** S43：分镜墙画布一期 */
+export interface WallApi {
+  getLayout(args: WallGetLayoutArgs): Promise<IpcResult<WallLayoutItem[]>>;
+  saveLayout(args: WallSaveLayoutArgs): Promise<IpcResult<void>>;
 }
 
 export interface WorkspaceState {
@@ -649,6 +659,7 @@ export interface WindowApi {
   detect: DetectApi;
   stats: StatsApi;
   ai: AiApi;
+  wall: WallApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
@@ -946,6 +957,30 @@ export interface LabelApplyResult {
   updatedTagLinks: number;
   preserved: Array<{ shotId: string; fields: ManualShotField[] }>;
   skipped: Array<{ shotId: string; code: string; message: string }>;
+}
+
+/** ---------- S43：分镜墙画布一期（看板） ---------- */
+
+export interface WallLayoutItem {
+  shotId: string;
+  x: number;
+  y: number;
+}
+
+export interface WallGetLayoutArgs {
+  projectId: string;
+}
+
+export interface WallSaveLayoutArgs {
+  projectId: string;
+  items: WallLayoutItem[];
+}
+
+/** 分镜墙视图状态（缩放/平移），按项目存 settings.json，不进数据库 */
+export interface WallViewState {
+  scale: number;
+  panX: number;
+  panY: number;
 }
 
 /** ---------- S36-2：镜头识别 AI 契约 ---------- */

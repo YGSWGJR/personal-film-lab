@@ -3,6 +3,7 @@ import presetTagsSql from './002_preset_tags.sql?raw';
 import detectSql from './003_detect.sql?raw';
 import shotThumbnailSql from './004_shot_thumbnail.sql?raw';
 import manualFieldsSql from './005_manual_fields.sql?raw';
+import shotLayoutSql from './006_shot_layout.sql?raw';
 
 export interface Migration {
   version: number;
@@ -16,4 +17,5 @@ export const MIGRATIONS: Migration[] = [
   { version: 3, sql: detectSql },
   { version: 4, sql: shotThumbnailSql },
   { version: 5, sql: manualFieldsSql },
+  { version: 6, sql: shotLayoutSql },
 ];

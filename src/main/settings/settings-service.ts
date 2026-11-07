@@ -11,6 +11,7 @@ import type {
   SettingsSetArgs,
   ShortcutSettings,
   TimelineSettings,
+  WallViewState,
 } from '../../shared/types';
 import {
   TRACK_HEIGHT_LEVELS,
@@ -239,7 +240,29 @@ function normalizeSettings(
     recognition: normalizeRecognition(args.recognition ?? fallback?.recognition),
     ai: normalizeAi(args.ai, fallback?.ai, forWrite),
     shortcuts: normalizeShortcuts(args.shortcuts ?? fallback?.shortcuts),
+    wallViewState: normalizeWallViewState(args.wallViewState ?? fallback?.wallViewState),
   };
+}
+
+/** S43：分镜墙视图状态消毒——仅保留有限数字，键为项目 id */
+function normalizeWallViewState(
+  value: Record<string, WallViewState> | undefined,
+): Record<string, WallViewState> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const out: Record<string, WallViewState> = {};
+  for (const [key, view] of Object.entries(value)) {
+    if (!key || !view || typeof view !== 'object') continue;
+    const scale = Number(view.scale);
+    const panX = Number(view.panX);
+    const panY = Number(view.panY);
+    if (![scale, panX, panY].every(Number.isFinite)) continue;
+    out[key] = {
+      scale: Math.min(4, Math.max(0.1, scale)),
+      panX: Math.max(-5_000_000, Math.min(5_000_000, panX)),
+      panY: Math.max(-5_000_000, Math.min(5_000_000, panY)),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function normalizeTimeline(value: TimelineSettings | undefined): TimelineSettings {

@@ -12,7 +12,13 @@ import type {
 
 type PathKey = Exclude<
   keyof SettingsSetArgs,
-  'proxyTier' | 'confirmUserContent' | 'timeline' | 'recognition' | 'ai' | 'shortcuts'
+  | 'proxyTier'
+  | 'confirmUserContent'
+  | 'timeline'
+  | 'recognition'
+  | 'ai'
+  | 'shortcuts'
+  | 'wallViewState'
 >;
 type EnvironmentCheck = { tone: 'success' | 'locked' | 'error'; text: string };
 type SettingsDraft = Record<PathKey, string>;

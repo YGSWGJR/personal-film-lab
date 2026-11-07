@@ -22,6 +22,9 @@ import type {
   LabelDetectRunArgs,
   LabelApplyArgs,
   LabelApplyResult,
+  WallLayoutItem,
+  WallGetLayoutArgs,
+  WallSaveLayoutArgs,
   ExtractFrameArgs,
   ExtractFramesArgs,
   ExtractFramesResult,
@@ -443,6 +446,15 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(
     IPC.DETECT_APPLY_LABELS,
     withEnvelope((args: LabelApplyArgs): LabelApplyResult => requireDetect().applyLabels(args)),
+  );
+  // S43：分镜墙画布一期
+  ipcMain.handle(
+    IPC.WALL_GET_LAYOUT,
+    withEnvelope((args: WallGetLayoutArgs): WallLayoutItem[] => requireData().wall.getLayout(args.projectId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_SAVE_LAYOUT,
+    withEnvelope((args: WallSaveLayoutArgs): void => requireData().wall.saveLayout(args.projectId, args.items)),
   );
 
   // ---------- data: external project import ----------

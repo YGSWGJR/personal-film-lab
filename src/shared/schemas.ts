@@ -298,6 +298,22 @@ export const labelDetectRunArgsSchema = z.object({
   shotIds: z.array(z.string().min(1)).min(1).max(100_000).optional(),
 });
 
+/** S43：分镜墙画布一期 */
+export const wallGetLayoutArgsSchema = z.object({
+  projectId: z.string().min(1),
+});
+
+export const wallLayoutItemSchema = z.object({
+  shotId: z.string().min(1),
+  x: z.number().finite().min(-1_000_000).max(1_000_000),
+  y: z.number().finite().min(-1_000_000).max(1_000_000),
+});
+
+export const wallSaveLayoutArgsSchema = z.object({
+  projectId: z.string().min(1),
+  items: z.array(wallLayoutItemSchema).max(100_000),
+});
+
 /** S41：标签应用（按策略写库） */
 export const labelApplyArgsSchema = z.object({
   jobId: z.string().min(1),

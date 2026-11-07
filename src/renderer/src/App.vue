@@ -10,6 +10,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
 import LabelPreviewModal from './components/LabelPreviewModal.vue';
+import StoryboardWall from './components/StoryboardWall.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import SettingsModal from './components/SettingsModal.vue';
@@ -45,6 +46,8 @@ import type {
   LabelApplyPolicy,
   LabelApplyResult,
   LabelPreviewResult,
+  WallLayoutItem,
+  WallViewState,
   ExportProgressEvent,
   GpuStatus,
   IpcResult,
@@ -142,6 +145,10 @@ const labelPreview = ref<LabelPreviewResult | null>(null);
 const labelPreviewOpen = ref(false);
 const labelApplying = ref(false);
 const labelSelected = ref<string[]>([]);
+/** S43：分镜墙画布（看板一期） */
+const wallOpen = ref(false);
+const wallViewState = ref<WallViewState | null>(null);
+let wallViewStateTimer: ReturnType<typeof setTimeout> | null = null;
 const detectionStageLabel = computed(() => {
   const progress = detectionProgress.value;
   const percent = progress?.percent ?? 0;
@@ -343,6 +350,7 @@ const workbenchColumns = computed(
 const detectionResultOpen = computed(() => detectionOpen.value && !detecting.value);
 const overlayOpen = computed(
   () =>
+    wallOpen.value ||
     detectionResultOpen.value ||
     exportOpen.value ||
     termEditorOpen.value ||
@@ -2832,6 +2840,51 @@ async function applyLabelPreview(policy: LabelApplyPolicy): Promise<void> {
   }
 }
 
+/** S43：分镜墙打开（含布局预取） */
+async function openWall(): Promise<void> {
+  if (demoMode.value || !activeProject.value || shots.value.length === 0) {
+    showToast('请先导入影片并完成镜头切分，再打开分镜墙。');
+    return;
+  }
+  const base = settings.value?.wallViewState?.[activeProject.value.id] ?? null;
+  wallViewState.value = base;
+  wallOpen.value = true;
+}
+
+function closeWall(): void {
+  wallOpen.value = false;
+}
+
+async function onWallLayoutChange(items: WallLayoutItem[]): Promise<void> {
+  if (!activeProject.value) return;
+  const result = await window.api.wall.saveLayout({
+    projectId: activeProject.value.id,
+    items,
+  });
+  if (!result.ok) showToast(result.error.message, 'error', result.error.code);
+}
+
+function onWallViewStateChange(view: WallViewState): void {
+  wallViewState.value = view;
+  if (wallViewStateTimer) clearTimeout(wallViewStateTimer);
+  wallViewStateTimer = setTimeout(() => void persistWallViewState(), 400);
+}
+
+async function persistWallViewState(): Promise<void> {
+  const current = settings.value;
+  if (!current || current.environmentOverride || !activeProject.value) return;
+  const next = { ...(current.wallViewState ?? {}) };
+  next[activeProject.value.id] = wallViewState.value ?? { scale: 1, panX: 0, panY: 0 };
+  const result = await window.api.settings.set(plainSettings({ ...current, wallViewState: next }));
+  if (result.ok) settings.value = result.data;
+}
+
+function onWallSeek(startMs: number): void {
+  const shot = shots.value.find((item) => item.startMs === startMs);
+  if (shot) void selectShot(shot);
+  void seekTo(startMs);
+}
+
 function handleLabelApplyResult(result: LabelApplyResult): void {
   const preservedCount = result.preserved.length;
   if (result.skipped.length > 0) {
@@ -2889,6 +2942,10 @@ function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
 
 /** 0.3.0：按层级关闭最上层的弹层（Esc）；返回是否有弹层被关闭 */
 function closeTopOverlay(): boolean {
+  if (wallOpen.value) {
+    wallOpen.value = false;
+    return true;
+  }
   if (aiAuthRequest.value) {
     aiAuthRequest.value = null;
     return true;
@@ -3318,6 +3375,15 @@ onBeforeUnmount(() => {
         >
           标签识别
         </button>
+        <button
+          class="nav-item"
+          type="button"
+          :disabled="shots.length === 0"
+          title="把当前镜头铺在画布上自由摆放、缩放浏览"
+          @click="openWall"
+        >
+          分镜墙
+        </button>
         <button class="nav-item" type="button" @click="captureStill">
           <AppIcon name="camera" :size="16" />
           静帧截图
@@ -3517,6 +3583,17 @@ onBeforeUnmount(() => {
         <span>v{{ info?.version ?? '0.1.0' }}</span>
       </div>
     </footer>
+
+    <StoryboardWall
+      v-if="wallOpen"
+      :shots="shots"
+      :project-id="activeProject?.id ?? ''"
+      :view-state="wallViewState"
+      @close="closeWall"
+      @seek="onWallSeek"
+      @layout-change="onWallLayoutChange"
+      @view-state-change="onWallViewStateChange"
+    />
 
     <transition name="toast">
       <div v-if="transcoding" class="transfer-toast">
