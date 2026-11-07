@@ -144,12 +144,12 @@ export class WallBoardsRepository {
     });
   }
 
-  listNodeEdges(boardId: string): Array<{ fromNodeId: string; toNodeId: string; kind: string }> {
+  listNodeEdges(boardId: string): Array<{ fromShotId: string; toShotId: string; kind: string }> {
     this.assertBoard(boardId);
     const rows = this.db
       .prepare('SELECT from_node, to_node, kind FROM wall_node_edges WHERE board_id = ? ORDER BY created_at ASC')
       .all(boardId) as Array<{ from_node: string; to_node: string; kind: string }>;
-    return rows.map((r) => ({ fromNodeId: r.from_node, toNodeId: r.to_node, kind: r.kind }));
+    return rows.map((r) => ({ fromShotId: r.from_node, toShotId: r.to_node, kind: r.kind }));
   }
 
   addNodeEdge(boardId: string, fromNodeId: string, toNodeId: string, kind: 'solid' | 'dash'): void {

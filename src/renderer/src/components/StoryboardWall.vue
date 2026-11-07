@@ -35,6 +35,7 @@ const emit = defineEmits<{
   editNode: [nodeId: string];
   createNode: [kind: 'image' | 'black' | 'white'];
   deleteNode: [nodeId: string];
+  project: [];
 }>();
 
 const CARD_W = 220;
@@ -1260,6 +1261,7 @@ function fmtDuration(ms: number): string {
       <button type="button" class="wall-hud-btn" title="复位视图（Ctrl+0）" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
       <button type="button" class="wall-hud-btn wall-export" title="按连线顺序导出镜头图片" @click.stop="exportImages">⇩</button>
       <button type="button" class="wall-hud-btn" title="整理节点（连线链成行，未连线按镜号排下方）" @click.stop="organizeNodes">⌗</button>
+      <button type="button" class="wall-hud-btn wall-project" title="投影到拉片界面：按连线顺序把节点呈现在时间线/主播放/右侧面板" @click.stop="emit('project')">▣</button>
     </div>
     <ContextMenu
       :visible="ctxMenu.visible"

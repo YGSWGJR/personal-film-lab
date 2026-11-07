@@ -153,6 +153,11 @@ const wallViewState = ref<WallViewState | null>(null);
 const wallMode = ref<'project' | 'independent'>('project');
 const wallBoardId = ref<string | null>(null);
 const wallBoardName = ref('');
+/** S45 分镜本投影：独立分镜本按连线顺序/分层呈现在拉片工作区 */
+const projectionOn = ref(false);
+const projectedPlaying = ref(false);
+let projectedRaf = 0;
+let projectedT0 = 0;
 const wallRef = ref<InstanceType<typeof StoryboardWall> | null>(null);
 /** 独立分镜本节点映射为 WorkspaceShot 供画布/放映复用 */
 const boardShots = ref<WorkspaceShot[]>([]);
@@ -872,6 +877,12 @@ async function closePlayer(): Promise<void> {
 }
 
 async function togglePlayback(): Promise<void> {
+  if (projectedMode.value) {
+    // S45 投影模式：图片幻灯播放（不依赖 mpv）
+    if (projectedPlaying.value) stopProjectedPlayback();
+    else startProjectedPlayback();
+    return;
+  }
   if (busy.value) return;
   busy.value = true;
   try {
@@ -1719,6 +1730,7 @@ async function runStoryboardExport(args: Omit<StoryboardExportArgs, 'projectId'>
 function updateNote(value: string): void {
   if (!selectedId.value) return;
   notes[selectedId.value] = value;
+  if (projectedMode.value) return; // 投影模式笔记仅内存（节点数据由分镜本编辑卡维护）
   pendingNoteShotId = selectedId.value;
   if (noteTimer) clearTimeout(noteTimer);
   noteTimer = setTimeout(() => {
@@ -2973,7 +2985,7 @@ async function openIndependentBoard(boardId: string | null): Promise<void> {
   wallOpen.value = true;
 }
 
-/** 独立分镜本节点 → WorkspaceShot 映射（文本节点缩略图=canvas 渲染） */
+/** 独立分镜本节点 → WorkspaceShot 映射（拓扑分层：并行节点共享同一时间段） */
 async function loadBoardNodes(): Promise<void> {
   if (!wallBoardId.value) return;
   const [nodes, edges] = await Promise.all([
@@ -2984,15 +2996,142 @@ async function loadBoardNodes(): Promise<void> {
     showToast(nodes.error.message, 'error', nodes.error.code);
     return;
   }
+  if (!edges.ok) {
+    showToast(edges.error.message, 'error', edges.error.code);
+    return;
+  }
+  const adj = new Map<string, Array<string>>();
+  for (const node of nodes.data) adj.set(node.id, []);
+  for (const e of edges.data) {
+    adj.get(e.fromShotId)?.push(e.toShotId);
+  }
+  // BFS 分层（深度=层），层内节点共享 startMs = 前层最大 end
+  const depth = new Map<string, number>();
+  const roots = nodes.data.filter((node) => !edges.data.some((e) => e.toShotId === node.id));
+  const queue = (roots.length > 0 ? roots : nodes.data.slice(0, 1)).map((node) => node.id);
+  for (const id of queue) depth.set(id, 0);
+  let frontier = queue;
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const cur of frontier) {
+      for (const nb of adj.get(cur) ?? []) {
+        if (!depth.has(nb)) {
+          depth.set(nb, (depth.get(cur) ?? 0) + 1);
+          next.push(nb);
+        }
+      }
+    }
+    frontier = next;
+  }
+  const layerEnd = new Map<number, number>();
   const mapped: WorkspaceShot[] = [];
-  for (const [i, node] of nodes.data.entries()) {
-    const startMs = mapped.length > 0 ? mapped[i - 1].endMs : 0;
-    mapped.push({
-      ...emptyShotShape(wallBoardId.value, node, startMs),
+  const ordered = [...nodes.data].sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0));
+  for (const node of ordered) {
+    const layer = depth.get(node.id) ?? 0;
+    const startMs = layerEnd.get(layer) ?? 0;
+    const shape = emptyShotShape(wallBoardId.value, node, startMs);
+    shape.endMs = startMs + node.durationMs;
+    shape.durationMs = node.durationMs;
+    mapped.push(shape);
+    layerEnd.set(layer, Math.max(layerEnd.get(layer) ?? 0, startMs + node.durationMs));
+    // 笔记 → 右侧镜头笔记（投影模式仅内存）
+    notes[node.id] = node.note;
+  }
+  // 后续未连通节点顺序补齐
+  const lastEnd = mapped.at(-1)?.endMs ?? 0;
+  let cursor = lastEnd;
+  for (const node of nodes.data) {
+    if (mapped.some((m) => m.id === node.id)) continue;
+    mapped.push({ ...emptyShotShape(wallBoardId.value, node, cursor) });
+    cursor += node.durationMs;
+  }
+  boardShots.value = mapped.map((shot, i) => ({ ...shot, index: i + 1 }));
+}
+
+const projectedMode = computed(
+  () => wallMode.value === 'independent' && projectionOn.value && boardShots.value.length > 0,
+);
+
+/** 工作区数据源：投影模式=分镜本节点映射 */
+const workbenchShots = computed(() => (projectedMode.value ? boardShots.value : shots.value));
+
+/** 投影多宫格：与选中节点时间重叠的其他节点（并行层）图列表 */
+/** S45：时间线多轨（并行节点按时间重叠贪心分行） */
+const boardTracks = computed(() => {
+  if (!projectedMode.value) return null;
+  const rows: Array<Array<{ id: string; title: string; durationMs: number; thumbnail?: string | null }>> = [];
+  const rowEnd: number[] = [];
+  for (const shot of boardShots.value) {
+    let row = rowEnd.findIndex((end) => end <= shot.startMs);
+    if (row < 0) {
+      rowEnd.push(shot.endMs);
+      row = rowEnd.length - 1;
+    } else {
+      rowEnd[row] = shot.endMs;
+    }
+    if (!rows[row]) rows[row] = [];
+    rows[row].push({
+      id: shot.id,
+      title: shot.title,
+      durationMs: shot.durationMs,
+      thumbnail: shot.thumbnail,
     });
   }
-  boardShots.value = mapped;
-  void edges;
+  return rows;
+});
+
+const projectionImages = computed<string[]>(() => {
+  if (!projectedMode.value) return [];
+  const sel = selectedShot.value;
+  if (!sel) return [];
+  const mates = boardShots.value.filter(
+    (shot) => shot.id !== sel.id && shot.startMs < sel.endMs && shot.endMs > sel.startMs,
+  );
+  return [sel.thumbnail, ...mates.map((shot) => shot.thumbnail)];
+});
+
+function startProjectedPlayback(): void {
+  if (projectedPlaying.value) return;
+  const cur = boardShots.value.find(
+    (shot) => previewTimeMs.value >= shot.startMs && previewTimeMs.value < shot.endMs,
+  ) ?? boardShots.value[0];
+  if (!cur) return;
+  if (previewTimeMs.value < cur.startMs || previewTimeMs.value >= cur.endMs) {
+    previewTimeMs.value = cur.startMs;
+  }
+  projectedPlaying.value = true;
+  projectedT0 = performance.now();
+  const tick2 = (now: number): void => {
+    if (!projectedPlaying.value) return;
+    const dt = now - projectedT0;
+    previewTimeMs.value = Math.min(cur.endMs - 1, cur.startMs + dt);
+    if (previewTimeMs.value >= cur.endMs - 1) {
+      const next = boardShots.value.find((shot) => shot.startMs >= cur.endMs);
+      if (next) {
+        selectedId.value = next.id;
+        startProjectedPlayback();
+        return;
+      }
+      projectedPlaying.value = false;
+      return;
+    }
+    projectedRaf = requestAnimationFrame(tick2);
+  };
+  projectedRaf = requestAnimationFrame(tick2);
+}
+function stopProjectedPlayback(): void {
+  projectedPlaying.value = false;
+  if (projectedRaf) cancelAnimationFrame(projectedRaf);
+  projectedRaf = 0;
+}
+
+/** 投影开关（墙 HUD 触发） */
+function toggleProjection(): void {
+  projectionOn.value = !projectionOn.value;
+  if (projectionOn.value) {
+    wallOpen.value = false;
+    showToast('分镜本投影已开启：时间线/主播放/右侧面板来自分镜本节点。', 'success', '分镜本投影');
+  }
 }
 
 function emptyShotShape(boardId: string, node: WallBoardNodeInfo, startMs: number): WorkspaceShot {
@@ -3667,6 +3806,10 @@ onBeforeUnmount(() => {
       </nav>
 
       <div class="topbar-right">
+        <div v-if="projectedMode" class="board-projection-badge">
+          分镜本投影 · {{ wallBoardName }}
+          <button type="button" @click="toggleProjection">退出</button>
+        </div>
         <div v-if="detecting && !detectionCapsuleHidden" class="detect-status-chip">
           <span class="detect-chip-dot"></span>
           <strong>{{ detectionStageLabel }} · {{ detectionProgress?.percent ?? 0 }}%</strong>
@@ -3745,7 +3888,7 @@ onBeforeUnmount(() => {
 
     <div class="workbench" :style="{ gridTemplateColumns: workbenchColumns }">
       <ShotListPanel
-        :shots="shots"
+        :shots="workbenchShots"
         :selected-id="selectedId"
         :merge-partner-id="mergePartnerId"
         :current-time-ms="displayTimeMs"
@@ -3761,7 +3904,8 @@ onBeforeUnmount(() => {
 
       <PlayerWorkspace
         :player="player"
-        :shots="shots"
+        :shots="workbenchShots"
+        :projection-images="projectionImages"
         :markers="markers"
         :selected-shot="selectedShot"
         :merge-partner-id="mergePartnerId"
@@ -3776,6 +3920,8 @@ onBeforeUnmount(() => {
         :media-label="mediaLabel"
         :track-height="timelineSettings.trackHeight"
         :px-per-second="timelineSettings.pxPerSecond"
+        :board-tracks="boardTracks"
+        :projection-mode="projectedMode"
         :in-point-ms="inPointMs"
         :out-point-ms="outPointMs"
         @open="openVideo"
@@ -3857,6 +4003,7 @@ onBeforeUnmount(() => {
       @edit-node="openNodeEditor"
       @create-node="addBoardNode"
       @delete-node="deleteBoardNode"
+      @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">
         {{ wallBoardName }}（独立分镜本）

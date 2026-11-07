@@ -736,3 +736,28 @@ select:focus-visible {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+
+/* S45 分镜本投影徽标 */
+.board-projection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border: 1px solid var(--green, #34d399);
+  border-radius: 999px;
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green, #34d399);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.board-projection-badge button {
+  border: 1px solid var(--green, #34d399);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--green, #34d399);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 8px;
+}

@@ -12,7 +12,7 @@ import type {
 import { PLAYBACK_SPEEDS } from '../../../shared/types';
 import { formatTimecodeFF, frameFromMs, parseTimecodeFF } from '../../../shared/time';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   player: PlayerState;
   shots: WorkspaceShot[];
   markers: TimelineMarker[];
@@ -31,7 +31,8 @@ const props = defineProps<{
   pxPerSecond: number;
   inPointMs: number | null;
   outPointMs: number | null;
-}>();
+  projectionImages?: string[];
+}>(), { projectionImages: () => [] });
 
 const emit = defineEmits<{
   open: [];
@@ -213,7 +214,20 @@ onBeforeUnmount(() => {
 
       <div class="video-frame">
         <div ref="videoSlot" class="video-slot" :class="{ loaded: player.hasFile }">
-          <img v-if="!player.hasFile" class="video-poster" :src="poster" :alt="selectedShot?.title ?? '影片预览'" />
+          <div
+            v-if="!player.hasFile && (projectionImages?.length ?? 0) > 0"
+            class="projection-grid"
+            :class="{ multi: projectionImages.length > 1 }"
+          >
+            <img
+              v-for="(img, gi) in projectionImages ?? []"
+              :key="gi"
+              :src="img"
+              :alt="'并行分镜 ' + (gi + 1)"
+              draggable="false"
+            />
+          </div>
+          <img v-else-if="!player.hasFile" class="video-poster" :src="poster" :alt="selectedShot?.title ?? '影片预览'" />
           <div v-if="!player.hasFile" class="poster-shade"></div>
           <div v-if="!player.hasFile" class="poster-grade"></div>
           <div v-if="!player.hasFile" class="poster-badge">REFERENCE FRAME</div>
@@ -1053,3 +1067,27 @@ kbd {
   }
 }
 </style>
+
+
+/* S45 投影模式：并行分镜多宫格 */
+.projection-grid {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  background: #05070c;
+}
+
+.projection-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.projection-grid.multi {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}

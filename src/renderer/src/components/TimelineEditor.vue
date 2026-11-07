@@ -27,6 +27,9 @@ const props = defineProps<{
   inPointMs: number | null;
   /** S36-4b：出点（ms），未设置时为 null。 */
   outPointMs: number | null;
+  /** S45 投影模式：按连线链分组的轨道（每链一行，轨数无限） */
+  boardTracks?: Array<Array<{ id: string; title: string; durationMs: number; thumbnail?: string | null }>> | null;
+  projectionMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -1058,6 +1061,28 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </section>
+    <section
+      v-if="projectionMode && (boardTracks?.length ?? 0) > 0"
+      class="board-tracks"
+      aria-label="分镜本轨道"
+    >
+      <div v-for="(row, ri) in boardTracks" :key="ri" class="board-track-row">
+        <span class="board-track-name">链 {{ ri + 1 }}</span>
+        <div class="board-track-blocks">
+          <div
+            v-for="node in row"
+            :key="node.id"
+            class="board-track-block"
+            :title="node.title"
+            :style="{ flexGrow: Math.max(0.5, node.durationMs / 1000) }"
+          >
+            <img v-if="node.thumbnail" :src="node.thumbnail" alt="" draggable="false" />
+            <span v-else class="board-track-text">{{ node.title.slice(0, 8) }}</span>
+            <b>{{ node.title }}</b>
+          </div>
+        </div>
+      </div>
+    </section>
 </template>
 
 <style scoped>
@@ -1934,3 +1959,66 @@ onBeforeUnmount(() => {
   }
 }
 </style>
+
+
+/* S45 投影模式：分镜本多轨 */
+.board-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  background: #0c131c;
+  overflow-x: auto;
+}
+
+.board-track-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-track-name {
+  flex: 0 0 40px;
+  font-size: 10px;
+  color: var(--text-muted, #93a4bd);
+}
+
+.board-track-blocks {
+  display: flex;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+
+.board-track-block {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 30px;
+  overflow: hidden;
+  height: 30px;
+  padding: 0 4px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 4px;
+  background: #16202e;
+}
+
+.board-track-block img {
+  height: 22px;
+  width: 38px;
+  object-fit: cover;
+  border-radius: 2px;
+}
+
+.board-track-block b {
+  color: var(--text-soft, #e6edf7);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.board-track-text {
+  color: var(--text-muted, #93a4bd);
+  font-size: 10px;
+}
