@@ -427,6 +427,8 @@ export const wallImportImageArgsSchema = z.object({
   srcPath: z.string().min(1).max(1000),
 });
 
+export const wallPickImageArgsSchema = z.object({});
+
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),
   shotId: z.string().min(1),

@@ -42,6 +42,7 @@ import {
   wallNodeEdgeRemoveArgsSchema,
   wallNodeAnnotationSaveArgsSchema,
   wallImportImageArgsSchema,
+  wallPickImageArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -310,6 +311,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.WALL_LIST_NODE_ANNOTATIONS]: wallNodeListArgsSchema,
   [IPC.WALL_SAVE_NODE_ANNOTATIONS]: wallNodeAnnotationSaveArgsSchema,
   [IPC.WALL_IMPORT_IMAGE]: wallImportImageArgsSchema,
+  [IPC.WALL_PICK_IMAGE]: wallPickImageArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,

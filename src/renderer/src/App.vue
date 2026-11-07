@@ -3194,12 +3194,16 @@ function textThumbDataUrl(text: string, dark: boolean): string {
   return canvas.toDataURL('image/png');
 }
 
-/** S44：添加节点（导入照片 / 黑底 / 白底） */
-async function addBoardNode(kind: 'image' | 'black' | 'white'): Promise<void> {
+/** S44：添加节点（导入照片 / 黑底文本框；白底入口已按用户要求移除） */
+async function addBoardNode(kind: 'image' | 'black'): Promise<void> {
   if (!wallBoardId.value) return;
   if (kind === 'image') {
     const picked = await window.api.wall.pickImage();
-    if (!picked.ok || !picked.data.path) return;
+    if (!picked.ok) {
+      showToast(picked.error?.message ?? '图片选择失败', 'error', picked.error?.code);
+      return;
+    }
+    if (!picked.data.path) return;
     const imported = await window.api.wall.importImage({
       boardId: wallBoardId.value,
       srcPath: picked.data.path,
@@ -3214,7 +3218,7 @@ async function addBoardNode(kind: 'image' | 'black' | 'white'): Promise<void> {
   const created = await window.api.wall.addNode({
     boardId: wallBoardId.value,
     source: 'text',
-    title: kind === 'black' ? '黑底分镜' : '白底分镜',
+    title: '黑底分镜',
     x: 80 + (boardShots.value.length % 6) * 60,
     y: 80 + Math.floor(boardShots.value.length / 6) * 40,
   });
@@ -4037,7 +4041,7 @@ onBeforeUnmount(() => {
         </button>
         <button type="button" class="picker-option" @click="pickIndependentBoard(null)">
           <b>新建分镜本</b>
-          <small>不依赖拉片素材：导入照片或黑白底+文本框开始创作</small>
+          <small>不依赖拉片素材：导入照片或黑底+文本框开始创作</small>
         </button>
         <template v-if="wallPickerBoards.length > 0">
           <p class="picker-title">最近分镜本</p>

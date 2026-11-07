@@ -33,7 +33,7 @@ const emit = defineEmits<{
   layoutChange: [items: WallLayoutItem[]];
   viewStateChange: [view: WallViewState];
   editNode: [nodeId: string];
-  createNode: [kind: 'image' | 'black' | 'white'];
+  createNode: [kind: 'image' | 'black'];
   deleteNode: [nodeId: string];
   project: [];
 }>();
@@ -967,7 +967,6 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
     if (props.boardMode) {
       items.push({ label: '添加节点 · 导入照片', action: () => emit('createNode', 'image') });
       items.push({ label: '添加节点 · 黑底+文本', action: () => emit('createNode', 'black') });
-      items.push({ label: '添加节点 · 白底+文本', action: () => emit('createNode', 'white') });
       items.push({
         label: selectedIds.value.size > 0 ? `删除节点（已选 ${selectedIds.value.size} 张）` : '删除节点（先选中卡片）',
         danger: true,
@@ -1301,7 +1300,7 @@ function fmtDuration(ms: number): string {
     </teleport>
     <div v-if="props.boardMode && laidShots.length === 0" class="wall-empty-guide">
       <b>空白分镜本</b>
-      <span>右键画布空白处 → 添加节点（导入照片 / 黑白底+文本框）；拖动卡片右侧端口连线编排顺序</span>
+      <span>右键画布空白处 → 添加节点（导入照片 / 黑底+文本框）；拖动卡片两侧端口连线编排顺序</span>
     </div>
     <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击卡片回到时间线定位 · Ctrl+0 复位</div>
     <!-- S43 分镜PPT 放映层 -->
@@ -1531,7 +1530,6 @@ function fmtDuration(ms: number): string {
   border-radius: 3px;
   background: var(--bg-deep, #0a0e16);
   transform: translateY(-50%);
-  pointer-events: none;
   z-index: 3;
 }
 
