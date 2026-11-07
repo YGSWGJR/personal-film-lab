@@ -241,6 +241,52 @@ export class WallBoardsRepository {
     }
     return { assetPath: 'boards/' + boardId + '/' + fileName };
   }
+
+  /** 批次3：节点标签（六类，与镜头标签体系同构但不混表） */
+  listTags(boardId: string): Record<string, Array<{ category: string; name: string }>> {
+    this.assertBoard(boardId);
+    const rows = this.db
+      .prepare('SELECT node_id, category, name FROM wall_node_tags WHERE board_id = ? ORDER BY rowid ASC')
+      .all(boardId) as Array<{ node_id: string; category: string; name: string }>;
+    const out: Record<string, Array<{ category: string; name: string }>> = {};
+    for (const row of rows) {
+      const list = out[row.node_id] ?? [];
+      list.push({ category: row.category, name: row.name });
+      out[row.node_id] = list;
+    }
+    return out;
+  }
+
+  addTag(boardId: string, nodeId: string, category: string, name: string): void {
+    this.assertTagTarget(boardId, nodeId, category, name);
+    this.layer.transaction(() => {
+      this.db
+        .prepare(
+          'INSERT INTO wall_node_tags (board_id, node_id, category, name) VALUES (?, ?, ?, ?) ON CONFLICT(board_id, node_id, category, name) DO NOTHING',
+        )
+        .run(boardId, nodeId, category, name);
+    });
+  }
+
+  removeTag(boardId: string, nodeId: string, category: string, name: string): void {
+    this.assertTagTarget(boardId, nodeId, category, name);
+    this.layer.transaction(() => {
+      this.db
+        .prepare('DELETE FROM wall_node_tags WHERE board_id = ? AND node_id = ? AND category = ? AND name = ?')
+        .run(boardId, nodeId, category, name);
+    });
+  }
+
+  private assertTagTarget(boardId: string, nodeId: string, category: string, name: string): void {
+    this.assertBoard(boardId);
+    if (category.length < 1 || category.length > 40 || name.length < 1 || name.length > 40) {
+      throw new DataError('WALL_ITEM_INVALID', '标签类别/名称长度无效', { category, name });
+    }
+    const node = this.db.prepare('SELECT id FROM wall_nodes WHERE id = ? AND board_id = ?').get(nodeId, boardId);
+    if (!node) {
+      throw new DataError('WALL_NODE_NOT_FOUND', '节点不存在或不属于该分镜本', { nodeId, boardId });
+    }
+  }
 }
 
 function mapNode(row: Record<string, unknown>): WallBoardNode {

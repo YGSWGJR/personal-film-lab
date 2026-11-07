@@ -23,8 +23,10 @@ const props = withDefaults(
     viewState: WallViewState | null;
     projectId: string;
     boardMode?: boolean;
+    /** 批次3：外部请求选中的节点（导入照片后自动选中并打开标注面板） */
+    focusNodeId?: string | null;
   }>(),
-  { boardMode: false },
+  { boardMode: false, focusNodeId: null },
 );
 
 const emit = defineEmits<{
@@ -36,6 +38,7 @@ const emit = defineEmits<{
   createNode: [kind: 'image' | 'black'];
   deleteNode: [nodeId: string];
   nodeText: [nodeId: string, text: string];
+  selectionChange: [ids: string[]];
   project: [];
 }>();
 
@@ -132,6 +135,22 @@ function ensureLayout(): void {
 watch(
   () => props.shots.map((s) => s.id).join('|'),
   () => ensureLayout(),
+);
+
+// 批次3：外部请求选中节点（如导入照片后自动选中并打开标注面板）
+watch(
+  () => props.focusNodeId,
+  (id) => {
+    if (!id || !props.boardMode) return;
+    selectedIds.value = new Set([id]);
+    emit('selectionChange', [id]);
+    // 批次2 §3.2：文本节点创建后直接进入编辑态
+    const shot = props.shots.find((s) => s.id === id);
+    if (shot && shot.textContent !== undefined) {
+      editText.value = shot.textContent;
+      editingTextId.value = id;
+    }
+  },
 );
 
 // 视图状态可能在挂载后（settings 异步读取）才到达
@@ -768,6 +787,7 @@ function toggleSelect(shotId: string, event: PointerEvent): void {
     next.clear();
   }
   selectedIds.value = next;
+  emit('selectionChange', [...next]);
 }
 
 async function createGroupFromSelection(): Promise<void> {
@@ -780,6 +800,7 @@ async function createGroupFromSelection(): Promise<void> {
   });
   if (result.ok) {
     selectedIds.value = new Set();
+    emit('selectionChange', []);
     await reloadGraph();
   } else {
     edgeHint.value = result.error.message;
@@ -975,6 +996,7 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
         action: () => {
           for (const id of [...selectedIds.value]) void removeNodeFromWall(id);
           selectedIds.value = new Set();
+          emit('selectionChange', []);
         },
       });
     }

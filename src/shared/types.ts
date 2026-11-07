@@ -349,6 +349,9 @@ export interface WallApi {
   saveNodeAnnotations(args: WallNodeAnnotationSaveArgs): Promise<IpcResult<void>>;
   importImage(args: WallImportImageArgs): Promise<IpcResult<WallImportImageResult>>;
   pickImage(): Promise<IpcResult<WallPickImageResult>>;
+  listNodeTags(args: WallNodeTagListArgs): Promise<IpcResult<Record<string, WallNodeTagInfo[]>>>;
+  addNodeTag(args: WallNodeTagMutateArgs): Promise<IpcResult<void>>;
+  removeNodeTag(args: WallNodeTagMutateArgs): Promise<IpcResult<void>>;
 }
 
 export interface WorkspaceState {
@@ -1150,6 +1153,23 @@ export interface WallNodeUpdateArgs {
 
 export interface WallNodeDeleteArgs {
   nodeId: string;
+}
+
+/** 批次3：分镜本节点标签（六类，存 wall_node_tags，不与镜头标签混表） */
+export interface WallNodeTagInfo {
+  category: string;
+  name: string;
+}
+
+export interface WallNodeTagListArgs {
+  boardId: string;
+}
+
+export interface WallNodeTagMutateArgs {
+  boardId: string;
+  nodeId: string;
+  category: string;
+  name: string;
 }
 
 export interface WallNodeEdgeListArgs {

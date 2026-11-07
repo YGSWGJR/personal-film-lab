@@ -430,6 +430,15 @@ export const wallImportImageArgsSchema = z.object({
 
 export const wallPickImageArgsSchema = z.object({});
 
+export const wallNodeTagListArgsSchema = z.object({ boardId: z.string().min(1) });
+
+export const wallNodeTagMutateArgsSchema = z.object({
+  boardId: z.string().min(1),
+  nodeId: z.string().min(1),
+  category: z.string().min(1).max(40),
+  name: z.string().min(1).max(40),
+});
+
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),
   shotId: z.string().min(1),

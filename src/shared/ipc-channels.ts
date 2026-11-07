@@ -114,6 +114,9 @@ export const IPC = {
   WALL_SAVE_NODE_ANNOTATIONS: 'wall:saveNodeAnnotations',
   WALL_IMPORT_IMAGE: 'wall:importImage',
   WALL_PICK_IMAGE: 'wall:pickImage',
+  WALL_LIST_NODE_TAGS: 'wall:listNodeTags',
+  WALL_ADD_NODE_TAG: 'wall:addNodeTag',
+  WALL_REMOVE_NODE_TAG: 'wall:removeNodeTag',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',

@@ -11,6 +11,7 @@ import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
 import LabelPreviewModal from './components/LabelPreviewModal.vue';
 import StoryboardWall from './components/StoryboardWall.vue';
+import WallNodePanel from './components/WallNodePanel.vue';
 import ExportModal from './components/ExportModal.vue';
 import PlayerWorkspace from './components/PlayerWorkspace.vue';
 import SettingsModal from './components/SettingsModal.vue';
@@ -161,6 +162,12 @@ let projectedT0 = 0;
 const wallRef = ref<InstanceType<typeof StoryboardWall> | null>(null);
 /** 独立分镜本节点映射为 WorkspaceShot 供画布/放映复用 */
 const boardShots = ref<WorkspaceShot[]>([]);
+/** 批次3：独立分镜本节点原始信息（WallNodePanel 数据源，一一对应保存） */
+const boardNodesInfo = ref<WallBoardNodeInfo[]>([]);
+/** 批次3：分镜墙当前选中节点（0/1/多） */
+const wallSelectedIds = ref<string[]>([]);
+/** 批次3：外部请求选中并聚焦的节点 id（导入/新建后自动选中） */
+const boardFocusNodeId = ref<string | null>(null);
 const wallNodeEdit = ref<{ nodeId: string; title: string; durationMs: number; note: string } | null>(null);
 /** S44：有素材时的分镜本选择卡 */
 const wallPickerOpen = ref(false);
@@ -3015,6 +3022,7 @@ async function loadBoardNodes(): Promise<void> {
     showToast(edges.error.message, 'error', edges.error.code);
     return;
   }
+  boardNodesInfo.value = nodes.data;
   const adj = new Map<string, Array<string>>();
   for (const node of nodes.data) adj.set(node.id, []);
   for (const e of edges.data) {
@@ -3236,6 +3244,7 @@ async function addBoardNode(kind: 'image' | 'black'): Promise<void> {
       return;
     }
     await loadBoardNodes();
+    boardFocusNodeId.value = imported.data.nodeId;
     return;
   }
   const created = await window.api.wall.addNode({
@@ -3250,6 +3259,22 @@ async function addBoardNode(kind: 'image' | 'black'): Promise<void> {
     return;
   }
   await loadBoardNodes();
+  boardFocusNodeId.value = created.data.id;
+}
+
+/** 批次3：标注面板数据源（单选节点）与面板保存后刷新 */
+const wallPanelNode = computed<WallBoardNodeInfo | null>(() =>
+  wallSelectedIds.value.length === 1
+    ? (boardNodesInfo.value.find((n) => n.id === wallSelectedIds.value[0]) ?? null)
+    : null,
+);
+
+function onWallSelectionChange(ids: string[]): void {
+  wallSelectedIds.value = ids;
+}
+
+function onWallNodePanelChanged(): void {
+  void loadBoardNodes();
 }
 
 /** 批次2：文本节点内联编辑 → 缩略图即时重绘，DB 写入防抖 500ms */
@@ -3260,6 +3285,8 @@ function onBoardNodeText(nodeId: string, text: string): void {
   if (!shot) return;
   shot.textContent = text;
   shot.thumbnail = textThumbDataUrl(text);
+  const info = boardNodesInfo.value.find((n) => n.id === nodeId);
+  if (info) info.textContent = text;
   const existing = nodeTextTimers.get(nodeId);
   if (existing) window.clearTimeout(existing);
   nodeTextTimers.set(
@@ -4061,6 +4088,7 @@ onBeforeUnmount(() => {
       :project-id="wallMode === 'independent' ? 'boards' : activeProject?.id ?? ''"
       :view-state="wallViewState"
       :board-mode="wallMode === 'independent'"
+      :focus-node-id="boardFocusNodeId"
       @close="closeWall"
       @seek="onWallSeek"
       @layout-change="onWallLayoutChange"
@@ -4069,12 +4097,20 @@ onBeforeUnmount(() => {
       @create-node="addBoardNode"
       @delete-node="deleteBoardNode"
       @node-text="onBoardNodeText"
+      @selection-change="onWallSelectionChange"
       @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">
         {{ wallBoardName }}（独立分镜本）
       </div>
     </StoryboardWall>
+
+    <WallNodePanel
+      v-if="wallOpen && wallMode === 'independent'"
+      :board-id="wallBoardId ?? ''"
+      :node="wallPanelNode"
+      @changed="onWallNodePanelChanged"
+    />
 
     <div v-if="wallPickerOpen" class="node-edit-mask" @pointerdown.self="wallPickerOpen = false">
       <div class="node-edit-card">

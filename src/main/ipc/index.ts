@@ -46,6 +46,8 @@ import type {
   WallNodeEdgeAddArgs,
   WallNodeEdgeRemoveArgs,
   WallNodeAnnotationSaveArgs,
+  WallNodeTagListArgs,
+  WallNodeTagMutateArgs,
   WallImportImageArgs,
   WallPickImageResult,
   ExtractFrameArgs,
@@ -618,6 +620,22 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       assetUrl: 'lapian-asset://boards/' + registered.assetPath.slice('boards/'.length),
     };
   }));
+  ipcMain.handle(
+    IPC.WALL_LIST_NODE_TAGS,
+    withEnvelope((args: WallNodeTagListArgs) => requireData().wallBoards.listTags(args.boardId)),
+  );
+  ipcMain.handle(
+    IPC.WALL_ADD_NODE_TAG,
+    withEnvelope((args: WallNodeTagMutateArgs): void =>
+      requireData().wallBoards.addTag(args.boardId, args.nodeId, args.category, args.name),
+    ),
+  );
+  ipcMain.handle(
+    IPC.WALL_REMOVE_NODE_TAG,
+    withEnvelope((args: WallNodeTagMutateArgs): void =>
+      requireData().wallBoards.removeTag(args.boardId, args.nodeId, args.category, args.name),
+    ),
+  );
 
   // ---------- data: external project import ----------
   ipcMain.handle(

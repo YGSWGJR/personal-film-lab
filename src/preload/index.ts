@@ -43,6 +43,8 @@ import {
   wallNodeAnnotationSaveArgsSchema,
   wallImportImageArgsSchema,
   wallPickImageArgsSchema,
+  wallNodeTagListArgsSchema,
+  wallNodeTagMutateArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -149,6 +151,9 @@ import type {
   WallNodeEdgeRemoveArgs,
   WallNodeAnnotationListArgs,
   WallNodeAnnotationSaveArgs,
+  WallNodeTagInfo,
+  WallNodeTagListArgs,
+  WallNodeTagMutateArgs,
   WallImportImageArgs,
   WallImportImageResult,
   WallPickImageResult,
@@ -312,6 +317,9 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.WALL_SAVE_NODE_ANNOTATIONS]: wallNodeAnnotationSaveArgsSchema,
   [IPC.WALL_IMPORT_IMAGE]: wallImportImageArgsSchema,
   [IPC.WALL_PICK_IMAGE]: wallPickImageArgsSchema,
+  [IPC.WALL_LIST_NODE_TAGS]: wallNodeTagListArgsSchema,
+  [IPC.WALL_ADD_NODE_TAG]: wallNodeTagMutateArgsSchema,
+  [IPC.WALL_REMOVE_NODE_TAG]: wallNodeTagMutateArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -541,6 +549,10 @@ const wallApi = {
     invoke<void>(IPC.WALL_SAVE_NODE_ANNOTATIONS, [args]),
   importImage: (args: WallImportImageArgs) => invoke<WallImportImageResult>(IPC.WALL_IMPORT_IMAGE, [args]),
   pickImage: () => invoke<WallPickImageResult>(IPC.WALL_PICK_IMAGE, [{}]),
+  listNodeTags: (args: WallNodeTagListArgs) =>
+    invoke<Record<string, WallNodeTagInfo[]>>(IPC.WALL_LIST_NODE_TAGS, [args]),
+  addNodeTag: (args: WallNodeTagMutateArgs) => invoke<void>(IPC.WALL_ADD_NODE_TAG, [args]),
+  removeNodeTag: (args: WallNodeTagMutateArgs) => invoke<void>(IPC.WALL_REMOVE_NODE_TAG, [args]),
 };
 
 const dataApi = {
