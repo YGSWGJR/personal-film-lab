@@ -37,13 +37,13 @@
 从 GitHub Releases 下载安装文件。由于完整本地 AI 资源超过 GitHub 单文件限制，发布页会把它拆成多个分卷；推荐在仓库根目录运行：
 
 ```powershell
-.\scripts\download-release.ps1 -Tag v0.2.0 -Destination .\downloads
+.\scripts\download-release.ps1 -Tag v0.3.0 -Destination .\downloads
 ```
 
 脚本会下载、校验并合并分卷。合并后保持以下两个文件在同一目录、文件名不变：
 
-1. `个人拉片工作台 Setup 0.2.0.exe`
-2. `个人拉片工作台-0.2.0-local-ai.7z`
+1. `个人拉片工作台 Setup 0.3.0.exe`
+2. `个人拉片工作台-0.3.0-local-ai.7z`
 
 双击 Setup，选择安装目录。安装器会同时部署应用主体、快捷方式、卸载项、本地 AI 运行时和 Qwen3-VL 模型。
 
@@ -53,8 +53,8 @@
 
 | 文件 | SHA-256 |
 |---|---|
-| Setup 0.2.0 | `287780DE82BE95ECEE00C16DD973F45EEE21F61BF2CBBA7D1B9A43B6B9FA02D` |
-| local-ai 0.2.0 | `5CADA480C0F6BF617C9E8D449C78F97A981D7AE501E963B6FD8ADB54B293EDE9` |
+| Setup 0.3.0 | `F420E08E507BABB6C87EFFFC84F0AF6AA2F581EA34DA50D9985AF99136553722` |
+| local-ai 0.3.0 | `5CADA480C0F6BF617C9E8D449C78F97A981D7AE501E963B6FD8ADB54B293EDE9` |
 | 独立卸载工具 | `71610B898205A2E71C63CCD6699AB32E6CA7CD14020A4052E49630A628DE0B20` |
 
 ### 数据保存位置
@@ -103,7 +103,7 @@ npm run prepare:python
 完整本地 AI 构建需要官方离线资源包：
 
 ```powershell
-$env:PFL_LOCAL_AI_ARCHIVE = 'D:\downloads\个人拉片工作台-0.2.0-local-ai.7z'
+$env:PFL_LOCAL_AI_ARCHIVE = 'D:\downloads\个人拉片工作台-0.3.0-local-ai.7z'
 npm run prepare:local-ai
 ```
 

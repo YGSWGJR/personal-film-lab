@@ -25,10 +25,10 @@
 1. 打开仓库根目录，运行下载脚本：
 
 ```powershell
-.\scripts\download-release.ps1 -Tag v0.2.0 -Destination .\downloads
+.\scripts\download-release.ps1 -Tag v0.3.0 -Destination .\downloads
 ```
 
-2. 确认目录中有 `个人拉片工作台 Setup 0.2.0.exe` 和 `个人拉片工作台-0.2.0-local-ai.7z`。
+2. 确认目录中有 `个人拉片工作台 Setup 0.3.0.exe` 和 `个人拉片工作台-0.3.0-local-ai.7z`。
 3. 把两个文件放在同一个文件夹，不要改名。
 4. 双击 Setup，选择至少保留 30 GB 空间的安装目录。
 5. 安装器解压应用主体和本地 AI 资源。
@@ -40,14 +40,14 @@
 
 | 文件 | SHA-256 |
 |---|---|
-| Setup 0.2.0 | `287780DE82BE95ECEE00C16DD973F45EEE21F61BF2CBBA7D1B9A43B6B9FA02D` |
-| local-ai 0.2.0 | `5CADA480C0F6BF617C9E8D449C78F97A981D7AE501E963B6FD8ADB54B293EDE9` |
-| 卸载工具 0.2.0 | `029A5EA48CA03F08169D46800433F56DDFB327A0FE2BC4750B421981082B3CA8` |
+| Setup 0.3.0 | `F420E08E507BABB6C87EFFFC84F0AF6AA2F581EA34DA50D9985AF99136553722` |
+| local-ai 0.3.0 | `5CADA480C0F6BF617C9E8D449C78F97A981D7AE501E963B6FD8ADB54B293EDE9` |
+| 卸载工具 0.3.0 | `029A5EA48CA03F08169D46800433F56DDFB327A0FE2BC4750B421981082B3CA8` |
 
 可在 PowerShell 中校验：
 
 ```powershell
-Get-FileHash '.\个人拉片工作台 Setup 0.2.0.exe' -Algorithm SHA256
+Get-FileHash '.\个人拉片工作台 Setup 0.3.0.exe' -Algorithm SHA256
 ```
 
 ## 首次启动
@@ -351,7 +351,7 @@ npm run dev
 如需完整本地 AI：
 
 ```powershell
-$env:PFL_LOCAL_AI_ARCHIVE = 'D:\downloads\个人拉片工作台-0.2.0-local-ai.7z'
+$env:PFL_LOCAL_AI_ARCHIVE = 'D:\downloads\个人拉片工作台-0.3.0-local-ai.7z'
 npm run prepare:local-ai
 ```
 
