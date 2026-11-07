@@ -75,6 +75,7 @@ const annSel = ref<Ann | null>(null);
 const annDrafting = ref<{ card: WorkspaceShot; o: Ann } | null>(null);
 const playerTrackEl = ref<HTMLElement | null>(null);
 const playProgress = ref(0);
+const playerDepths = ref<Map<string, number>>(new Map());
 const ANNC = ['#ff5a5a', '#ffd23d', '#3ddc84', '#5aa2ff', '#ffffff'];
 let annSeq = 1;
 let playRaf = 0;
@@ -433,10 +434,84 @@ function playerScope(startId: string): WorkspaceShot[] {
     }
     frontier = next;
   }
+  // 0.3.1 投影：记录 BFS 深度（层）供多宫格/多轨呈现
+  playerDepths.value = new Map<string, number>();
+  playerDepths.value.set(startId, 0);
+  frontier = [startId];
+  let depth = 0;
+  while (frontier.length > 0) {
+    depth += 1;
+    const next: string[] = [];
+    for (const cur of frontier) {
+      for (const nb of adj.get(cur) ?? []) {
+        if (!seen.has(nb) && !playerDepths.value.has(nb)) {
+          playerDepths.value.set(nb, depth);
+          next.push(nb);
+        }
+        if (!seen.has(nb)) seen.add(nb);
+      }
+    }
+    frontier = next;
+  }
   return order
     .map((id) => props.shots.find((item) => item.id === id))
     .filter((item): item is WorkspaceShot => item !== undefined);
 }
+
+/** 层分组：scope 索引按深度分段（同层=并行节点 → 多宫格） */
+const playerLayers = computed<Array<number[]>>(() => {
+  const layers: Array<number[]> = [];
+  let last: number | null = null;
+  for (const [i, shot] of player.value.scope.entries()) {
+    const depth = playerDepths.value.get(shot.id) ?? 0;
+    if (last === null || depth !== last) {
+      layers.push([i]);
+      last = depth;
+    } else {
+      layers[layers.length - 1].push(i);
+    }
+  }
+  return layers;
+});
+
+const curLayerIdxs = computed<number[]>(() => {
+  for (const layer of playerLayers.value) {
+    if (layer.includes(player.value.idx)) return layer;
+  }
+  return [player.value.idx];
+});
+
+/** 多轨条：按 solid 出边展开的链（每链一轨，块宽∝时长） */
+const trackRows = computed(() => {
+  const rows: Array<Array<{ id: string; dur: number }>> = [];
+  const visited = new Set<string>();
+  const outMap = new Map<string, Array<{ to: string; dur: number }>>();
+  for (const shot of player.value.scope) outMap.set(shot.id, []);
+  for (const e of edges.value) {
+    if (outMap.has(e.fromShotId) && player.value.scope.some((s) => s.id === e.toShotId)) {
+      const target = player.value.scope.find((s) => s.id === e.toShotId);
+      if (target && e.kind === 'solid') {
+        outMap.get(e.fromShotId)?.push({ to: e.toShotId, dur: target.durationMs });
+      }
+    }
+  }
+  for (const shot of player.value.scope) {
+    if (visited.has(shot.id)) continue;
+    if (edges.value.some((e) => e.toShotId === shot.id && player.value.scope.some((s) => s.id === e.fromShotId))) {
+      continue;
+    }
+    const row: Array<{ id: string; dur: number }> = [];
+    let cursor: string | null = shot.id;
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor);
+      const node = player.value.scope.find((s) => s.id === cursor);
+      row.push({ id: cursor, dur: node?.durationMs ?? 3000 });
+      cursor = outMap.get(cursor)?.[0]?.to ?? null;
+    }
+    if (row.length > 0) rows.push(row);
+  }
+  return rows;
+});
 
 async function openPlayer(startId: string): Promise<void> {
   // 放映前刷新连线（可能被 MCP/其他入口修改）
@@ -1241,6 +1316,21 @@ function fmtDuration(ms: number): string {
                 <g v-html="annMarkup(shot.id, true)"></g>
               </svg>
             </div>
+            <div
+              v-if="curLayerIdxs.length > 1"
+              class="wall-ppt-grid"
+            >
+              <div
+                v-for="j in curLayerIdxs"
+                :key="'g' + j"
+                class="wall-ppt-grid-cell"
+                :class="{ on: j === player.idx }"
+                @click="player.idx = j"
+              >
+                <img :src="player.scope[j]?.thumbnail" alt="" draggable="false" />
+                <span>#{{ String(player.scope[j]?.index ?? 0).padStart(2, '0') }}</span>
+              </div>
+            </div>
             <div class="wall-ppt-meta">
               <b>#{{ String(shot.index).padStart(2, '0') }}</b>
               <span v-if="shot.shotSize" class="wall-chip">{{ shot.shotSize }}</span>
@@ -1252,6 +1342,22 @@ function fmtDuration(ms: number): string {
         </div>
         <button type="button" class="wall-ppt-nav r" :disabled="player.idx >= player.scope.length - 1" aria-label="下一张" @click="playerMove(1)">›</button>
         <div class="wall-ppt-progress" :hidden="!player.playing"><i :style="{ width: (playProgress * 100) + '%' }"></i></div>
+      </div>
+      <div v-if="trackRows.length > 1" class="wall-ppt-tracks">
+        <div v-for="(row, ri) in trackRows" :key="ri" class="wall-ppt-track-row">
+          <span class="track-name">轨 {{ ri + 1 }}</span>
+          <div class="track-blocks">
+            <div
+              v-for="seg in row"
+              :key="seg.id"
+              class="track-block"
+              :style="{ flexGrow: seg.dur }"
+              :class="{ on: player.scope[player.idx]?.id === seg.id }"
+            >
+              {{ player.scope.find((s) => s.id === seg.id)?.title.slice(0, 10) }}
+            </div>
+          </div>
+        </div>
       </div>
       <div class="wall-ppt-foot">
         <span class="wall-ppt-scope">{{ playerScopeLabel }}</span>
@@ -1775,6 +1881,91 @@ function fmtDuration(ms: number): string {
   width: 0;
   height: 100%;
   background: var(--green, #34d399);
+}
+
+.wall-ppt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border, #2a3a55);
+  background: rgba(10, 14, 22, 0.9);
+}
+
+.wall-ppt-grid-cell {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 6px;
+  cursor: pointer;
+  aspect-ratio: 16 / 9;
+}
+
+.wall-ppt-grid-cell img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.wall-ppt-grid-cell.on {
+  border-color: var(--green, #34d399);
+}
+
+.wall-ppt-grid-cell span {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #e6edf7;
+  font-size: 10px;
+}
+
+.wall-ppt-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border, #2a3a55);
+  background: var(--bg-panel, #131a26);
+}
+
+.wall-ppt-track-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.track-name {
+  flex: 0 0 34px;
+  font-size: 10px;
+  color: var(--text-muted, #93a4bd);
+}
+
+.track-blocks {
+  display: flex;
+  flex: 1;
+  gap: 3px;
+}
+
+.track-block {
+  min-width: 24px;
+  overflow: hidden;
+  padding: 2px 6px;
+  border: 1px solid var(--border, #2a3a55);
+  border-radius: 5px;
+  background: var(--surface-2, #182233);
+  color: var(--text-muted, #93a4bd);
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.track-block.on {
+  border-color: var(--green, #34d399);
+  color: var(--green, #34d399);
 }
 
 .wall-ppt-foot {
