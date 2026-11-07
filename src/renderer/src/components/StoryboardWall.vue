@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import ContextMenu from './ContextMenu.vue';
 import type {
   WallEdge,
   WallEdgeKind,
@@ -664,13 +665,17 @@ const playerTrackStyle = computed(() => {
 
 /* ---------- 分组：Shift 多选 → 成组（跨组边由仓储自动断） / 解散 ---------- */
 function toggleSelect(shotId: string, event: PointerEvent): void {
-  if (!event.shiftKey) {
-    selectedIds.value = new Set();
-    return;
-  }
   const next = new Set(selectedIds.value);
-  if (next.has(shotId)) next.delete(shotId);
-  else next.add(shotId);
+  if (event.ctrlKey || event.metaKey) {
+    // Ctrl/Cmd：切换选中
+    if (next.has(shotId)) next.delete(shotId);
+    else next.add(shotId);
+  } else if (event.shiftKey) {
+    // Shift：追加多选
+    next.add(shotId);
+  } else {
+    next.clear();
+  }
   selectedIds.value = next;
 }
 
@@ -695,6 +700,160 @@ async function dissolveGroup(groupId: string): Promise<void> {
   if (!props.projectId) return;
   const result = await window.api.wall.dissolveGroup({ projectId: props.projectId, groupId });
   if (result.ok) await reloadGraph();
+}
+
+/* ---------- 0.3.1 整理节点 / 撤销 / 右键菜单 ---------- */
+const ctxMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  items: [] as Array<{ label: string; danger?: boolean; disabled?: boolean; action: () => void }>,
+});
+const chainStartId = ref<string | null>(null);
+let undoSnapshot: WallLayoutItem[] | null = null;
+
+function snapshotLayout(): void {
+  undoSnapshot = [...positions.value.entries()].map(([id, p]) => ({ shotId: id, x: p.x, y: p.y }));
+}
+
+function restoreLayout(): void {
+  if (!undoSnapshot) return;
+  for (const item of undoSnapshot) {
+    if (positions.value.has(item.shotId)) positions.value.set(item.shotId, { x: item.x, y: item.y });
+  }
+  positions.value = new Map(positions.value);
+  emit('layoutChange', undoSnapshot.filter((item) => positions.value.has(item.shotId)));
+  undoSnapshot = null;
+}
+
+/** 断开某卡全部连线 */
+async function disconnectAll(shotId: string): Promise<void> {
+  if (!props.projectId) return;
+  const related = edges.value.filter((e) => e.fromShotId === shotId || e.toShotId === shotId);
+  for (const e of related) {
+    await window.api.wall.removeEdge({
+      projectId: props.projectId,
+      fromShotId: e.fromShotId,
+      toShotId: e.toShotId,
+    });
+  }
+  edges.value = edges.value.filter((e) => !related.includes(e));
+}
+
+function selectAllNodes(): void {
+  selectedIds.value = new Set(props.shots.map((shot) => shot.id));
+}
+
+function zoomToFit(): void {
+  if (positions.value.size === 0) return;
+  const pts = [...positions.value.values()];
+  const minX = Math.min(...pts.map((p) => p.x)) - GAP;
+  const minY = Math.min(...pts.map((p) => p.y)) - GAP;
+  const maxX = Math.max(...pts.map((p) => p.x + CARD_W)) + GAP;
+  const maxY = Math.max(...pts.map((p) => p.y + CARD_H + 30)) + GAP;
+  const sw = stageW.value;
+  const sh = stageH.value;
+  scale.value = clampScale(Math.min(sw / (maxX - minX), sh / (maxY - minY)));
+  panX.value = -minX * scale.value + (sw - (maxX - minX) * scale.value) / 2;
+  panY.value = -minY * scale.value + (sh - (maxY - minY) * scale.value) / 2;
+  emitViewState();
+}
+
+/** 整理节点：连线链拓扑成行（solid 优先），未连线按镜号网格排到下方独立区 */
+function organizeNodes(): void {
+  snapshotLayout();
+  const visited = new Set<string>();
+  const chains: string[][] = [];
+  const outMap = new Map<string, Array<{ to: string; kind: string }>>();
+  for (const shot of props.shots) outMap.set(shot.id, []);
+  for (const e of edges.value) outMap.get(e.fromShotId)?.push({ to: e.toShotId, kind: e.kind });
+  const incoming = new Set(edges.value.map((e) => e.toShotId));
+  const starts = props.shots
+    .filter((shot) => !incoming.has(shot.id))
+    .sort((a, b) => { if (a.id === chainStartId.value) return -1; if (b.id === chainStartId.value) return 1; return a.index - b.index; });
+  for (const shot of starts) {
+    if (visited.has(shot.id)) continue;
+    const chain: string[] = [];
+    let cursor: string | null = shot.id;
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor);
+      chain.push(cursor);
+      const outs: Array<{ to: string; kind: string }> = (outMap.get(cursor) ?? [])
+        .slice()
+        .sort((a) => (a.kind === 'solid' ? -1 : 1));
+      cursor = outs.length > 0 ? outs[0].to : null;
+    }
+    if (chain.length >= 1) chains.push(chain);
+  }
+  for (const shot of props.shots) {
+    if (visited.has(shot.id)) continue;
+    const chain: string[] = [];
+    let cursor: string | null = shot.id;
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor);
+      chain.push(cursor);
+      const outs: Array<{ to: string; kind: string }> = (outMap.get(cursor) ?? []).filter(
+        (o) => !visited.has(o.to),
+      );
+      cursor = outs.length > 0 ? outs[0].to : null;
+    }
+    chains.push(chain);
+  }
+  const rowH = CARD_H + 64;
+  const perRow = Math.max(1, Math.floor((stageW.value - GAP) / (CARD_W + GAP)));
+  let row = 0;
+  const updates: WallLayoutItem[] = [];
+  for (const chain of chains) {
+    chain.forEach((id, i) => {
+      const x = GAP + (i % perRow) * (CARD_W + GAP);
+      const y = GAP + row * rowH;
+      positions.value.set(id, { x, y });
+      updates.push({ shotId: id, x, y });
+      if (i === chain.length - 1 || (i + 1) % perRow === 0) row += 1;
+    });
+  }
+  const unlinked = props.shots
+    .filter((shot) => !edges.value.some((e) => e.fromShotId === shot.id || e.toShotId === shot.id))
+    .sort((a, b) => a.index - b.index);
+  const startY = GAP + row * rowH + 80;
+  unlinked.forEach((shot, i) => {
+    const x = GAP + (i % perRow) * (CARD_W + GAP);
+    const y = startY + Math.floor(i / perRow) * rowH;
+    positions.value.set(shot.id, { x, y });
+    updates.push({ shotId: shot.id, x, y });
+  });
+  positions.value = new Map(positions.value);
+  emit('layoutChange', updates);
+}
+
+async function removeNodeFromWall(shotId: string): Promise<void> {
+  positions.value.delete(shotId);
+  positions.value = new Map(positions.value);
+  selectedIds.value.delete(shotId);
+}
+
+function openWallContextMenu(event: MouseEvent, shotId: string | null): void {
+  const items: Array<{ label: string; danger?: boolean; disabled?: boolean; action: () => void }> = [];
+  if (shotId) {
+    const hasEdges = edges.value.some((e) => e.fromShotId === shotId || e.toShotId === shotId);
+    items.push({ label: '断开此卡所有连线', disabled: !hasEdges, action: () => void disconnectAll(shotId) });
+    items.push({ label: '设为主线起点', action: () => (chainStartId.value = shotId) });
+    if (selectedIds.value.size >= 2) {
+      items.push({ label: '成组（已选 ' + selectedIds.value.size + ' 张）', action: () => void createGroupFromSelection() });
+    }
+    const g = groups.value.find((item) => item.shotIds.includes(shotId));
+    if (g) items.push({ label: '解散所在组（' + g.name + '）', action: () => void dissolveGroup(g.groupId) });
+    items.push({ label: '删除节点（仅从墙移除布局）', danger: true, action: () => void removeNodeFromWall(shotId) });
+  } else {
+    items.push({ label: '整理节点', action: () => organizeNodes() });
+    items.push({ label: '全选', action: () => selectAllNodes() });
+    items.push({ label: '缩放到全部内容', action: () => zoomToFit() });
+    if (undoSnapshot) items.push({ label: '撤销整理（Ctrl+Z）', action: () => restoreLayout() });
+  }
+  ctxMenu.x = event.clientX;
+  ctxMenu.y = event.clientY;
+  ctxMenu.items = items;
+  ctxMenu.visible = true;
 }
 
 onBeforeUnmount(() => {
@@ -821,6 +980,11 @@ function onCardPointerDown(event: PointerEvent, shot: WorkspaceShot): void {
   const originY = pos.y;
   draggingId.value = shot.id;
   dragMoved.value = false;
+  const dragOrigins = new Map<string, { x: number; y: number }>();
+  for (const id of selectedIds.value.has(shot.id) ? selectedIds.value : [shot.id]) {
+    const pos0 = positions.value.get(id);
+    if (pos0) dragOrigins.set(id, { ...pos0 });
+  }
   const move = (ev: PointerEvent): void => {
     const nx = originX + (ev.clientX - startX) / scale.value;
     const ny = originY + (ev.clientY - startY) / scale.value;
@@ -833,24 +997,19 @@ function onCardPointerDown(event: PointerEvent, shot: WorkspaceShot): void {
     window.removeEventListener('pointerup', up);
     draggingId.value = null;
     if (dragMoved.value) {
-      positions.value.set(shot.id, {
-        x: originX + (ev.clientX - startX) / scale.value,
-        y: originY + (ev.clientY - startY) / scale.value,
-      });
-      // 手机图标式让位：与被拖卡同一水平带（±48px）的其他卡按 x 排序重排
-      const dragged = positions.value.get(shot.id)!;
-      const band = laidShots.value.filter(
-        (item) => item.shot.id !== shot.id && Math.abs(item.y - dragged.y) < 48,
-      );
-      const updates: WallLayoutItem[] = [{ shotId: shot.id, x: dragged.x, y: dragged.y }];
-      const others = band.sort((a, b) => a.x - b.x);
-      let cursor = dragged.x + CARD_W + GAP;
-      for (const other of others) {
-        if (other.x < cursor) {
-          positions.value.set(other.shot.id, { x: cursor, y: other.y });
-          updates.push({ shotId: other.shot.id, x: cursor, y: other.y });
-        }
-        cursor = Math.max(cursor, positions.value.get(other.shot.id)!.x) + CARD_W + GAP;
+      // 0.3.1：允许重叠——只移动被拖卡；多选时整组随动（相对位移）
+      const dx = (ev.clientX - startX) / scale.value;
+      const dy = (ev.clientY - startY) / scale.value;
+      const updates: WallLayoutItem[] = [];
+      const ids = selectedIds.value.has(shot.id) ? [...selectedIds.value] : [shot.id];
+      for (const id of ids) {
+        const base =
+          id === shot.id ? { x: originX, y: originY } : dragOrigins.get(id);
+        if (!base) continue;
+        const nx = base.x + dx;
+        const ny = base.y + dy;
+        positions.value.set(id, { x: nx, y: ny });
+        updates.push({ shotId: id, x: nx, y: ny });
       }
       positions.value = new Map(positions.value);
       emit('layoutChange', updates);
@@ -959,6 +1118,7 @@ function fmtDuration(ms: number): string {
         @pointerdown="onCardPointerDown($event, item.shot)"
         @click="onCardClick(item.shot, $event)"
         @dblclick="onCardDblClick(item.shot)"
+        @contextmenu.prevent="openWallContextMenu($event, item.shot.id)"
       >
         <span class="wall-port" title="拖到另一张卡建立连线（Shift=备选虚线）" @pointerdown="onPortDown($event, item.shot.id)"></span>
         <div class="wall-thumb">
@@ -985,7 +1145,15 @@ function fmtDuration(ms: number): string {
       <button type="button" class="wall-hud-btn" aria-label="放大" @click.stop="zoomBy(1.2)">+</button>
       <button type="button" class="wall-hud-btn" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
       <button type="button" class="wall-hud-btn wall-export" title="按连线顺序导出镜头图片" @click.stop="exportImages">⇩</button>
+      <button type="button" class="wall-hud-btn" title="整理节点（连线链成行，未连线按镜号排下方）" @click.stop="organizeNodes">⌗</button>
     </div>
+    <ContextMenu
+      :visible="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :items="ctxMenu.items"
+      @close="ctxMenu.visible = false"
+    />
     <div class="wall-hint">滚轮缩放（锚点=光标） · ALT+滚轮/两指横滑 平移 · 空格/中键拖拽抓手 · 双击卡片回到时间线定位 · Ctrl+0 复位</div>
     <!-- S43 分镜PPT 放映层 -->
     <div v-if="player.open" class="wall-ppt" :class="{ 'wall-ppt-single': player.single }">
