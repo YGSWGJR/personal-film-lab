@@ -49,6 +49,7 @@ const draft = reactive<SettingsDraft>({
   thumbCacheDir: '',
   exportSubDir: '',
   stillSubDir: '',
+  boardSaveDir: '',
 });
 const browseError = ref<string | null>(null);
 const liveSettings = ref<Settings | null>(null);
@@ -166,6 +167,14 @@ const pathItems: Array<{
     optional: true,
     inheritedFrom: '静帧根',
   },
+  {
+    key: 'boardSaveDir',
+    title: '分镜本保存目录',
+    description: '分镜本独立保存根目录（board.json + 图片资产，改动自动同步）',
+    icon: 'save',
+    optional: true,
+    inheritedFrom: '数据根 / exports\\boards',
+  },
 ];
 
 function fillDraft(settings: Settings): void {
@@ -179,6 +188,7 @@ function fillDraft(settings: Settings): void {
   draft.thumbCacheDir = settings.thumbCacheDir ?? '';
   draft.exportSubDir = settings.exportSubDir ?? '';
   draft.stillSubDir = settings.stillSubDir ?? '';
+  draft.boardSaveDir = settings.boardSaveDir ?? '';
   proxyTier.value = settings.proxyTier ?? '540p';
   confirmUserContent.value = settings.confirmUserContent ?? true;
   recognitionEngine.value = settings.recognition?.engine ?? 'ai';
@@ -242,6 +252,8 @@ function inheritedPath(key: PathKey): string {
       return draft.exportDir.trim();
     case 'stillSubDir':
       return draft.stillDir.trim();
+    case 'boardSaveDir':
+      return joinDisplayPath(draft.dataRoot.trim(), 'exports', 'boards');
     default:
       return '';
   }
@@ -274,6 +286,7 @@ async function resetDefaults(): Promise<void> {
     draft.thumbCacheDir = '';
     draft.exportSubDir = '';
     draft.stillSubDir = '';
+    draft.boardSaveDir = '';
     proxyTier.value = '540p';
     confirmUserContent.value = true;
     splitShortcut.value = 'Ctrl+K';
@@ -556,6 +569,7 @@ function submit(): void {
     'thumbCacheDir',
     'exportSubDir',
     'stillSubDir',
+    'boardSaveDir',
   ] as const) {
     const path = draft[key].trim();
     if (path) value[key] = path;

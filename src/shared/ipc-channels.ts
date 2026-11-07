@@ -118,6 +118,8 @@ export const IPC = {
   WALL_ADD_NODE_TAG: 'wall:addNodeTag',
   WALL_REMOVE_NODE_TAG: 'wall:removeNodeTag',
   WALL_EXPORT_PROJECTION: 'wall:exportProjection',
+  WALL_IMPORT_BOARD_FILE: 'wall:importBoardFile',
+  WALL_OPEN_BOARD_DIR: 'wall:openBoardDir',
 
   /** scope 域（S21）：音频包络 */
   SCOPE_EXTRACT_AUDIO_WAVEFORM: 'scope:extractAudioWaveform',

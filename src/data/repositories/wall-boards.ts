@@ -115,6 +115,14 @@ export class WallBoardsRepository {
     return mapNode(row);
   }
 
+  /** 批次8：节点所属分镜本（删除/更新后定位导出目标） */
+  boardIdOfNode(nodeId: string): string | null {
+    const row = this.db.prepare('SELECT board_id FROM wall_nodes WHERE id = ?').get(nodeId) as
+      | { board_id: string }
+      | undefined;
+    return row?.board_id ?? null;
+  }
+
   updateNode(
     id: string,
     patch: Partial<

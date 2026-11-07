@@ -46,6 +46,8 @@ import {
   wallNodeTagListArgsSchema,
   wallNodeTagMutateArgsSchema,
   wallExportProjectionArgsSchema,
+  wallImportBoardFileArgsSchema,
+  wallOpenBoardDirArgsSchema,
   mediaCancelJobArgsSchema,
   mediaExtractFrameArgsSchema,
   mediaExtractFramesArgsSchema,
@@ -157,6 +159,9 @@ import type {
   WallNodeTagMutateArgs,
   WallExportProjectionArgs,
   WallExportProjectionResult,
+  WallImportBoardFileResult,
+  WallOpenBoardDirArgs,
+  WallOpenBoardDirResult,
   WallImportImageArgs,
   WallImportImageResult,
   WallPickImageResult,
@@ -324,6 +329,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.WALL_ADD_NODE_TAG]: wallNodeTagMutateArgsSchema,
   [IPC.WALL_REMOVE_NODE_TAG]: wallNodeTagMutateArgsSchema,
   [IPC.WALL_EXPORT_PROJECTION]: wallExportProjectionArgsSchema,
+  [IPC.WALL_IMPORT_BOARD_FILE]: wallImportBoardFileArgsSchema,
+  [IPC.WALL_OPEN_BOARD_DIR]: wallOpenBoardDirArgsSchema,
 
   [IPC.PROJECT_CREATE]: projectCreateArgsSchema,
   [IPC.PROJECT_LIST]: emptyArgsSchema,
@@ -559,6 +566,8 @@ const wallApi = {
   removeNodeTag: (args: WallNodeTagMutateArgs) => invoke<void>(IPC.WALL_REMOVE_NODE_TAG, [args]),
   exportProjection: (args: WallExportProjectionArgs) =>
     invoke<WallExportProjectionResult>(IPC.WALL_EXPORT_PROJECTION, [args]),
+  importBoardFile: () => invoke<WallImportBoardFileResult>(IPC.WALL_IMPORT_BOARD_FILE, [{}]),
+  openBoardDir: (args: WallOpenBoardDirArgs) => invoke<WallOpenBoardDirResult>(IPC.WALL_OPEN_BOARD_DIR, [args]),
 };
 
 const dataApi = {

@@ -34,6 +34,7 @@ export const settingsSchema = z.object({
   thumbCacheDir: settingsDirectorySchema.optional(),
   exportSubDir: settingsDirectorySchema.optional(),
   stillSubDir: settingsDirectorySchema.optional(),
+  boardSaveDir: settingsDirectorySchema.optional(),
   proxyTier: z.enum(['360p', '540p', '720p']).optional(),
   confirmUserContent: z.boolean().optional(),
   timeline: z
@@ -446,6 +447,10 @@ export const wallExportProjectionArgsSchema = z.object({
     .regex(/^data:image\/png;base64,/)
     .max(14_000_000),
 });
+
+export const wallImportBoardFileArgsSchema = z.object({});
+
+export const wallOpenBoardDirArgsSchema = z.object({ boardId: z.string().min(1) });
 
 export const wallAnnotationSaveArgsSchema = z.object({
   projectId: z.string().min(1),

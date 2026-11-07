@@ -38,6 +38,7 @@ const SETTINGS_PATH_FIELDS = [
   'thumbCacheDir',
   'exportSubDir',
   'stillSubDir',
+  'boardSaveDir',
 ] as const satisfies ReadonlyArray<keyof SettingsSetArgs>;
 
 export class SettingsError extends Error {
@@ -75,6 +76,7 @@ export class SettingsService {
         stillDir: join(envRoot, 'projects'),
         proxyTier: '540p',
         confirmUserContent: this.stored?.confirmUserContent ?? true,
+        boardSaveDir: join(envRoot, 'exports', 'boards'),
         timeline: this.stored?.timeline ?? defaultTimelineSettings(),
         recognition: this.stored?.recognition ?? defaultRecognitionSettings(),
         ai: this.stored?.ai ?? defaultAiSettings(),
@@ -234,6 +236,7 @@ function normalizeSettings(
     thumbCacheDir: normalizeOptionalPath(args.thumbCacheDir),
     exportSubDir: normalizeOptionalPath(args.exportSubDir),
     stillSubDir: normalizeOptionalPath(args.stillSubDir),
+    boardSaveDir: normalizeOptionalPath(args.boardSaveDir),
     proxyTier: args.proxyTier ?? '540p',
     confirmUserContent: args.confirmUserContent ?? true,
     timeline: normalizeTimeline(args.timeline ?? fallback?.timeline),

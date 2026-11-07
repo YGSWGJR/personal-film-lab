@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { app, dialog, ipcMain, shell, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
 import { withEnvelope } from '../../shared/ipc-result';
 import type {
@@ -49,6 +49,9 @@ import type {
   WallNodeTagListArgs,
   WallNodeTagMutateArgs,
   WallExportProjectionArgs,
+  WallBoardFilePayload,
+  WallImportBoardFileResult,
+  WallOpenBoardDirArgs,
   WallImportImageArgs,
   WallPickImageResult,
   ExtractFrameArgs,
@@ -127,6 +130,7 @@ import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
 import { SettingsError, type SettingsService } from '../settings/settings-service';
+import { BoardExportService } from '../boards/board-export-service';
 import { SessionError, type SessionService } from '../session/session-service';
 import type { StatsService } from '../stats/stats-service';
 import type { TermTransferService } from '../terms/term-transfer-service';
@@ -184,6 +188,32 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     if (!data) throw new DataError('DATA_UNAVAILABLE', '数据层尚未初始化');
     return data;
   };
+  // 批次8：分镜本独立保存——变更防抖同步到 boardSaveDir（默认 <dataRoot>/exports/boards）
+  const boardExport = new BoardExportService(
+    () => {
+      try {
+        return requireData().wallBoards;
+      } catch {
+        return null;
+      }
+    },
+    () => {
+      const configured = deps.getSettings()?.get().boardSaveDir?.trim();
+      if (configured) return configured;
+      try {
+        return join(requireData().dataRoot, 'exports', 'boards');
+      } catch {
+        return null;
+      }
+    },
+    () => {
+      try {
+        return requireData().dataRoot;
+      } catch {
+        return '';
+      }
+    },
+  );
   const requirePackage = (): ProjectPackageService => {
     const service = deps.getPackage();
     if (!service) throw new DataError('DATA_UNAVAILABLE', '项目包服务尚未初始化');
@@ -536,17 +566,25 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(IPC.WALL_LIST_BOARDS, withEnvelope(() => requireData().wallBoards.listBoards()));
   ipcMain.handle(
     IPC.WALL_CREATE_BOARD,
-    withEnvelope((args: WallBoardCreateArgs) => requireData().wallBoards.createBoard(args.name)),
+    withEnvelope((args: WallBoardCreateArgs) => {
+      const created = requireData().wallBoards.createBoard(args.name);
+      boardExport.schedule(created.id, 0);
+      return created;
+    }),
   );
   ipcMain.handle(
     IPC.WALL_DELETE_BOARD,
-    withEnvelope((args: WallBoardDeleteArgs): void => requireData().wallBoards.deleteBoard(args.boardId)),
+    withEnvelope((args: WallBoardDeleteArgs): void => {
+      requireData().wallBoards.deleteBoard(args.boardId);
+      boardExport.cancel(args.boardId);
+    }),
   );
   ipcMain.handle(
     IPC.WALL_RENAME_BOARD,
-    withEnvelope((args: WallBoardRenameArgs): void =>
-      requireData().wallBoards.renameBoard(args.boardId, args.name),
-    ),
+    withEnvelope((args: WallBoardRenameArgs): void => {
+      requireData().wallBoards.renameBoard(args.boardId, args.name);
+      boardExport.schedule(args.boardId);
+    }),
   );
   ipcMain.handle(
     IPC.WALL_LIST_NODES,
@@ -554,17 +592,28 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.WALL_ADD_NODE,
-    withEnvelope((args: WallNodeAddArgs) => requireData().wallBoards.addNode(args.boardId, args)),
+    withEnvelope((args: WallNodeAddArgs) => {
+      const node = requireData().wallBoards.addNode(args.boardId, args);
+      boardExport.schedule(args.boardId);
+      return node;
+    }),
   );
   ipcMain.handle(
     IPC.WALL_UPDATE_NODE,
-    withEnvelope((args: WallNodeUpdateArgs) =>
-      requireData().wallBoards.updateNode(args.nodeId, args.patch),
-    ),
+    withEnvelope((args: WallNodeUpdateArgs) => {
+      const node = requireData().wallBoards.updateNode(args.nodeId, args.patch);
+      const boardId = requireData().wallBoards.boardIdOfNode(args.nodeId);
+      if (boardId) boardExport.schedule(boardId);
+      return node;
+    }),
   );
   ipcMain.handle(
     IPC.WALL_DELETE_NODE,
-    withEnvelope((args: WallNodeDeleteArgs): void => requireData().wallBoards.deleteNode(args.nodeId)),
+    withEnvelope((args: WallNodeDeleteArgs): void => {
+      const boardId = requireData().wallBoards.boardIdOfNode(args.nodeId);
+      requireData().wallBoards.deleteNode(args.nodeId);
+      if (boardId) boardExport.schedule(boardId);
+    }),
   );
   ipcMain.handle(
     IPC.WALL_LIST_NODE_EDGES,
@@ -572,15 +621,17 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.WALL_ADD_NODE_EDGE,
-    withEnvelope((args: WallNodeEdgeAddArgs): void =>
-      requireData().wallBoards.addNodeEdge(args.boardId, args.fromNodeId, args.toNodeId, args.kind),
-    ),
+    withEnvelope((args: WallNodeEdgeAddArgs): void => {
+      requireData().wallBoards.addNodeEdge(args.boardId, args.fromNodeId, args.toNodeId, args.kind);
+      boardExport.schedule(args.boardId);
+    }),
   );
   ipcMain.handle(
     IPC.WALL_REMOVE_NODE_EDGE,
-    withEnvelope((args: WallNodeEdgeRemoveArgs): void =>
-      requireData().wallBoards.removeNodeEdge(args.boardId, args.fromNodeId, args.toNodeId),
-    ),
+    withEnvelope((args: WallNodeEdgeRemoveArgs): void => {
+      requireData().wallBoards.removeNodeEdge(args.boardId, args.fromNodeId, args.toNodeId);
+      boardExport.schedule(args.boardId);
+    }),
   );
   ipcMain.handle(
     IPC.WALL_LIST_NODE_ANNOTATIONS,
@@ -588,9 +639,10 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.WALL_SAVE_NODE_ANNOTATIONS,
-    withEnvelope((args: WallNodeAnnotationSaveArgs): void =>
-      requireData().wallBoards.saveNodeAnnotations(args.boardId, args.nodeId, args.items),
-    ),
+    withEnvelope((args: WallNodeAnnotationSaveArgs): void => {
+      requireData().wallBoards.saveNodeAnnotations(args.boardId, args.nodeId, args.items);
+      boardExport.schedule(args.boardId);
+    }),
   );
   ipcMain.handle(IPC.WALL_PICK_IMAGE, withEnvelope(async (): Promise<WallPickImageResult> => {
     const win = deps.getWindow();
@@ -616,6 +668,7 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     const registered = boards.registerImage(args.boardId, fileName);
     const nodeId = requireData().wallBoards
       .addNode(args.boardId, { source: 'image', assetPath: registered.assetPath, x: 80, y: 80 }).id;
+    boardExport.schedule(args.boardId);
     return {
       nodeId,
       assetUrl: 'lapian-asset://boards/' + registered.assetPath.slice('boards/'.length),
@@ -627,15 +680,17 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.WALL_ADD_NODE_TAG,
-    withEnvelope((args: WallNodeTagMutateArgs): void =>
-      requireData().wallBoards.addTag(args.boardId, args.nodeId, args.category, args.name),
-    ),
+    withEnvelope((args: WallNodeTagMutateArgs): void => {
+      requireData().wallBoards.addTag(args.boardId, args.nodeId, args.category, args.name);
+      boardExport.schedule(args.boardId);
+    }),
   );
   ipcMain.handle(
     IPC.WALL_REMOVE_NODE_TAG,
-    withEnvelope((args: WallNodeTagMutateArgs): void =>
-      requireData().wallBoards.removeTag(args.boardId, args.nodeId, args.category, args.name),
-    ),
+    withEnvelope((args: WallNodeTagMutateArgs): void => {
+      requireData().wallBoards.removeTag(args.boardId, args.nodeId, args.category, args.name);
+      boardExport.schedule(args.boardId);
+    }),
   );
   ipcMain.handle(IPC.WALL_EXPORT_PROJECTION, withEnvelope((args: WallExportProjectionArgs) => {
     requireData().wallBoards.assertBoard(args.boardId);
@@ -651,6 +706,108 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     const target = join(dir, `projection-${stamp}.png`);
     writeFileSync(target, buffer);
     return { path: target };
+  }));
+  ipcMain.handle(IPC.WALL_IMPORT_BOARD_FILE, withEnvelope(async (): Promise<WallImportBoardFileResult> => {
+    // 批次8：导入独立保存的分镜本（board.json + assets/），重建为新分镜本
+    const win = deps.getWindow();
+    if (!win) return { boardId: null };
+    const picked = await dialog.showOpenDialog(win, {
+      title: '导入分镜本（board.json）',
+      properties: ['openFile'],
+      filters: [{ name: '分镜本', extensions: ['json'] }],
+    });
+    if (picked.canceled || picked.filePaths.length === 0) return { boardId: null };
+    const file = picked.filePaths[0];
+    let payload: WallBoardFilePayload;
+    try {
+      payload = JSON.parse(readFileSync(file, 'utf8')) as WallBoardFilePayload;
+    } catch {
+      throw new DataError('WALL_BOARD_FILE_INVALID', 'board.json 解析失败', { file });
+    }
+    if (payload?.kind !== 'lapian-board' || payload.version !== 1 || !Array.isArray(payload.nodes)) {
+      throw new DataError('WALL_BOARD_FILE_INVALID', '不是有效的分镜本导出文件', { file });
+    }
+    const boards = requireData().wallBoards;
+    const newBoardId = boards.createBoard(String(payload.name ?? '').trim() || '导入的分镜本').id;
+    const assetsSrcDir = join(dirname(file), 'assets');
+    const idMap = new Map<string, string>();
+    for (const node of payload.nodes) {
+      const source = node.source === 'image' ? 'image' : 'text';
+      let assetPath: string | null = null;
+      if (source === 'image' && typeof node.assetFile === 'string' && node.assetFile) {
+        const src = join(assetsSrcDir, node.assetFile);
+        if (existsSync(src)) {
+          mkdirSync(join(requireData().dataRoot, 'projects', 'boards', newBoardId), { recursive: true });
+          const dot = node.assetFile.lastIndexOf('.');
+          const fileName = randomUUID() + (dot >= 0 ? node.assetFile.slice(dot).toLowerCase() : '.png');
+          copyFileSync(src, join(requireData().dataRoot, 'projects', 'boards', newBoardId, fileName));
+          assetPath = 'boards/' + newBoardId + '/' + fileName;
+        }
+      }
+      try {
+        const added = boards.addNode(newBoardId, {
+          source,
+          assetPath,
+          title: String(node.title ?? ''),
+          x: Number.isFinite(node.x) ? Number(node.x) : 0,
+          y: Number.isFinite(node.y) ? Number(node.y) : 0,
+        });
+        idMap.set(String(node.id), added.id);
+        boards.updateNode(added.id, {
+          textContent: String(node.textContent ?? ''),
+          durationMs: Number(node.durationMs) > 0 ? Math.round(Number(node.durationMs)) : 3000,
+          note: String(node.note ?? ''),
+          shotSize: node.shotSize ?? null,
+          cameraMethod: node.cameraMethod ?? null,
+        });
+      } catch {
+        // 单节点失败（如资产缺失且非法）跳过，不阻断导入
+      }
+    }
+    for (const edge of payload.edges ?? []) {
+      const from = idMap.get(String(edge.fromNodeId));
+      const to = idMap.get(String(edge.toNodeId));
+      const kind = edge.kind === 'dash' ? 'dash' : 'solid';
+      if (from && to) {
+        try {
+          boards.addNodeEdge(newBoardId, from, to, kind);
+        } catch {
+          // 跳过坏边
+        }
+      }
+    }
+    for (const tag of payload.tags ?? []) {
+      const nodeId = idMap.get(String(tag.nodeId));
+      if (nodeId) {
+        try {
+          boards.addTag(newBoardId, nodeId, String(tag.category).slice(0, 40), String(tag.name).slice(0, 40));
+        } catch {
+          // 跳过坏标签
+        }
+      }
+    }
+    for (const [nodeId, items] of Object.entries(payload.annotations ?? {})) {
+      const mapped = idMap.get(nodeId);
+      if (!mapped || !Array.isArray(items)) continue;
+      try {
+        boards.saveNodeAnnotations(
+          newBoardId,
+          mapped,
+          items.map((item) => ({ type: String(item.type), color: String(item.color), data: item.data ?? {} })),
+        );
+      } catch {
+        // 跳过坏标注
+      }
+    }
+    boardExport.schedule(newBoardId, 0);
+    return { boardId: newBoardId };
+  }));
+  ipcMain.handle(IPC.WALL_OPEN_BOARD_DIR, withEnvelope((args: WallOpenBoardDirArgs) => {
+    requireData().wallBoards.assertBoard(args.boardId);
+    const dir = boardExport.boardDir(args.boardId);
+    mkdirSync(dir, { recursive: true });
+    void shell.openPath(dir);
+    return { path: dir };
   }));
 
   // ---------- data: external project import ----------

@@ -9,11 +9,12 @@ import { DataError } from '../data/errors';
 import { removeProjectDir, removeProjectFiles } from '../data/paths';
 import { IPC } from '../shared/ipc-channels';
 import { withEnvelope } from '../shared/ipc-result';
-import type { WorkspaceState } from '../shared/types';
+import type { WorkspaceState, WallBoardFilePayload } from '../shared/types';
 import { formatTimecodeFF, frameFromMs, frameToMs, parseTimecodeFF } from '../shared/time';
 import type { DetectOptions } from '../shared/types';
 import { PX_PER_SEC_LEVELS, TRACK_HEIGHT_LEVELS, snapToLevel } from '../shared/types';
 import { AiDetectRunner, buildSegments, dedupeSegmentShots } from './ai/ai-detect-runner';
+import { BoardExportService } from './boards/board-export-service';
 import { decryptApiKey, encryptApiKey, isEncryptedApiKey } from './ai/credential-store';
 import { MCP_TOOL_NAMES } from './ai/mcp-server';
 import { buildProjectSnapshot } from './ai/shot-snapshot';
@@ -4869,12 +4870,17 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     boardUiEsc: result.boardEsc === true,
     boardUiInlineEditor: result.inlineEditor === true,
     boardUiTextSaved: result.textContentSaved === true,
+    boardUiImageImported: result.imageImported === true,
+    boardUiImageRendered: result.imageNodeRendered === true,
     boardUiPortInteractive: result.portInteractive === true,
     boardUiPendingLine: result.pendingLine === true,
+    boardUiPortDropEdge: result.portDropEdge === true,
     boardUiEditEsc: result.boardEditEsc === true,
     boardProjectedMode: result.projectedMode === true,
     boardProjectedRows: result.projectedRows === true,
     boardProjectedGrid: result.projectedGrid === true,
+    boardAutoBadge: result.autoProjectionBadge === true,
+    boardBadgeExit: result.badgeExit === true,
   };
 }
 
@@ -4885,6 +4891,7 @@ function boardChecksAssertions(result: Record<string, any>): Record<string, bool
     boardTextContent: result.textContent === true,
     boardTags: result.tags === true,
     boardTagInvalid: result.tagInvalid === true,
+    boardFileExport: result.boardFileExport === true,
     boardEdges: result.edges === true,
     boardAnnotations: result.annotations === true,
     boardImportInvalid: result.importInvalid === true,
@@ -4936,6 +4943,27 @@ async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
       { type: 'arrow', color: '#ff0000', data: { pts: [{ x: 1, y: 1 }, { x: 9, y: 9 }] } },
     ]);
     out.annotations = (data.wallBoards.listNodeAnnotations(boardId)[n1.id]?.length ?? 0) === 1;
+    // 批次8：独立保存导出（board.json + assets/）结构与内容断言
+    const exporter = new BoardExportService(
+      () => data.wallBoards,
+      () => join(data.dataRoot, 'exports', 'boards'),
+      () => data.dataRoot,
+    );
+    const exported = exporter.exportNow(boardId);
+    let boardFileJson: WallBoardFilePayload | null = null;
+    try {
+      boardFileJson = exported ? (JSON.parse(readFileSync(exported.path, 'utf8')) as WallBoardFilePayload) : null;
+    } catch {
+      boardFileJson = null;
+    }
+    out.boardFileExport =
+      Boolean(exported) &&
+      boardFileJson?.kind === 'lapian-board' &&
+      boardFileJson.version === 1 &&
+      (boardFileJson.nodes?.length ?? 0) === 2 &&
+      (boardFileJson.edges?.length ?? 0) === 1 &&
+      boardFileJson.nodes?.[0]?.textContent === '第一幕：夜袭' &&
+      Array.isArray(boardFileJson.tags);
     data.wallBoards.deleteNode(n2.id);
     out.edges = out.edges && data.wallBoards.listNodeEdges(boardId).length === 0;
     try {
@@ -4963,6 +4991,12 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
     const shot = data.shots.create({ projectId: project.id, startMs: i * 2000, endMs: (i + 1) * 2000 });
     data.db.prepare('UPDATE shots SET thumbnail = ? WHERE id = ?').run(`lapian-asset://${project.id}/t${i}.jpg`, shot.id);
   }
+  // 批次6 门控：真实图片文件（1x1 PNG）供分镜本图片节点渲染断言
+  const smokeBoardImgPath = join(data.dataRoot, 'smoke-board-img.png');
+  writeFileSync(
+    smokeBoardImgPath,
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'),
+  );
   const steps: Array<[string, string]> = [
     ['open', `
       const hook = window.__S43_WALL_TEST__;
@@ -5061,7 +5095,8 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
     `],
     ['boardEdit', `
       const hook = window.__S43_WALL_TEST__;
-      // 批次2/3 UI 门控：新开空白分镜本 → 内联编辑落库 → 左端口拖线
+      // 'board' 步关墙可能已自动投影——先退出（同时登记手动退出，避免本步关墙再自动开）
+      if (hook.projectedState().projectedMode) await hook.projectToggle();
       await hook.openIndependent();
       const dEdit = Date.now() + 15000;
       while (!hook.state().wallOpen && Date.now() < dEdit) await new Promise((r) => setTimeout(r, 100));
@@ -5081,27 +5116,65 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
         editArea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await new Promise((r) => setTimeout(r, 200));
       }
-      const portCard = document.querySelector('.wall-card');
-      const portIn = portCard?.querySelector('.wall-port-in');
-      out.portInteractive = portIn ? getComputedStyle(portIn).pointerEvents !== 'none' : false;
-      const portRect = portIn?.getBoundingClientRect();
-      portIn?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 7, clientX: portRect?.left ?? 0, clientY: portRect?.top ?? 0 }));
-      await new Promise((r) => setTimeout(r, 200));
-      out.pendingLine = Boolean(document.querySelector('.wall-edges line'));
-      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7, clientX: portRect?.left ?? 0, clientY: portRect?.top ?? 0 }));
-      await new Promise((r) => setTimeout(r, 200));
+      // 批次6 门控：真实图片节点经 lapian-asset 渲染（回归「导入照片看不到」破图）
+      const imported = await window.api.wall.importImage({ boardId: hook.state().boardId, srcPath: ${JSON.stringify(smokeBoardImgPath)} });
+      out.imageImported = imported.ok === true;
+      const imageNodeId = imported.ok ? imported.data.nodeId : null;
+      await window.api.wall.updateNode({ nodeId: imageNodeId, patch: { x: 420, y: 100 } });
+      await hook.reloadNodes();
+      await new Promise((r) => setTimeout(r, 400));
+      let imageRendered = false;
+      const renderDeadline = Date.now() + 8000;
+      while (Date.now() < renderDeadline && !imageRendered) {
+        const thumbs = [...document.querySelectorAll('.wall-card .wall-thumb img')];
+        imageRendered = thumbs.some((img) => img.src.startsWith('lapian-asset://') && img.naturalWidth > 0);
+        if (!imageRendered) await new Promise((r) => setTimeout(r, 200));
+      }
+      out.imageNodeRendered = imageRendered;
+      // 批次6 门控：端口拖线完整 drop（邻近卡也必须能连上——回归 1.2 卡宽阈值误杀）
+      const cards = [...document.querySelectorAll('.wall-card')];
+      const fromPort = cards[0]?.querySelector('.wall-port');
+      const toCard = cards[1];
+      out.portInteractive = fromPort ? getComputedStyle(fromPort).pointerEvents !== 'none' : false;
+      const edgesBefore = document.querySelectorAll('.wall-edges > path').length;
+      if (fromPort && toCard) {
+        const p1 = fromPort.getBoundingClientRect();
+        const p2 = toCard.getBoundingClientRect();
+        const startX = p1.left + p1.width / 2;
+        const startY = p1.top + p1.height / 2;
+        const endX = p2.left + p2.width / 2;
+        const endY = p2.top + p2.height / 2;
+        fromPort.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 7, clientX: startX, clientY: startY }));
+        await new Promise((r) => setTimeout(r, 150));
+        out.pendingLine = Boolean(document.querySelector('.wall-edges line'));
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7, clientX: (startX + endX) / 2, clientY: (startY + endY) / 2 }));
+        await new Promise((r) => setTimeout(r, 100));
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7, clientX: endX, clientY: endY }));
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      out.portDropEdge = document.querySelectorAll('.wall-edges > path').length === edgesBefore + 1;
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       out.boardEditEsc = hook.state().wallOpen === false;
     `],
     ['projection', `
       const hook = window.__S43_WALL_TEST__;
+      // 独立新板（单节点）验证投影映射，避免前序步骤的多节点/连线干扰行数与宫格数
+      await hook.openIndependent();
+      const dProj = Date.now() + 15000;
+      while (!hook.state().wallOpen && Date.now() < dProj) await new Promise((r) => setTimeout(r, 100));
+      await hook.addTextNode();
+      await new Promise((r) => setTimeout(r, 400));
       const mode = await hook.projectToggle();
       const ps = hook.projectedState();
       out.projectedMode = mode === 'on' && ps.projectedMode === true;
       out.projectedRows = ps.rows === 1;
       out.projectedGrid = ps.gridCells === 1;
-
+      // 批次7：关墙自动投影 + 徽标退出
+      out.autoProjectionBadge = Boolean(document.querySelector('.board-projection-badge'));
+      document.querySelector('.board-projection-badge button')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      out.badgeExit = hook.projectedState().projectedMode === false;
     `],
   ];
   const out: Record<string, any> = {};

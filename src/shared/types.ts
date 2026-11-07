@@ -129,6 +129,8 @@ export interface Settings {
   shortcuts?: ShortcutSettings;
   /** S43：分镜墙视图状态（scale/pan 按项目分组），存 settings.json 不进库 */
   wallViewState?: Record<string, WallViewState>;
+  /** 批次8：分镜本独立保存根目录（每个分镜本同步为 board-<id8>/board.json + assets/） */
+  boardSaveDir?: string;
 }
 
 export interface SettingsSetArgs {
@@ -155,6 +157,8 @@ export interface SettingsSetArgs {
   shortcuts?: ShortcutSettings;
   /** S43：分镜墙视图状态（与 Settings 同形） */
   wallViewState?: Record<string, WallViewState>;
+  /** 批次8：分镜本独立保存根目录 */
+  boardSaveDir?: string;
 }
 
 export interface SettingsChooseDirectoryArgs {
@@ -353,6 +357,8 @@ export interface WallApi {
   addNodeTag(args: WallNodeTagMutateArgs): Promise<IpcResult<void>>;
   removeNodeTag(args: WallNodeTagMutateArgs): Promise<IpcResult<void>>;
   exportProjection(args: WallExportProjectionArgs): Promise<IpcResult<WallExportProjectionResult>>;
+  importBoardFile(): Promise<IpcResult<WallImportBoardFileResult>>;
+  openBoardDir(args: WallOpenBoardDirArgs): Promise<IpcResult<WallOpenBoardDirResult>>;
 }
 
 export interface WorkspaceState {
@@ -1180,6 +1186,52 @@ export interface WallExportProjectionArgs {
 }
 
 export interface WallExportProjectionResult {
+  path: string;
+}
+
+/** 批次8：分镜本独立保存（board.json + assets/） */
+export interface WallBoardFileNodePayload {
+  id: string;
+  source: 'image' | 'text';
+  assetPath?: string | null;
+  /** 导出文件内的资产文件名（assets/ 下），导入时据此复制 */
+  assetFile?: string | null;
+  title?: string;
+  textContent?: string;
+  durationMs?: number;
+  note?: string;
+  shotSize?: string | null;
+  cameraMethod?: string | null;
+  x?: number;
+  y?: number;
+}
+
+export interface WallBoardFilePayload {
+  kind: string;
+  version: number;
+  boardId?: string;
+  name?: string;
+  exportedAt?: string;
+  nodes?: WallBoardFileNodePayload[];
+  edges?: Array<{ fromNodeId: string; toNodeId: string; kind?: string }>;
+  tags?: Array<{ nodeId: string; category: string; name: string }>;
+  annotations?: Record<string, Array<{ type: string; color: string; data?: unknown }>>;
+}
+
+export interface WallImportBoardFileArgs {
+  // 无参数（主进程弹文件选择框）
+}
+
+export interface WallImportBoardFileResult {
+  /** 用户取消时为 null */
+  boardId: string | null;
+}
+
+export interface WallOpenBoardDirArgs {
+  boardId: string;
+}
+
+export interface WallOpenBoardDirResult {
   path: string;
 }
 
