@@ -4856,8 +4856,11 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
 function wallUiChecksAssertions(result: Record<string, any>): Record<string, boolean> {
   return {
     wallUiOpen: result.open === true,
+    wallUiPickerShown: result.pickerShown === true,
     wallUiCards: result.cards === true,
     wallUiZoom: result.zoom === true,
+    wallUiHudZoomButton: result.hudZoomButton === true,
+    wallUiEdgeDelClick: result.edgeDelClick === true,
     wallUiPlayer: result.player === true,
     wallUiTools: result.tools === true,
     wallUiEsc: result.escClosed === true,
@@ -4867,98 +4870,6 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
   };
 }
 
-async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Record<string, any>> {
-  const data = deps.getData?.() ?? null;
-  if (!data) return { skipped: true, reason: 'data unavailable' };
-  const project = data.projects.create({
-    name: `S43 Wall UI ${Date.now()}`,
-    media: { filename: 'wall-ui.mp4', durationMs: 6000, fps: 25, width: 640, height: 360 },
-  });
-  for (let i = 0; i < 3; i++) {
-    const shot = data.shots.create({ projectId: project.id, startMs: i * 2000, endMs: (i + 1) * 2000 });
-    data.db.prepare('UPDATE shots SET thumbnail = ? WHERE id = ?').run(`lapian-asset://${project.id}/t${i}.jpg`, shot.id);
-  }
-  try {
-    return (await win.webContents.executeJavaScript(`
-      (async () => {
-        const out = {};
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const waitFor = async (check, timeoutMs = 15000) => {
-          const deadline = Date.now() + timeoutMs;
-          while (Date.now() < deadline) {
-            const value = check();
-            if (value) return value;
-            await sleep(100);
-          }
-          return null;
-        };
-        try {
-          const hook = window.__S43_WALL_TEST__;
-          if (!hook) { out.exception = 'S43 hook missing'; return out; }
-          out.projectOpened = (await hook.openProject(${JSON.stringify(project.id)})).ok === true;
-          await sleep(300);
-          await hook.openWall();
-          await waitFor(() => hook.state().wallOpen);
-          out.open = hook.state().wallOpen === true;
-          await waitFor(() => hook.state().cards === 3);
-          out.cards = hook.state().cards === 3;
-          const before = parseFloat(hook.state().scale) || 100;
-          hook.dispatchWheel(-120, 6);
-          await sleep(600);
-          const after = parseFloat(hook.state().scale) || 100;
-          out.zoom = after > before;
-          // 孤立卡规则：无边时放映只有当前一张
-          hook.dispatchDblClick(0);
-          await waitFor(() => hook.state().playerOpen);
-          const p = hook.state();
-          out.player = p.playerOpen === true && p.slides === 1;
-          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-          await sleep(300);
-          // 建边后：沿连线连通的 3 张全部可放映
-          const shotIds = hook.state && [];
-          const api = window.__S43_WALL_TEST__;
-          void shotIds; void api;
-          await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[0].id, toShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[1].id, kind: 'solid' });
-          await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[1].id, toShotId: (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data[2].id, kind: 'solid' });
-          hook.dispatchDblClick(0);
-          await waitFor(() => hook.state().playerOpen && hook.state().slides === 3);
-          const p2 = hook.state();
-          out.player = out.player === true && p2.slides === 3;
-          out.playerDbg2 = p2;
-          out.tools = p.tools === 10;
-          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-          await sleep(300);
-          out.escClosed = hook.state().playerOpen === false;
-          out.afterEsc = hook.state();
-          // S44：独立分镜本——无项目上下文创建文本节点并出现墙卡
-          await hook.openIndependent();
-          await waitFor(() => hook.state().wallOpen);
-          const nodeId = await hook.addTextNode();
-          await sleep(400);
-          const bs = hook.state();
-          out.boardOpen = bs.wallOpen === true;
-          out.boardCard = nodeId !== null && bs.cards === 1;
-
-          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-          await sleep(200);
-          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-          await sleep(300);
-          out.boardEsc = hook.state().wallOpen === false;
-          return out;
-        } catch (error) {
-          out.exception = String(error && error.stack ? error.stack : error);
-          return out;
-        }
-      })()
-    `));
-  } finally {
-    try {
-      data.projects.delete(project.id);
-    } catch { /* ignore */ }
-  }
-}
-
-/** S44：独立分镜本数据层验收 */
 function boardChecksAssertions(result: Record<string, any>): Record<string, boolean> {
   return {
     boardCreateList: result.createList === true,
@@ -4978,12 +4889,7 @@ async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     const boardId = created.id;
     const boards = data.wallBoards.listBoards();
     out.createList = boards.some((b) => b.id === boardId && b.nodeCount === 0);
-    const n1 = data.wallBoards.addNode(boardId, {
-      source: 'text',
-      title: '黑底分镜',
-      x: 40,
-      y: 40,
-    });
+    const n1 = data.wallBoards.addNode(boardId, { source: 'text', title: '黑底分镜', x: 40, y: 40 });
     const n2 = data.wallBoards.addNode(boardId, {
       source: 'image',
       assetPath: 'boards/' + boardId + '/a.jpg',
@@ -5001,7 +4907,6 @@ async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
       { type: 'arrow', color: '#ff0000', data: { pts: [{ x: 1, y: 1 }, { x: 9, y: 9 }] } },
     ]);
     out.annotations = (data.wallBoards.listNodeAnnotations(boardId)[n1.id]?.length ?? 0) === 1;
-    // 节点删除 → 连线 CASCADE
     data.wallBoards.deleteNode(n2.id);
     out.edges = out.edges && data.wallBoards.listNodeEdges(boardId).length === 0;
     try {
@@ -5016,6 +4921,146 @@ async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
     return out;
   }
+}
+
+async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const project = data.projects.create({
+    name: `S43 Wall UI ${Date.now()}`,
+    media: { filename: 'wall-ui.mp4', durationMs: 6000, fps: 25, width: 640, height: 360 },
+  });
+  for (let i = 0; i < 3; i++) {
+    const shot = data.shots.create({ projectId: project.id, startMs: i * 2000, endMs: (i + 1) * 2000 });
+    data.db.prepare('UPDATE shots SET thumbnail = ? WHERE id = ?').run(`lapian-asset://${project.id}/t${i}.jpg`, shot.id);
+  }
+  const steps: Array<[string, string]> = [
+    ['open', `
+      const hook = window.__S43_WALL_TEST__;
+      if (!hook) { out.exception = 'S43 hook missing'; return out; }
+      out.projectOpened = (await hook.openProject(${JSON.stringify(project.id)})).ok === true;
+      await new Promise((r) => setTimeout(r, 300));
+      await hook.openWall();
+      const pickDeadline = Date.now() + 8000;
+      const pick = () => document.querySelector('.picker-option');
+      while (!pick() && Date.now() < pickDeadline) await new Promise((r) => setTimeout(r, 100));
+      out.pickerShown = Boolean(pick());
+      // 第一个选项 = 本项目分镜本
+      pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      const d1 = Date.now() + 15000;
+      while (!hook.state().wallOpen && Date.now() < d1) await new Promise((r) => setTimeout(r, 100));
+      out.open = hook.state().wallOpen === true;
+    `],
+    ['cards', `
+      const hook = window.__S43_WALL_TEST__;
+      const d2 = Date.now() + 15000;
+      while (hook.state().cards !== 3 && Date.now() < d2) await new Promise((r) => setTimeout(r, 100));
+      out.cards = hook.state().cards === 3;
+      const before = parseFloat(hook.state().scale) || 100;
+      document.querySelector('.wall-hud button[aria-label="放大"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 250));
+      const mid = parseFloat(hook.state().scale) || 100;
+      out.hudZoomButton = mid > before;
+      hook.dispatchWheel(-120, 6);
+      await new Promise((r) => setTimeout(r, 600));
+      const after = parseFloat(hook.state().scale) || 100;
+      out.zoom = after > before;
+    `],
+    ['edgeDel', `
+      const hook = window.__S43_WALL_TEST__;
+      const shots3 = (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data;
+      await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: shots3[0].id, toShotId: shots3[1].id, kind: 'solid' });
+      await hook.reloadEdges();
+      await new Promise((r) => setTimeout(r, 300));
+      const pathsBefore = document.querySelectorAll('.wall-edges > path').length;
+      const del = document.querySelector('.wall-edge-del');
+      out.edgeDelVisible = Boolean(del);
+      del?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      del?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 600));
+      const pathsAfter = document.querySelectorAll('.wall-edges > path').length;
+      out.edgeDelClick = pathsBefore === 1 && pathsAfter === 0;
+
+    `],
+    ['playerIso', `
+      const hook = window.__S43_WALL_TEST__;
+      hook.dispatchDblClick(0);
+      const d4 = Date.now() + 15000;
+      while (!hook.state().playerOpen && Date.now() < d4) await new Promise((r) => setTimeout(r, 100));
+      const p1 = hook.state();
+      out.player = p1.playerOpen === true && p1.slides === 1;
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      out.escClosed = hook.state().playerOpen === false;
+    `],
+    ['playerChain', `
+      const hook = window.__S43_WALL_TEST__;
+      if (!hook.state().wallOpen) {
+        await hook.openWall();
+        const d0 = Date.now() + 8000;
+        const pickEl = () => document.querySelector('.picker-option');
+        while (!pickEl() && Date.now() < d0) await new Promise((r) => setTimeout(r, 100));
+        pickEl()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const dw = Date.now() + 10000;
+        while (!hook.state().wallOpen && Date.now() < dw) await new Promise((r) => setTimeout(r, 100));
+      }
+      const shots4 = (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data;
+      await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: shots4[1].id, toShotId: shots4[2].id, kind: 'solid' });
+      await hook.reloadEdges();
+      hook.dispatchDblClick(1);
+      const d5 = Date.now() + 15000;
+      while (!(hook.state().playerOpen && hook.state().slides === 2) && Date.now() < d5) await new Promise((r) => setTimeout(r, 100));
+      const p2 = hook.state();
+      out.playerChain = p2.playerOpen === true && p2.slides === 2;
+      out.tools = p2.tools === 10;
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+    `],
+    ['board', `
+      const hook = window.__S43_WALL_TEST__;
+      await hook.openIndependent();
+      const d6 = Date.now() + 15000;
+      while (!hook.state().wallOpen && Date.now() < d6) await new Promise((r) => setTimeout(r, 100));
+      const nodeId = await hook.addTextNode();
+      await new Promise((r) => setTimeout(r, 400));
+      const bs = hook.state();
+      out.boardOpen = bs.wallOpen === true;
+      out.boardCard = nodeId !== null && bs.cards === 1;
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      out.boardEsc = hook.state().wallOpen === false;
+    `],
+  ];
+  const out: Record<string, any> = {};
+  for (const step of steps) {
+    const full = `(async () => {
+      const out = {};
+      try {
+        ${step[1]}
+        return out;
+      } catch (error) {
+        out.exception = '[STEP ' + step[0] + '] ' + String(error && error.stack ? error.stack : error);
+        return out;
+      }
+    })()`;
+    try {
+      const part = (await Promise.race([
+        win.webContents.executeJavaScript(full),
+        new Promise((resolve) => setTimeout(() => resolve({ timeout: step[0] }), 30000)),
+      ])) as Record<string, any>;
+      Object.assign(out, part);
+      if (part.exception || part.timeout) break;
+    } catch (error) {
+      out.execError = String(error instanceof Error ? error.message : error) + ' @' + step[0];
+      break;
+    }
+  }
+  try {
+    data.projects.delete(project.id);
+  } catch {
+    // ignore
+  }
+  return out;
 }
 
 /** S41：分阶段 UI/端到端门控——真实视频走 runBoundary，验证自动落库与 Qwen 不参与。 */

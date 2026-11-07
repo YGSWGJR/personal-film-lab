@@ -38,7 +38,7 @@ const emit = defineEmits<{
 }>();
 
 const CARD_W = 220;
-const CARD_H = 148;
+const CARD_H = 142;
 const GAP = 24;
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 4;
@@ -175,6 +175,8 @@ function measureStage(): void {
   stageH.value = el.clientHeight || 720;
 }
 
+defineExpose({ reloadGraph });
+
 onMounted(() => {
   measureStage();
   applyInitialState();
@@ -277,8 +279,8 @@ function edgePath(fromId: string, toId: string): string {
   const a = cardCenter(fromId);
   const b = cardCenter(toId);
   if (!a || !b) return '';
-  const mx = (a.x + b.x) / 2;
-  return `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`;
+  // 0.3.2：直线连接（对齐竞品形态），端点分别在源卡右缘与目标卡左缘
+  return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
 }
 
 const edgePaths = computed(() =>
@@ -1051,6 +1053,9 @@ function zoomAt(screenX: number, screenY: number, factor: number): void {
 let panDrag: { x: number; y: number; px: number; py: number } | null = null;
 function onStagePointerDown(event: PointerEvent): void {
   if ((event.target as HTMLElement).closest('.wall-card')) return;
+  // 0.3.2 修复：交互控件（HUD 按钮/删边按钮/端口/菜单）不能被画布抓手捕获，
+  // 否则 pointer capture 吞掉 click，按钮全部失灵
+  if ((event.target as HTMLElement).closest('button, .wall-edge-del, .wall-port, .wall-selection, .board-badge')) return;
   if (!(event.button === 1 || spaceDown || event.button === 0)) return;
   panDrag = { x: event.clientX, y: event.clientY, px: panX.value, py: panY.value };
   panning.value = true;
@@ -1219,6 +1224,7 @@ function fmtDuration(ms: number): string {
         @dblclick="onCardDblClick(item.shot)"
         @contextmenu.prevent="openWallContextMenu($event, item.shot.id)"
       >
+        <span class="wall-port-in" aria-hidden="true"></span>
         <span class="wall-port" title="拖到另一张卡建立连线（Shift=备选虚线）" @pointerdown="onPortDown($event, item.shot.id)"></span>
         <div class="wall-thumb">
           <img :src="item.shot.thumbnail" :alt="item.shot.title" draggable="false" />
@@ -1433,23 +1439,17 @@ function fmtDuration(ms: number): string {
 
 .wall-edge-del {
   position: absolute;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   border: 1px solid var(--border, #2a3a55);
   border-radius: 50%;
   background: var(--surface-2, #182233);
   color: var(--text-muted, #93a4bd);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s;
-  z-index: 2;
-}
-
-.wall-edges + .wall-edge-del,
-.wall-content:hover .wall-edge-del {
-  opacity: 0.85;
+  opacity: 0.9;
+  z-index: 6;
 }
 
 .wall-edge-del:hover {
@@ -1465,22 +1465,30 @@ function fmtDuration(ms: number): string {
 
 .wall-port {
   position: absolute;
-  right: -7px;
+  right: -8px;
   top: 50%;
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--blue-hi, #5aa2ff);
-  border-radius: 50%;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--green, #34d399);
+  border-radius: 3px;
   background: var(--bg-deep, #0a0e16);
   transform: translateY(-50%);
   cursor: crosshair;
-  opacity: 0;
-  transition: opacity 0.15s;
   z-index: 3;
 }
 
-.wall-card:hover .wall-port {
-  opacity: 1;
+.wall-port-in {
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--blue-hi, #5aa2ff);
+  border-radius: 3px;
+  background: var(--bg-deep, #0a0e16);
+  transform: translateY(-50%);
+  pointer-events: none;
+  z-index: 3;
 }
 
 .wall-selection {

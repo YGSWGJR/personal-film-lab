@@ -153,9 +153,13 @@ const wallViewState = ref<WallViewState | null>(null);
 const wallMode = ref<'project' | 'independent'>('project');
 const wallBoardId = ref<string | null>(null);
 const wallBoardName = ref('');
+const wallRef = ref<InstanceType<typeof StoryboardWall> | null>(null);
 /** 独立分镜本节点映射为 WorkspaceShot 供画布/放映复用 */
 const boardShots = ref<WorkspaceShot[]>([]);
 const wallNodeEdit = ref<{ nodeId: string; title: string; durationMs: number; note: string } | null>(null);
+/** S44：有素材时的分镜本选择卡 */
+const wallPickerOpen = ref(false);
+const wallPickerBoards = ref<Array<{ id: string; name: string; nodeCount: number; updatedAt: string }>>([]);
 let wallViewStateTimer: ReturnType<typeof setTimeout> | null = null;
 const detectionStageLabel = computed(() => {
   const progress = detectionProgress.value;
@@ -2495,6 +2499,25 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     await openWall();
     return { ok: true };
   },
+  reloadEdges: async () => {
+    await (wallRef.value as unknown as { reloadGraph: () => Promise<void> } | null)?.reloadGraph();
+  },
+  openIndependent: async () => {
+    await openIndependentBoard(null);
+    return { ok: true };
+  },
+  addTextNode: async (): Promise<string | null> => {
+    const created = await window.api.wall.addNode({
+      boardId: wallBoardId.value ?? '',
+      source: 'text',
+      title: '测试节点',
+      x: 100,
+      y: 100,
+    });
+    if (!created.ok) return null;
+    await loadBoardNodes();
+    return created.data.id;
+  },
   state: () => ({
     wallOpen: wallOpen.value,
     cards: document.querySelectorAll('.wall-card').length,
@@ -2907,11 +2930,24 @@ async function openWall(): Promise<void> {
     await openIndependentBoard(null);
     return;
   }
+  // S44 修复：有素材时先弹选择卡（新建分镜本 / 本项目分镜本 / 最近独立板）
+  const boards = await window.api.wall.listBoards();
+  wallPickerBoards.value = boards.ok ? boards.data.slice(0, 5) : [];
+  wallPickerOpen.value = true;
+}
+
+async function openProjectWall(): Promise<void> {
+  wallPickerOpen.value = false;
   wallMode.value = 'project';
   wallBoardId.value = null;
-  const base = settings.value?.wallViewState?.[activeProject.value.id] ?? null;
+  const base = settings.value?.wallViewState?.[activeProject.value?.id ?? ''] ?? null;
   wallViewState.value = base;
   wallOpen.value = true;
+}
+
+async function pickIndependentBoard(boardId: string | null): Promise<void> {
+  wallPickerOpen.value = false;
+  await openIndependentBoard(boardId);
 }
 
 /** S44：新建/打开独立分镜本并映射为画布节点 */
@@ -3809,6 +3845,7 @@ onBeforeUnmount(() => {
 
     <StoryboardWall
       v-if="wallOpen"
+      ref="wallRef"
       :shots="wallMode === 'independent' ? boardShots : shots"
       :project-id="wallMode === 'independent' ? 'boards' : activeProject?.id ?? ''"
       :view-state="wallViewState"
@@ -3825,6 +3862,36 @@ onBeforeUnmount(() => {
         {{ wallBoardName }}（独立分镜本）
       </div>
     </StoryboardWall>
+
+    <div v-if="wallPickerOpen" class="node-edit-mask" @pointerdown.self="wallPickerOpen = false">
+      <div class="node-edit-card">
+        <header>
+          <h3>分镜墙</h3>
+          <button type="button" aria-label="关闭" @click="wallPickerOpen = false">×</button>
+        </header>
+        <button type="button" class="picker-option" @click="openProjectWall">
+          <b>本项目分镜本</b>
+          <small>把当前项目已切分的镜头铺到画布上编排</small>
+        </button>
+        <button type="button" class="picker-option" @click="pickIndependentBoard(null)">
+          <b>新建分镜本</b>
+          <small>不依赖拉片素材：导入照片或黑白底+文本框开始创作</small>
+        </button>
+        <template v-if="wallPickerBoards.length > 0">
+          <p class="picker-title">最近分镜本</p>
+          <button
+            v-for="board in wallPickerBoards"
+            :key="board.id"
+            type="button"
+            class="picker-option"
+            @click="pickIndependentBoard(board.id)"
+          >
+            <b>{{ board.name }}</b>
+            <small>{{ board.nodeCount }} 节点 · {{ new Date(board.updatedAt).toLocaleString('zh-CN') }}</small>
+          </button>
+        </template>
+      </div>
+    </div>
 
     <div
       v-if="wallNodeEdit"
