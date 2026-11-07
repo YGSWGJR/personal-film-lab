@@ -16,10 +16,13 @@
         <span>名称</span>
         <input v-model="titleDraft" maxlength="200" placeholder="节点名称" @input="queueSave" />
       </label>
-      <label class="wnp-field">
+      <label v-if="node?.source !== 'composite'" class="wnp-field">
         <span>持续时间（秒）</span>
         <input v-model="durationDraft" type="number" min="0.2" max="600" step="0.1" @input="queueSave" />
       </label>
+      <p v-else class="wnp-composite-hint">
+        时长自动：由 {{ node.childCount ?? 0 }} 个子节点决定（内部连线同层并行=同时、跨层推进）
+      </p>
       <section v-for="group in tagGroups" :key="group.category" class="wnp-tags">
         <span class="wnp-cat">{{ group.category }}</span>
         <div class="wnp-chips">
@@ -40,6 +43,14 @@
         <textarea v-model="noteDraft" rows="5" placeholder="这个节点的拍摄意图、备注…" @input="queueSave"></textarea>
       </label>
       <p class="wnp-state" :class="saveState">{{ stateText }}</p>
+      <button
+        v-if="node?.source === 'composite'"
+        type="button"
+        class="wnp-dissolve"
+        @click="emit('dissolve')"
+      >
+        解散复合节点（子节点释放回画布）
+      </button>
     </div>
   </aside>
 </template>
@@ -57,7 +68,7 @@ const props = defineProps<{
   node: WallBoardNodeInfo | null;
 }>();
 
-const emit = defineEmits<{ changed: [] }>();
+const emit = defineEmits<{ changed: []; dissolve: [] }>();
 
 const CATEGORY_ORDER = ['景别', '机位', '运镜', '光线', '声音', '剪辑'];
 
@@ -164,8 +175,10 @@ async function flushSave(): Promise<void> {
   const patch: { title?: string; durationMs?: number; note?: string } = {};
   const title = titleDraft.value.trim();
   if (title !== node.title) patch.title = title;
-  const durMs = parseDurationMs(durationDraft.value);
-  if (durMs !== null && durMs !== node.durationMs) patch.durationMs = durMs;
+  if (node.source !== 'composite') {
+    const durMs = parseDurationMs(durationDraft.value);
+    if (durMs !== null && durMs !== node.durationMs) patch.durationMs = durMs;
+  }
   if (noteDraft.value !== node.note) patch.note = noteDraft.value;
   if (Object.keys(patch).length === 0) {
     dirty = false;
@@ -353,6 +366,29 @@ async function toggleTag(category: string, name: string): Promise<void> {
 
 .wnp-state.error {
   color: #ff7a7a;
+}
+
+.wnp-composite-hint {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px dashed rgba(234, 179, 8, 0.5);
+  border-radius: 6px;
+  color: #f3d473;
+  font-size: 11px;
+}
+
+.wnp-dissolve {
+  border: 1px solid rgba(255, 122, 122, 0.5);
+  border-radius: 6px;
+  background: transparent;
+  color: #ff9a9a;
+  font-size: 11px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.wnp-dissolve:hover {
+  background: rgba(255, 122, 122, 0.12);
 }
 
 .wnp-state.saved {

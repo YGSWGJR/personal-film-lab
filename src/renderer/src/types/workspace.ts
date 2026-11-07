@@ -8,6 +8,8 @@ export interface WorkspaceShot extends Shot {
   noteId?: string;
   /** 独立分镜本文本节点才有：画面文字（双击卡片进入内联编辑） */
   textContent?: string;
+  /** 批次9：复合节点才有：收编的子节点数 */
+  childCount?: number;
 }
 
 export interface TimelineMarker {

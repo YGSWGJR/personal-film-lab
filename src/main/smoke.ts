@@ -4875,6 +4875,11 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     boardUiPortInteractive: result.portInteractive === true,
     boardUiPendingLine: result.pendingLine === true,
     boardUiPortDropEdge: result.portDropEdge === true,
+    boardUiCompositeCreated: result.compositeCreated === true,
+    boardUiCompositeCard: result.compositeCard === true,
+    boardUiCompositeBadge: result.compositeBadge === true,
+    boardUiCompositeTray: result.compositeTray === true,
+    boardUiCompositeDissolved: result.compositeDissolved === true,
     boardUiEditEsc: result.boardEditEsc === true,
     boardProjectedMode: result.projectedMode === true,
     boardProjectedRows: result.projectedRows === true,
@@ -4892,6 +4897,7 @@ function boardChecksAssertions(result: Record<string, any>): Record<string, bool
     boardTags: result.tags === true,
     boardTagInvalid: result.tagInvalid === true,
     boardFileExport: result.boardFileExport === true,
+    boardCompositeLifecycle: result.compositeLifecycle === true,
     boardEdges: result.edges === true,
     boardAnnotations: result.annotations === true,
     boardImportInvalid: result.importInvalid === true,
@@ -4972,6 +4978,37 @@ async function runBoardChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     } catch (error) {
       out.importInvalid = (error as { code?: string }).code === 'WALL_ITEM_INVALID';
     }
+    // 批次9：复合节点全生命周期——建组（外部连线重路由）→ 嵌套拒绝 → 解散释放
+    const c1 = data.wallBoards.addNode(boardId, { source: 'text', title: 'C1', x: 600, y: 40 });
+    const c2 = data.wallBoards.addNode(boardId, {
+      source: 'image',
+      assetPath: 'boards/' + boardId + '/c.jpg',
+      title: 'C2',
+      x: 900,
+      y: 40,
+    });
+    data.wallBoards.addNodeEdge(boardId, n1.id, c1.id, 'solid');
+    const composite = data.wallBoards.createComposite(boardId, [c1.id, c2.id]);
+    const rerouted = data.wallBoards.listNodeEdges(boardId);
+    out.compositeLifecycle =
+      data.wallBoards.getNode(composite.id).source === 'composite' &&
+      data.wallBoards.getNode(c1.id).parentId === composite.id &&
+      data.wallBoards.getNode(c2.id).parentId === composite.id &&
+      rerouted.some((e) => e.fromShotId === n1.id && e.toShotId === composite.id) &&
+      !rerouted.some((e) => e.fromShotId === c1.id || e.toShotId === c1.id);
+    try {
+      data.wallBoards.createComposite(boardId, [n1.id, composite.id]);
+      out.compositeLifecycle = false;
+    } catch (error) {
+      out.compositeLifecycle =
+        out.compositeLifecycle && (error as { code?: string }).code === 'WALL_ITEM_INVALID';
+    }
+    data.wallBoards.dissolveComposite(boardId, composite.id);
+    out.compositeLifecycle =
+      out.compositeLifecycle &&
+      data.wallBoards.getNode(c1.id).parentId === null &&
+      data.wallBoards.getNode(c2.id).parentId === null &&
+      data.wallBoards.listNodeEdges(boardId).every((e) => e.fromShotId !== composite.id && e.toShotId !== composite.id);
     data.wallBoards.deleteBoard(boardId);
     return out;
   } catch (error) {
@@ -5153,6 +5190,28 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
         await new Promise((r) => setTimeout(r, 600));
       }
       out.portDropEdge = document.querySelectorAll('.wall-edges > path').length === edgesBefore + 1;
+      // 批次9 UI 门控：两卡建组 → 复合卡+徽标 → 双击托盘 → 解散还原
+      const boardNodesNow = (await window.api.wall.listNodes({ boardId: hook.state().boardId })).data ?? [];
+      const comp = await window.api.wall.createComposite({
+        boardId: hook.state().boardId,
+        nodeIds: boardNodesNow.filter((n) => !n.parentId).map((n) => n.id),
+      });
+      out.compositeCreated = comp.ok === true;
+      await hook.reloadNodes();
+      await new Promise((r) => setTimeout(r, 600));
+      out.compositeCard = document.querySelectorAll('.wall-card').length === 1;
+      out.compositeBadge = Boolean(document.querySelector('.wall-composite-badge'));
+      hook.dispatchDblClick(0);
+      await new Promise((r) => setTimeout(r, 300));
+      out.compositeTray = document.querySelectorAll('.wall-composite-tray .tray-card').length === 2;
+      document.querySelector('.wall-composite-tray header button')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 200));
+      if (comp.ok) {
+        await window.api.wall.dissolveComposite({ boardId: hook.state().boardId, compositeId: comp.data.compositeId });
+        await hook.reloadNodes();
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      out.compositeDissolved = document.querySelectorAll('.wall-card').length === 2;
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       out.boardEditEsc = hook.state().wallOpen === false;
@@ -5179,13 +5238,14 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
   ];
   const out: Record<string, any> = {};
   for (const step of steps) {
+    const stepName = JSON.stringify(step[0]);
     const full = `(async () => {
       const out = {};
       try {
         ${step[1]}
         return out;
       } catch (error) {
-        out.exception = '[STEP ' + step[0] + '] ' + String(error && error.stack ? error.stack : error);
+        out.exception = '[STEP ' + ${stepName} + '] ' + String(error && error.stack ? error.stack : error);
         return out;
       }
     })()`;

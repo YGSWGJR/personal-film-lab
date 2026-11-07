@@ -166,6 +166,8 @@ const wallRef = ref<InstanceType<typeof StoryboardWall> | null>(null);
 const boardShots = ref<WorkspaceShot[]>([]);
 /** 批次3：独立分镜本节点原始信息（WallNodePanel 数据源，一一对应保存） */
 const boardNodesInfo = ref<WallBoardNodeInfo[]>([]);
+/** 批次9：复合节点展开托盘的子卡（compositeId → 子节点映射） */
+const compositeChildrenShots = ref<Record<string, WorkspaceShot[]>>({});
 /** 批次3：分镜墙当前选中节点（0/1/多） */
 const wallSelectedIds = ref<string[]>([]);
 /** 批次3：外部请求选中并聚焦的节点 id（导入/新建后自动选中） */
@@ -3062,15 +3064,34 @@ async function loadBoardNodes(): Promise<void> {
     (nodeTags[nodeId] ?? [])
       .map(({ category, name }) => tags.value.find((t) => t.category === category && t.name === name)?.id)
       .filter((id): id is string => Boolean(id));
+  // 批次9：复合节点——子节点收编，主链 BFS 只走顶层节点
+  const childrenMap = new Map<string, WallBoardNodeInfo[]>();
+  for (const node of nodes.data) {
+    if (node.parentId) {
+      const list = childrenMap.get(node.parentId) ?? [];
+      list.push(node);
+      childrenMap.set(node.parentId, list);
+    }
+  }
+  for (const info of boardNodesInfo.value) info.childCount = childrenMap.get(info.id)?.length ?? 0;
+  const topLevel = nodes.data.filter((node) => !node.parentId);
+  const topIds = new Set(topLevel.map((node) => node.id));
+  const childIds = new Set(nodes.data.filter((node) => node.parentId).map((node) => node.id));
+  const mainEdges = edges.data.filter((e) => topIds.has(e.fromShotId) && topIds.has(e.toShotId));
+  const internalEdges = edges.data.filter((e) => childIds.has(e.fromShotId) && childIds.has(e.toShotId));
+  const compositeDuration = new Map<string, number>();
+  for (const [compositeId, children] of childrenMap) {
+    compositeDuration.set(compositeId, internalCompositeDuration(children, internalEdges));
+  }
   const adj = new Map<string, Array<string>>();
-  for (const node of nodes.data) adj.set(node.id, []);
-  for (const e of edges.data) {
+  for (const node of topLevel) adj.set(node.id, []);
+  for (const e of mainEdges) {
     adj.get(e.fromShotId)?.push(e.toShotId);
   }
   // BFS 分层（深度=层），层内节点共享 startMs = 前层最大 end
   const depth = new Map<string, number>();
-  const roots = nodes.data.filter((node) => !edges.data.some((e) => e.toShotId === node.id));
-  const queue = (roots.length > 0 ? roots : nodes.data.slice(0, 1)).map((node) => node.id);
+  const roots = topLevel.filter((node) => !mainEdges.some((e) => e.toShotId === node.id));
+  const queue = (roots.length > 0 ? roots : topLevel.slice(0, 1)).map((node) => node.id);
   for (const id of queue) depth.set(id, 0);
   let frontier = queue;
   while (frontier.length > 0) {
@@ -3087,23 +3108,30 @@ async function loadBoardNodes(): Promise<void> {
   }
   const layerEnd = new Map<number, number>();
   const mapped: WorkspaceShot[] = [];
-  const ordered = [...nodes.data].sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0));
+  const ordered = [...topLevel].sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0));
   for (const node of ordered) {
     const layer = depth.get(node.id) ?? 0;
     const startMs = layerEnd.get(layer) ?? 0;
     const shape = emptyShotShape(wallBoardId.value, node, startMs);
-    shape.endMs = startMs + node.durationMs;
-    shape.durationMs = node.durationMs;
+    // 批次9：复合节点时长=内部并行/串联总长（与主链同语义），DB 的 duration_ms 仅空组兜底
+    const duration =
+      node.source === 'composite' ? (compositeDuration.get(node.id) ?? node.durationMs) : node.durationMs;
+    shape.endMs = startMs + duration;
+    shape.durationMs = duration;
     shape.tagIds = wallTagIds(node.id);
+    if (node.source === 'composite') {
+      shape.childCount = childrenMap.get(node.id)?.length ?? 0;
+      shape.thumbnail = await compositeThumbDataUrl(childrenMap.get(node.id) ?? []);
+    }
     mapped.push(shape);
-    layerEnd.set(layer, Math.max(layerEnd.get(layer) ?? 0, startMs + node.durationMs));
+    layerEnd.set(layer, Math.max(layerEnd.get(layer) ?? 0, startMs + duration));
     // 笔记 → 右侧镜头笔记（投影模式仅内存）
     notes[node.id] = node.note;
   }
   // 后续未连通节点顺序补齐
   const lastEnd = mapped.at(-1)?.endMs ?? 0;
   let cursor = lastEnd;
-  for (const node of nodes.data) {
+  for (const node of topLevel) {
     if (mapped.some((m) => m.id === node.id)) continue;
     const shape = emptyShotShape(wallBoardId.value, node, cursor);
     shape.tagIds = wallTagIds(node.id);
@@ -3111,6 +3139,111 @@ async function loadBoardNodes(): Promise<void> {
     cursor += node.durationMs;
   }
   boardShots.value = mapped.map((shot, i) => ({ ...shot, index: i + 1 }));
+  // 批次9：复合节点展开托盘子卡
+  const childShots: Record<string, WorkspaceShot[]> = {};
+  for (const [compositeId, children] of childrenMap) {
+    childShots[compositeId] = children.map((node) => emptyShotShape(wallBoardId.value ?? '', node, 0));
+  }
+  compositeChildrenShots.value = childShots;
+}
+
+/** 批次9：复合节点内部时长——子节点按内部连线 BFS 分层（同层并行=同时，层间推进） */
+function internalCompositeDuration(
+  children: WallBoardNodeInfo[],
+  internalEdges: Array<{ fromShotId: string; toShotId: string; kind: string }>,
+): number {
+  const ids = new Set(children.map((child) => child.id));
+  const adj = new Map<string, Array<string>>();
+  const hasIncoming = new Set<string>();
+  for (const edge of internalEdges) {
+    if (!ids.has(edge.fromShotId) || !ids.has(edge.toShotId)) continue;
+    const list = adj.get(edge.fromShotId) ?? [];
+    list.push(edge.toShotId);
+    adj.set(edge.fromShotId, list);
+    hasIncoming.add(edge.toShotId);
+  }
+  const depth = new Map<string, number>();
+  const roots = children.filter((child) => !hasIncoming.has(child.id)).map((child) => child.id);
+  const queue = roots.length > 0 ? roots : children.slice(0, 1).map((child) => child.id);
+  for (const id of queue) depth.set(id, 0);
+  let frontier = queue;
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const cur of frontier) {
+      for (const nb of adj.get(cur) ?? []) {
+        if (!depth.has(nb)) {
+          depth.set(nb, (depth.get(cur) ?? 0) + 1);
+          next.push(nb);
+        }
+      }
+    }
+    frontier = next;
+  }
+  const layerEnd = new Map<number, number>();
+  for (const child of children) {
+    const layer = depth.get(child.id) ?? 0;
+    const start = layerEnd.get(layer) ?? 0;
+    layerEnd.set(layer, Math.max(start, start + child.durationMs));
+  }
+  let total = 0;
+  for (const end of layerEnd.values()) total = Math.max(total, end);
+  return Math.max(200, total);
+}
+
+/** 批次9：复合节点缩略图——子节点缩略图 2×2 网格合成 */
+async function compositeThumbDataUrl(children: WallBoardNodeInfo[]): Promise<string> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 180;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+  ctx.fillStyle = '#0d1420';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const tiles = children.slice(0, 4);
+  const tileW = 154;
+  const tileH = 86;
+  const gap = 4;
+  const offsetX = (canvas.width - (tileW * 2 + gap)) / 2;
+  const offsetY = (canvas.height - (tileH * 2 + gap)) / 2;
+  await Promise.all(
+    tiles.map(async (child, i) => {
+      const src =
+        child.source === 'image' && child.assetPath
+          ? boardAssetUrl(child.assetPath)
+          : textThumbDataUrl(child.textContent);
+      const img = await loadImageEl(src, 1200);
+      const x = offsetX + (i % 2) * (tileW + gap);
+      const y = offsetY + Math.floor(i / 2) * (tileH + gap);
+      if (img) {
+        const scale = Math.max(tileW / img.naturalWidth, tileH / img.naturalHeight);
+        const dw = img.naturalWidth * scale;
+        const dh = img.naturalHeight * scale;
+        ctx.drawImage(img, x + (tileW - dw) / 2, y + (tileH - dh) / 2, dw, dh);
+      } else {
+        ctx.fillStyle = '#16202e';
+        ctx.fillRect(x, y, tileW, tileH);
+      }
+    }),
+  );
+  return canvas.toDataURL('image/png');
+}
+
+function loadImageEl(src: string, timeoutMs = 1500): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    // 批次9：资产画进 canvas 后需 toDataURL，必须匿名跨域加载（协议响应已带 ACAO:*）
+    img.crossOrigin = 'anonymous';
+    const timer = window.setTimeout(() => resolve(null), timeoutMs);
+    img.onload = () => {
+      window.clearTimeout(timer);
+      resolve(img);
+    };
+    img.onerror = () => {
+      window.clearTimeout(timer);
+      resolve(null);
+    };
+    img.src = src;
+  });
 }
 
 const projectedMode = computed(
@@ -3341,17 +3474,8 @@ async function exportProjectionComposite(): Promise<void> {
   if (!boardId) return;
   busy.value = true;
   try {
-    const loaded = await Promise.all(
-      images.map(
-        (src) =>
-          new Promise<HTMLImageElement | null>((resolve) => {
-            const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = () => resolve(null);
-            img.src = src;
-          }),
-      ),
-    );
+    // 批次9：统一走 loadImageEl（crossOrigin=anonymous）——避免 lapian-asset 图污染 canvas
+    const loaded = await Promise.all(images.map((src) => loadImageEl(src, 8000)));
     const ok = loaded.filter((img): img is HTMLImageElement => img !== null);
     if (ok.length === 0) {
       showToast('投影画面加载失败，无法导出。', 'error');
@@ -3489,6 +3613,36 @@ async function openBoardSaveDir(): Promise<void> {
   if (!result.ok) {
     showToast(result.error.message, 'error', result.error.code);
   }
+}
+
+/** 批次9：合并选中节点为复合节点 */
+async function onCreateComposite(nodeIds: string[]): Promise<void> {
+  if (!wallBoardId.value || nodeIds.length < 2) return;
+  const result = await window.api.wall.createComposite({ boardId: wallBoardId.value, nodeIds });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  await loadBoardNodes();
+  boardFocusNodeId.value = result.data.compositeId;
+  showToast(`已合并为复合节点（${nodeIds.length} 个子节点），时长按内部连线自动计算。`, 'success', '复合节点');
+}
+
+/** 批次9：解散复合节点（子节点释放回画布） */
+async function onDissolveComposite(compositeId: string): Promise<void> {
+  if (!wallBoardId.value) return;
+  const result = await window.api.wall.dissolveComposite({ boardId: wallBoardId.value, compositeId });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  await loadBoardNodes();
+  showToast('复合节点已解散，子节点已释放回画布。', 'success', '复合节点');
+}
+
+function onPanelDissolve(): void {
+  const node = wallPanelNode.value;
+  if (node) void onDissolveComposite(node.id);
 }
 
 /** 批次2：文本节点内联编辑 → 缩略图即时重绘，DB 写入防抖 500ms */
@@ -4316,6 +4470,7 @@ onBeforeUnmount(() => {
       :view-state="wallViewState"
       :board-mode="wallMode === 'independent'"
       :board-id="wallBoardId"
+      :composite-children="compositeChildrenShots"
       :focus-node-id="boardFocusNodeId"
       @close="closeWall"
       @seek="onWallSeek"
@@ -4328,6 +4483,8 @@ onBeforeUnmount(() => {
       @selection-change="onWallSelectionChange"
       @import-board="importBoardFile"
       @open-board-dir="openBoardSaveDir"
+      @create-composite="onCreateComposite"
+      @dissolve-composite="onDissolveComposite"
       @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">
@@ -4340,6 +4497,7 @@ onBeforeUnmount(() => {
       :board-id="wallBoardId ?? ''"
       :node="wallPanelNode"
       @changed="onWallNodePanelChanged"
+      @dissolve="onPanelDissolve"
     />
 
     <div v-if="wallPickerOpen" class="node-edit-mask" @pointerdown.self="wallPickerOpen = false">

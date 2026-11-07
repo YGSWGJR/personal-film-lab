@@ -25,10 +25,12 @@ const props = withDefaults(
     boardMode?: boolean;
     /** 批次6：独立分镜本真实 id（board 模式下 projectId 是 'boards' 字面量） */
     boardId?: string | null;
+    /** 批次9：复合节点展开托盘子卡（compositeId → 子节点） */
+    compositeChildren?: Record<string, WorkspaceShot[]>;
     /** 批次3：外部请求选中的节点（导入照片后自动选中并打开标注面板） */
     focusNodeId?: string | null;
   }>(),
-  { boardMode: false, boardId: null, focusNodeId: null },
+  { boardMode: false, boardId: null, compositeChildren: undefined, focusNodeId: null },
 );
 
 const emit = defineEmits<{
@@ -43,11 +45,69 @@ const emit = defineEmits<{
   selectionChange: [ids: string[]];
   importBoard: [];
   openBoardDir: [];
+  createComposite: [ids: string[]];
+  dissolveComposite: [compositeId: string];
   project: [];
 }>();
 
 /** 批次6：board 模式的真实分镜本 id（props.projectId 是 'boards' 字面量，仅作开关判断） */
 const activeBoardId = computed(() => props.boardId ?? props.projectId);
+
+/* ---------- 批次9：复合节点展开托盘 ---------- */
+const expandedCompositeId = ref<string | null>(null);
+const trayComposite = computed(
+  () => visibleShots.value.find((item) => item.shot.id === expandedCompositeId.value) ?? null,
+);
+const trayChildren = computed<WorkspaceShot[]>(() =>
+  expandedCompositeId.value ? (props.compositeChildren?.[expandedCompositeId.value] ?? []) : [],
+);
+const trayStyle = computed(() => {
+  const item = trayComposite.value;
+  if (!item) return {};
+  const trayW = 264;
+  const maxX = Math.max(8, stageW.value - trayW - 16);
+  return {
+    left: `${Math.min(item.x + CARD_W + 10, maxX)}px`,
+    top: `${item.y}px`,
+    width: `${trayW}px`,
+  };
+});
+
+function toggleCompositeTray(compositeId: string): void {
+  expandedCompositeId.value = expandedCompositeId.value === compositeId ? null : compositeId;
+}
+
+function selectTrayChild(childId: string): void {
+  selectedIds.value = new Set([childId]);
+  emit('selectionChange', [childId]);
+}
+
+/* ---------- 批次11：时长条 / 链路端子 / 流向三角 ---------- */
+const maxCardDuration = computed(() =>
+  Math.max(1, ...visibleShots.value.map((item) => item.shot.durationMs)),
+);
+
+function durbarWidth(durationMs: number): string {
+  return `${Math.min(100, Math.max(8, Math.round((durationMs / maxCardDuration.value) * 100)))}%`;
+}
+
+const showEndpoints = computed(() => edges.value.length > 0);
+
+function isRootNode(shotId: string): boolean {
+  return !edges.value.some((e) => e.toShotId === shotId);
+}
+
+function isSinkNode(shotId: string): boolean {
+  return !edges.value.some((e) => e.fromShotId === shotId);
+}
+
+function hasFlowIn(shotId: string): boolean {
+  return edges.value.some((e) => e.toShotId === shotId);
+}
+
+function hasFlowOut(shotId: string): boolean {
+  return edges.value.some((e) => e.fromShotId === shotId);
+}
 
 const CARD_W = 220;
 const CARD_H = 142;
@@ -1033,6 +1093,16 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
       // 0.4.0 反馈：右键卡片也要能新增节点
       items.push({ label: '添加节点 · 导入照片', action: () => emit('createNode', 'image') });
       items.push({ label: '添加节点 · 黑底+文本', action: () => emit('createNode', 'black') });
+      // 批次9：多选合并为复合节点
+      items.push({
+        label: selectedIds.value.size >= 2 ? `合并为复合节点（已选 ${selectedIds.value.size} 张）` : '合并为复合节点（Ctrl+点选 ≥2 张）',
+        disabled: selectedIds.value.size < 2,
+        action: () => emit('createComposite', [...selectedIds.value]),
+      });
+      const targetShot = props.shots.find((s) => s.id === shotId);
+      if (targetShot?.childCount !== undefined) {
+        items.push({ label: '解散复合节点（子节点释放回画布）', action: () => emit('dissolveComposite', shotId) });
+      }
       items.push({ label: '编辑节点（名称/时长/笔记）', action: () => emit('editNode', shotId) });
       items.push({
         label: '删除节点',
@@ -1052,6 +1122,12 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
       // 批次8：独立保存入口（导入/打开保存目录）
       items.push({ label: '导入分镜本（board.json）', action: () => emit('importBoard') });
       items.push({ label: '打开独立保存目录', action: () => emit('openBoardDir') });
+      // 批次9：多选合并为复合节点
+      items.push({
+        label: selectedIds.value.size >= 2 ? `合并为复合节点（已选 ${selectedIds.value.size} 张）` : '合并为复合节点（Ctrl+点选 ≥2 张）',
+        disabled: selectedIds.value.size < 2,
+        action: () => emit('createComposite', [...selectedIds.value]),
+      });
       items.push({
         label: selectedIds.value.size > 0 ? `删除节点（已选 ${selectedIds.value.size} 张）` : '删除节点（先选中卡片）',
         danger: true,
@@ -1250,6 +1326,11 @@ function onCardClick(shot: WorkspaceShot, event: PointerEvent): void {
 }
 
 function onCardDblClick(shot: WorkspaceShot): void {
+  // 批次9：复合节点双击=展开/折叠子节点托盘
+  if (shot.childCount !== undefined) {
+    toggleCompositeTray(shot.id);
+    return;
+  }
   // 批次2：文本节点双击=进入内联编辑（图片节点仍双击回放定位）
   if (shot.textContent !== undefined) {
     editText.value = shot.textContent;
@@ -1362,6 +1443,19 @@ function fmtDuration(ms: number): string {
         @dblclick="onCardDblClick(item.shot)"
         @contextmenu.prevent="openWallContextMenu($event, item.shot.id)"
       >
+        <!-- 批次11：名称外置（卡片上方悬浮小条） -->
+        <span v-if="item.shot.title" class="wall-card-title">{{ item.shot.title }}</span>
+        <!-- 批次9：复合节点标识 -->
+        <span
+          v-if="item.shot.childCount !== undefined"
+          class="wall-composite-badge"
+          title="复合节点：双击展开/折叠子节点"
+        >❐ {{ item.shot.childCount }}</span>
+        <!-- 批次11：链路首尾端子 + 卡角流向三角 -->
+        <span v-if="showEndpoints && isRootNode(item.shot.id)" class="wall-endpoint start" title="链路起点"></span>
+        <span v-if="showEndpoints && isSinkNode(item.shot.id)" class="wall-endpoint end" title="链路终点"></span>
+        <span v-if="hasFlowIn(item.shot.id)" class="wall-flow flow-in"></span>
+        <span v-if="hasFlowOut(item.shot.id)" class="wall-flow flow-out"></span>
         <span
           class="wall-port-in"
           title="拖到另一张卡：建立它到本卡的连线"
@@ -1384,12 +1478,37 @@ function fmtDuration(ms: number): string {
             @keydown.stop="onTextEditKeydown"
           ></textarea>
         </div>
+        <!-- 批次11：时长占比条（相对当前可见卡最长时长） -->
+        <div class="wall-durbar"><i :style="{ width: durbarWidth(item.shot.durationMs) }"></i></div>
         <div class="wall-meta">
           <b>#{{ String(item.shot.index).padStart(2, '0') }}</b>
           <span v-if="item.shot.shotSize" class="wall-chip">{{ item.shot.shotSize }}</span>
           <span v-if="item.shot.cameraMethod" class="wall-chip">{{ item.shot.cameraMethod }}</span>
           <span class="wall-dur">{{ fmtDuration(item.shot.durationMs) }}</span>
         </div>
+      </div>
+      <!-- 批次9：复合节点展开托盘 -->
+      <div v-if="trayComposite" class="wall-composite-tray" :style="trayStyle">
+        <header>
+          <b>复合节点 · {{ trayComposite.shot.childCount }} 个子节点</b>
+          <button type="button" title="折叠" @click.stop="expandedCompositeId = null">×</button>
+        </header>
+        <div class="tray-list">
+          <div
+            v-for="child in trayChildren"
+            :key="child.id"
+            class="tray-card"
+            :class="{ selected: selectedIds.has(child.id) }"
+            :title="child.title"
+            @click.stop="selectTrayChild(child.id)"
+          >
+            <img :src="child.thumbnail" :alt="child.title" draggable="false" />
+            <span>{{ child.title || '子节点' }}</span>
+          </div>
+        </div>
+        <button type="button" class="tray-dissolve" @click.stop="emit('dissolveComposite', trayComposite.shot.id)">
+          解散复合节点（子节点释放回画布）
+        </button>
       </div>
     </div>
 
@@ -1724,6 +1843,204 @@ function fmtDuration(ms: number): string {
   position: relative;
   height: 116px;
   background: #0d1420;
+}
+
+/* 批次11：名称外置（卡上方悬浮小条） */
+.wall-card-title {
+  position: absolute;
+  top: -18px;
+  left: 2px;
+  max-width: calc(100% - 4px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-secondary, #9fb2c8);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+/* 批次9：复合节点徽标 */
+.wall-composite-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 4;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(234, 179, 8, 0.16);
+  border: 1px solid rgba(234, 179, 8, 0.65);
+  color: #f3d473;
+  font-size: 10px;
+  pointer-events: none;
+}
+
+/* 批次11：时长占比条 */
+.wall-durbar {
+  height: 3px;
+  margin: 3px 6px 0;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+
+.wall-durbar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--blue-hi, #5aa2ff);
+}
+
+/* 批次11：链路首尾端子（绿点+短连线） */
+.wall-endpoint {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--green, #34d399);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+  transform: translateY(-50%);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.wall-endpoint::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 2px;
+  background: var(--green, #34d399);
+  opacity: 0.7;
+  transform: translateY(-50%);
+}
+
+.wall-endpoint.start {
+  left: -30px;
+}
+
+.wall-endpoint.start::after {
+  left: 10px;
+}
+
+.wall-endpoint.end {
+  right: -30px;
+}
+
+.wall-endpoint.end::after {
+  right: 10px;
+}
+
+/* 批次11：卡角流向三角（蓝） */
+.wall-flow {
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.wall-flow.flow-in {
+  left: -7px;
+  bottom: 10px;
+  border-right: 8px solid #3d8de8;
+}
+
+.wall-flow.flow-out {
+  right: -7px;
+  bottom: 10px;
+  border-left: 8px solid #3d8de8;
+}
+
+/* 批次9：复合节点展开托盘 */
+.wall-composite-tray {
+  position: absolute;
+  z-index: 8;
+  border: 1px solid rgba(234, 179, 8, 0.55);
+  border-radius: 8px;
+  background: #0c131c;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+}
+
+.wall-composite-tray header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(234, 179, 8, 0.3);
+  color: #f3d473;
+  font-size: 11px;
+}
+
+.wall-composite-tray header button {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.tray-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.tray-card {
+  width: 108px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  background: #0d1420;
+}
+
+.tray-card img {
+  display: block;
+  width: 100%;
+  height: 56px;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.tray-card span {
+  display: block;
+  padding: 3px 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tray-card.selected {
+  border-color: var(--green, #34d399);
+}
+
+.tray-card.selected span {
+  color: var(--green, #34d399);
+}
+
+.tray-dissolve {
+  margin: 0 10px 10px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 122, 122, 0.5);
+  border-radius: 6px;
+  background: transparent;
+  color: #ff9a9a;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tray-dissolve:hover {
+  background: rgba(255, 122, 122, 0.12);
 }
 
 /* 批次2：文本节点内联编辑——透明叠层，字号按画布缩放反向补偿（视觉≈15px） */
