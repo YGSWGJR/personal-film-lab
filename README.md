@@ -157,3 +157,8 @@ tests/          Python 检测算法回归
 本项目原创源代码采用 [MIT License](LICENSE)。第三方组件、模型、FFmpeg、libmpv、ComfyUI 及运行时仍分别适用其自身许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 请确保导入的视频、音频、截图和笔记具有合法使用权。软件用于个人学习、课程研究和授权素材分析。
+
+## 致谢
+
+- 特别感谢 [@404notfoud](https://github.com/404notfoud) 对本项目的赞助支持 💛——你的每一份鼓励都会变成继续打磨软件的动力。
+
