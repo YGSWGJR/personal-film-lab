@@ -57,3 +57,7 @@
 `8b3256a` feat(board): independent board save (board.json + assets) with settings dir and import
 `4f4c4a3` feat(board): composite nodes data layer (migration 012, group-as-node, edge rerouting, asset CORS)
 `73c0e49` feat(board): composite UI (grid thumb/tray/menus/panel) + durbar, endpoints, flow marks, card titles, gates
+
+## 致谢
+
+- 特别感谢 [@404notfoud](https://github.com/404notfoud) 对本项目的赞助支持 💛
