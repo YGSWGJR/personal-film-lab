@@ -4034,9 +4034,16 @@ function handleKeydown(event: KeyboardEvent): void {
     void handleSetVolume(Math.round((player.volume + delta) * 100) / 100);
     return;
   }
-  if (event.code === 'Space') {
+  // S42 复测修正：部分输入通道（远程桌面 / 屏幕键盘 / 自动化注入）的 keydown
+  // 没有 code（物理键位），必须用 event.key === ' ' 兜底，否则空格播放失灵。
+  if (event.code === 'Space' || event.key === ' ') {
     event.preventDefault();
-    playbackDebugLog('keydown-space', { paused: player.paused, hasFile: player.hasFile, busy: busy.value });
+    playbackDebugLog('keydown-space', {
+      paused: player.paused,
+      hasFile: player.hasFile,
+      busy: busy.value,
+      hasCode: event.code === 'Space',
+    });
     void togglePlayback();
     return;
   }
@@ -4663,7 +4670,9 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
-    <transition name="import-modal">
+    <!-- S42 复测修正：显式 duration 让 Vue 用定时器收尾过渡，不再依赖 transitionend——
+         窗口后台/合成器节流时 transitionend 可能丢失，离场遮罩会以 opacity:1 永久残留并挡住点击 -->
+    <transition name="import-modal" :duration="{ enter: 200, leave: 220 }">
       <div v-if="importWizardOpen" class="import-modal-mask">
         <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="import-wizard-title">
           <header class="import-wizard-head">
