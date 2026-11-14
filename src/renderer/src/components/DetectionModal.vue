@@ -2,7 +2,13 @@
 import { computed, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import emptyShotsImage from '../../../../assets/design/design_empty_shots_1024x768.png';
-import type { DetectProgressEvent, DetectResult, ShotBoundaryEngine } from '../../../shared/types';
+import type {
+  DetectProgressEvent,
+  DetectResult,
+  HardwareCapabilityReport,
+  LabelStrategy,
+  ShotBoundaryEngine,
+} from '../../../shared/types';
 
 const props = defineProps<{
   open: boolean;
@@ -18,6 +24,10 @@ const props = defineProps<{
   boundaryEngine?: ShotBoundaryEngine | null;
   boundaryFallback?: boolean;
   boundaryWarning?: string | null;
+  /** S42/Z04：硬件能力报告（预检条展示五态与网络） */
+  hardware?: HardwareCapabilityReport | null;
+  /** S42/Z03：当前标签识别策略 */
+  labelStrategy?: LabelStrategy;
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +50,36 @@ const boundaryLabel = computed(() => {
 const engineSummary = computed(
   () => `${boundaryLabel.value}${props.engine === 'ai' ? ' · Qwen 标签识别' : ''}`,
 );
+
+/** S42/Z04：能力状态 → 预检条文案 */
+const STATUS_LABELS: Record<string, string> = {
+  ready: '就绪',
+  'vram-insufficient': '显存不足',
+  'model-missing': '模型缺失',
+  'runtime-missing': '运行时缺失',
+  unconfigured: '未配置',
+  offline: '离线',
+  'privacy-ack-required': '需隐私确认',
+  disabled: '已关闭',
+};
+
+function capabilityText(state: { status: string; reason: string } | null | undefined): string {
+  if (!state) return '未扫描';
+  return `${STATUS_LABELS[state.status] ?? state.status} · ${state.reason}`;
+}
+
+const boundaryPreflight = computed(() =>
+  capabilityText(props.hardware?.capabilities.boundaryHybrid ?? props.hardware?.capabilities.boundaryOpencv ?? null),
+);
+const labelsPreflight = computed(() =>
+  props.labelStrategy === 'cloud'
+    ? `云端策略 · ${capabilityText(props.hardware?.capabilities.labelsCloud ?? null)}`
+    : `本地策略 · ${capabilityText(props.hardware?.capabilities.labelsLocal ?? null)}`,
+);
+const networkPreflight = computed(() => {
+  if (!props.hardware) return '网络状态未扫描';
+  return props.hardware.network.online ? '网络在线' : '当前离线（云端标签识别不会发起任何上传）';
+});
 
 watch(
   () => props.result,
@@ -87,6 +127,13 @@ function applyResult(): void {
           </div>
           <button type="button" aria-label="关闭" @click="emit('close')">×</button>
         </header>
+
+        <!-- S42/Z04：硬件与网络预检条（五类状态与原因；不满足时提示先到设置处理） -->
+        <div v-if="hardware" class="detect-preflight" role="status">
+          <span><i :class="['dot', hardware.capabilities.boundaryHybrid.status === 'ready' ? 'ok' : 'warn']"></i>边界切分：{{ boundaryPreflight }}</span>
+          <span><i :class="['dot', labelsPreflight.startsWith('本地策略 · 就绪') || labelsPreflight.startsWith('云端策略 · 就绪') ? 'ok' : 'warn']"></i>标签识别：{{ labelsPreflight }}</span>
+          <span><i :class="['dot', hardware.network.online ? 'ok' : 'warn']"></i>{{ networkPreflight }}</span>
+        </div>
 
         <div v-if="error" class="detect-error">
           <AppIcon name="more" :size="28" />
@@ -222,6 +269,37 @@ function applyResult(): void {
 
 .modal-head button:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+/* S42/Z04：硬件与网络预检条 */
+.detect-preflight {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.detect-preflight .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+.detect-preflight .dot.ok {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(77, 208, 159, 0.4);
+}
+
+.detect-preflight .dot.warn {
+  background: var(--amber);
+  box-shadow: 0 0 6px rgba(244, 170, 74, 0.4);
 }
 
 .detect-running {

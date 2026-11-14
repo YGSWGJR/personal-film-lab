@@ -128,6 +128,7 @@ import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
 import type { AiAccessService } from '../ai/mcp-server';
+import type { HardwareCapabilityReport } from '../../shared/types';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
@@ -158,6 +159,7 @@ export interface IpcDeps {
   getStats(): StatsService | null;
   getAi(): AiAccessService | null;
   getLocalAi(): import('../ai/local-vision-service').LocalVisionService | null;
+  getHardware(): import('../hardware/hardware-capability-service').HardwareCapabilityService | null;
 }
 
 /**
@@ -183,6 +185,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireLocalAi = (): import('../ai/local-vision-service').LocalVisionService => {
     const service = deps.getLocalAi();
     if (!service) throw new Error('本地视觉模型服务尚未就绪');
+    return service;
+  };
+  const requireHardware = (): import('../hardware/hardware-capability-service').HardwareCapabilityService => {
+    const service = deps.getHardware();
+    if (!service) throw new Error('硬件能力扫描服务尚未就绪');
     return service;
   };
   const requireData = (): DataLayer => {
@@ -459,6 +466,18 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireMedia().setTranscodeConcurrency(args.concurrency);
       return { concurrency: args.concurrency };
     }),
+  );
+
+  // ---------- hardware（S42/Z04：硬件能力扫描） ----------
+  ipcMain.handle(
+    IPC.HARDWARE_SCAN,
+    withEnvelope((args: { force?: boolean } | undefined): Promise<HardwareCapabilityReport> =>
+      requireHardware().scan({ force: args?.force === true }),
+    ),
+  );
+  ipcMain.handle(
+    IPC.HARDWARE_STATUS,
+    withEnvelope((): Promise<HardwareCapabilityReport> => requireHardware().getStatus()),
   );
 
   // ---------- scope ----------

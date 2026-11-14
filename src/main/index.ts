@@ -23,6 +23,7 @@ import { CaptureService } from './capture/capture-service';
 import { importProjectFrom, scanCandidateRoots } from './data/import-service';
 import { DetectService } from './detect/detect-service';
 import { ExportService } from './export/export-service';
+import { HardwareCapabilityService } from './hardware/hardware-capability-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
@@ -92,6 +93,7 @@ let sessionService: SessionService | null = null;
 let statsService: StatsService | null = null;
 let aiService: AiAccessService | null = null;
 let localVisionService: LocalVisionService | null = null;
+let hardwareService: HardwareCapabilityService | null = null;
 let exitCaptureStarted = false;
 let allowWindowClose = false;
 let closeCaptureStarted = false;
@@ -379,6 +381,7 @@ if (!IS_AI_MCP) {
     getSettings: () => settingsService,
     getAi: () => aiService,
     getLocalAi: () => localVisionService,
+    getHardware: () => hardwareService,
     previewSettingsMigration: () => previewDataRootMigration(),
     confirmSettingsMigration: (projectIds) => confirmDataRootMigration(projectIds),
     skipSettingsMigration: () => skipDataRootMigration(),
@@ -406,6 +409,15 @@ app.whenReady().then(() => {
   );
   bindSettingsProvider(() => settingsService!.get());
   localVisionService ??= new LocalVisionService();
+  // S42/Z04：硬件能力扫描（启动后延迟预热一次，避免阻塞首屏；之后走 60s 缓存）
+  hardwareService = new HardwareCapabilityService({
+    getLocalVision: () => localVisionService,
+    getMedia: () => mediaService,
+    getSettings: () => settingsService?.get() ?? null,
+  });
+  setTimeout(() => {
+    void hardwareService?.scan({ force: false }).catch(() => undefined);
+  }, 3_000).unref?.();
 
   if (!dataLayer) {
     dataLayer = new DataLayer(resolveDataRoot());
@@ -434,6 +446,7 @@ app.whenReady().then(() => {
       getMedia: () => mediaService,
       getSession: () => sessionService,
       getLocalAi: () => localVisionService,
+      getHardware: () => hardwareService,
     });
   }
 
@@ -470,6 +483,7 @@ function cleanupServices(): void {
   aiService = null;
   localVisionService?.dispose();
   localVisionService = null;
+  hardwareService = null;
 }
 
 app.on('before-quit', (event) => {

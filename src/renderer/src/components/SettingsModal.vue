@@ -4,6 +4,7 @@ import AppIcon from './AppIcon.vue';
 import type {
   AiMcpStatus,
   AiProviderConfig,
+  HardwareCapabilityReport,
   LocalAiStatus,
   ProxyTier,
   Settings,
@@ -30,12 +31,16 @@ const props = defineProps<{
   error: string | null;
   mcpStatus: AiMcpStatus | null;
   mcpBusy: boolean;
+  /** S42/Z04：硬件能力报告（硬件与运行环境区块 + 重扫按钮） */
+  hardware?: HardwareCapabilityReport | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
   save: [value: SettingsSetArgs];
   toggleMcp: [];
+  /** S42/Z04：请求重新扫描硬件（主进程 force 扫描） */
+  rescanHardware: [];
 }>();
 
 const draft = reactive<SettingsDraft>({
@@ -60,6 +65,9 @@ const splitShortcut = ref('Ctrl+K');
 const mergeShortcut = ref('Ctrl+Shift+G');
 /** S36-2：识别引擎与 AI 配置草稿 */
 const recognitionEngine = ref<'ai' | 'opencv'>('ai');
+/** S42/Z03：标签识别策略与云端隐私确认 */
+const labelStrategy = ref<'local' | 'cloud'>('local');
+const cloudLabelsAck = ref(false);
 const aiProvider = ref<'local' | 'openai-compatible' | 'mock'>('local');
 const aiProviders = ref<AiProviderConfig[]>([]);
 const activeProviderId = ref('');
@@ -71,6 +79,100 @@ const localAiFallback = ref(true);
 const activeProvider = computed(
   () => aiProviders.value.find((item) => item.id === activeProviderId.value) ?? null,
 );
+
+/** S42/Z03：云端标签识别是否具备基础配置（端点 + Key） */
+const cloudProviderReady = computed<boolean>(() => {
+  const provider = activeProvider.value;
+  if (provider) {
+    const keyPresent = Boolean(providerKeyDrafts[provider.id]?.trim()) || Boolean(provider.apiKey);
+    return Boolean(provider.baseUrl.trim()) && keyPresent;
+  }
+  const legacyBaseUrl = props.settings?.ai?.baseUrl ?? '';
+  const legacyKey = props.settings?.ai?.apiKey ?? '';
+  return Boolean(legacyBaseUrl.trim()) && Boolean(legacyKey);
+});
+
+/** S42/Z04：硬件区块的状态行（由报告派生，未扫描时给占位说明） */
+const hardwareRows = computed(() => {
+  const report = props.hardware;
+  return [
+    {
+      key: 'ram',
+      label: '内存',
+      value: report
+        ? `共 ${(report.ram.totalMb / 1024).toFixed(1)} GB · 可用 ${(report.ram.freeMb / 1024).toFixed(1)} GB`
+        : '未扫描',
+      ok: true,
+    },
+    {
+      key: 'gpu',
+      label: 'GPU / 显存',
+      value: report
+        ? report.gpu.source === 'nvidia-smi' && report.gpu.vramFreeMb !== null
+          ? `${report.gpu.name ?? 'NVIDIA GPU'} · 空闲 ${report.gpu.vramFreeMb}MB / 共 ${report.gpu.vramTotalMb ?? '?'}MB`
+          : (report.gpu.error ?? '未检测到 NVIDIA GPU')
+        : '未扫描',
+      ok: report?.gpu.source === 'nvidia-smi',
+    },
+    {
+      key: 'python',
+      label: 'Python 运行时',
+      value: report
+        ? `${report.python.embedded ? '内置' : '系统'} ${report.python.version ?? '未知'} · cv2 ${report.python.packages.opencv ? '✓' : '✗'} / numpy ${report.python.packages.numpy ? '✓' : '✗'} / ort ${report.python.packages.onnxRuntime ? '✓' : '✗'}`
+        : '未扫描',
+      ok: Boolean(report?.python.version),
+    },
+    {
+      key: 'transnetv2',
+      label: 'TransNetV2 模型',
+      value: report
+        ? report.models.transnetv2.present
+          ? `${((report.models.transnetv2.sizeBytes ?? 0) / (1024 * 1024)).toFixed(1)} MB`
+          : `缺失（${report.models.transnetv2.path ?? '?'}）`
+        : '未扫描',
+      ok: report?.models.transnetv2.present ?? false,
+    },
+    {
+      key: 'qwen',
+      label: 'Qwen3-VL 模型',
+      value: report
+        ? report.models.qwen.present
+          ? '已就绪'
+          : `缺失（${report.models.qwen.path ?? '?'}）`
+        : '未扫描',
+      ok: report?.models.qwen.present ?? false,
+    },
+    {
+      key: 'network',
+      label: '网络',
+      value: report ? (report.network.online ? '在线' : '离线') : '未扫描',
+      ok: report?.network.online ?? false,
+    },
+  ];
+});
+
+function capabilityBadge(status: string): string {
+  switch (status) {
+    case 'ready':
+      return '满足';
+    case 'vram-insufficient':
+      return '显存不足';
+    case 'model-missing':
+      return '模型缺失';
+    case 'runtime-missing':
+      return '运行时缺失';
+    case 'unconfigured':
+      return '未配置';
+    case 'offline':
+      return '断网';
+    case 'privacy-ack-required':
+      return '需隐私确认';
+    case 'disabled':
+      return '已关闭';
+    default:
+      return status;
+  }
+}
 const aiAgentEndpoint = ref('');
 const aiSegmentSeconds = ref(600);
 const aiTimeoutSeconds = ref(900);
@@ -192,6 +294,12 @@ function fillDraft(settings: Settings): void {
   proxyTier.value = settings.proxyTier ?? '540p';
   confirmUserContent.value = settings.confirmUserContent ?? true;
   recognitionEngine.value = settings.recognition?.engine ?? 'ai';
+  // S42/Z03：标签策略 + 隐私确认（未配置供应商时云端选项禁用，回填回 local）
+  labelStrategy.value = settings.recognition?.labelStrategy ?? 'local';
+  cloudLabelsAck.value = settings.recognition?.cloudLabelsAck === true;
+  if (labelStrategy.value === 'cloud' && !cloudProviderReady.value) {
+    labelStrategy.value = 'local';
+  }
   splitShortcut.value = settings.shortcuts?.split ?? 'Ctrl+K';
   mergeShortcut.value = settings.shortcuts?.merge ?? 'Ctrl+Shift+G';
   aiProvider.value = settings.ai?.provider ?? 'openai-compatible';
@@ -539,7 +647,14 @@ function submit(): void {
   const value: SettingsSetArgs = { ...rootPaths };
   value.proxyTier = proxyTier.value;
   value.confirmUserContent = confirmUserContent.value;
-  value.recognition = { engine: recognitionEngine.value };
+  value.recognition = {
+    engine: recognitionEngine.value,
+    // S42/Z03：云端策略仅在供应商已配置且用户确认隐私提示时允许保存
+    labelStrategy: labelStrategy.value === 'cloud' && cloudProviderReady.value && cloudLabelsAck.value
+      ? 'cloud'
+      : 'local',
+    cloudLabelsAck: cloudLabelsAck.value,
+  };
   const splitKey = splitShortcut.value.trim();
   const mergeKey = mergeShortcut.value.trim();
   if (!splitKey || !mergeKey || splitKey.toLowerCase() === mergeKey.toLowerCase()) {
@@ -707,6 +822,100 @@ function submit(): void {
             {{ localAiFallback ? '本地模型失败时自动保留 OpenCV 结果' : '本地模型失败时停止任务' }}
           </button>
           <small class="ai-hint">本地模型负责景别、机位、运镜、光线、主体和画面描述；OpenCV 仍负责镜头切点。</small>
+
+          <!-- S42/Z03：标签识别策略（本地 / 云端） -->
+          <div class="ai-engine-row label-strategy-row">
+            <span>标签识别策略</span>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: labelStrategy === 'local' }"
+              :disabled="saving || resettingDefaults"
+              @click="labelStrategy = 'local'"
+            >
+              本机 Qwen3-VL
+            </button>
+            <button
+              type="button"
+              class="ai-toggle"
+              :class="{ active: labelStrategy === 'cloud' }"
+              :disabled="saving || resettingDefaults || !cloudProviderReady"
+              :title="cloudProviderReady ? '使用已配置的云端供应商识别标签' : '需要先在 AI 供应商页配置端点与 API Key'"
+              @click="labelStrategy = 'cloud'"
+            >
+              云端视觉模型
+            </button>
+          </div>
+          <small class="ai-hint">
+            边界切分永远在本机执行（TransNetV2 / OpenCV），不存在云端切分。
+            {{ cloudProviderReady ? '' : '云端策略需要先配置 OpenAI 兼容端点与 API Key。' }}
+          </small>
+          <div v-if="labelStrategy === 'cloud'" class="cloud-privacy-note">
+            <strong>隐私提示</strong>
+            <p>启用云端标签识别后，每个镜头的一张代表帧会通过你配置的供应商接口上传用于识别；断网时不会发起任何请求，也不会静默回退到未配置的云端。</p>
+            <label class="cloud-ack">
+              <input v-model="cloudLabelsAck" type="checkbox" />
+              <span>我已知晓代表帧会上传到所配置的供应商</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- S42/Z04：硬件与运行环境（自动扫描 + 手动重扫，五类状态与原因） -->
+        <section class="ai-section hardware-section">
+          <div class="ai-head">
+            <strong>硬件与运行环境</strong>
+            <small>
+              {{ hardware ? `扫描于 ${new Date(hardware.scannedAt).toLocaleString()}（${hardware.durationMs}ms）` : '尚未完成扫描' }}
+            </small>
+          </div>
+          <div class="hardware-grid">
+            <div v-for="row in hardwareRows" :key="row.key" class="hardware-row" :class="{ warn: !row.ok }">
+              <span class="hardware-label">{{ row.label }}</span>
+              <span class="hardware-value">{{ row.value }}</span>
+            </div>
+          </div>
+          <div v-if="hardware" class="hardware-caps">
+            <div class="hardware-cap">
+              <span>混合边界切分</span>
+              <em :class="hardware.capabilities.boundaryHybrid.status === 'ready' ? 'ok' : 'warn'">
+                {{ capabilityBadge(hardware.capabilities.boundaryHybrid.status) }}
+              </em>
+              <small>{{ hardware.capabilities.boundaryHybrid.reason }}</small>
+              <small v-if="hardware.capabilities.boundaryHybrid.fix" class="fix">修复：{{ hardware.capabilities.boundaryHybrid.fix }}</small>
+            </div>
+            <div class="hardware-cap">
+              <span>OpenCV 备用切分</span>
+              <em :class="hardware.capabilities.boundaryOpencv.status === 'ready' ? 'ok' : 'warn'">
+                {{ capabilityBadge(hardware.capabilities.boundaryOpencv.status) }}
+              </em>
+              <small>{{ hardware.capabilities.boundaryOpencv.reason }}</small>
+              <small v-if="hardware.capabilities.boundaryOpencv.fix" class="fix">修复：{{ hardware.capabilities.boundaryOpencv.fix }}</small>
+            </div>
+            <div class="hardware-cap">
+              <span>本地标签识别</span>
+              <em :class="hardware.capabilities.labelsLocal.status === 'ready' ? 'ok' : 'warn'">
+                {{ capabilityBadge(hardware.capabilities.labelsLocal.status) }}
+              </em>
+              <small>{{ hardware.capabilities.labelsLocal.reason }}</small>
+              <small v-if="hardware.capabilities.labelsLocal.fix" class="fix">修复：{{ hardware.capabilities.labelsLocal.fix }}</small>
+            </div>
+            <div class="hardware-cap">
+              <span>云端标签识别</span>
+              <em :class="hardware.capabilities.labelsCloud.status === 'ready' ? 'ok' : 'warn'">
+                {{ capabilityBadge(hardware.capabilities.labelsCloud.status) }}
+              </em>
+              <small>{{ hardware.capabilities.labelsCloud.reason }}</small>
+              <small v-if="hardware.capabilities.labelsCloud.fix" class="fix">修复：{{ hardware.capabilities.labelsCloud.fix }}</small>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="local-ai-fallback"
+            :disabled="saving || resettingDefaults"
+            @click="emit('rescanHardware')"
+          >
+            重新扫描硬件与环境
+          </button>
         </section>
 
         <section hidden class="ai-section legacy-ai-section">
@@ -1411,6 +1620,125 @@ function submit(): void {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* S42/Z03：云端隐私提示与确认 */
+.cloud-privacy-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(244, 170, 74, 0.32);
+  border-radius: 8px;
+  background: rgba(244, 170, 74, 0.07);
+}
+
+.cloud-privacy-note strong {
+  color: #dca45d;
+  font-size: 11px;
+}
+
+.cloud-privacy-note p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.cloud-ack {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.cloud-ack input {
+  accent-color: var(--blue);
+}
+
+/* S42/Z04：硬件与运行环境 */
+.hardware-section .hardware-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  margin: 10px 0;
+}
+
+.hardware-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: 10px;
+}
+
+.hardware-row.warn {
+  border-color: rgba(244, 170, 74, 0.35);
+}
+
+.hardware-label {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.hardware-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hardware-caps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin-bottom: 10px;
+}
+
+.hardware-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.hardware-cap > span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.hardware-cap em {
+  font-size: 10px;
+  font-style: normal;
+}
+
+.hardware-cap em.ok {
+  color: var(--green);
+}
+
+.hardware-cap em.warn {
+  color: var(--amber);
+}
+
+.hardware-cap small {
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.hardware-cap small.fix {
+  color: rgba(96, 165, 250, 0.85);
 }
 
 .ai-engine-row > span {
