@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import emptyShotsImage from '../../../../assets/design/design_empty_shots_1024x768.png';
 import type {
@@ -89,6 +89,19 @@ watch(
   { immediate: true },
 );
 
+const modalRoot = ref<HTMLElement | null>(null);
+
+// S42 复测·人类点击习惯：结果弹窗打开即聚焦头部关闭按钮，Tab 直达应用/重试
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) return;
+    void nextTick(() => {
+      (modalRoot.value?.querySelector<HTMLButtonElement>('.modal-head button'))?.focus();
+    });
+  },
+);
+
 function toggleShot(id: string): void {
   selectedIds.value = selectedIds.value.includes(id)
     ? selectedIds.value.filter((item) => item !== id)
@@ -118,7 +131,7 @@ function applyResult(): void {
   <transition name="modal" :duration="{ enter: 220, leave: 220 }">
     <!-- 0.3.0：移除永不成立的运行态胶囊死代码（S41 起进度胶囊在顶栏） -->
     <div v-if="open" class="modal-mask" @pointerdown.self="emit('close')">
-      <section class="detect-modal">
+      <section ref="modalRoot" class="detect-modal">
         <header class="modal-head">
           <div>
             <p>SHOT DETECTION</p>

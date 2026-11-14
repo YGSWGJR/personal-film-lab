@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch } from 'vue';
+import { nextTick, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 
 /**
@@ -31,17 +31,29 @@ function handleKeydown(event: KeyboardEvent): void {
     return;
   }
   if (event.key === 'Enter') {
+    // S42 复测·人类点击习惯：焦点在弹窗内按钮上时，Enter 归浏览器默认激活
+    //（例如焦点在「取消」上，Enter 就是取消，而不是窗口级的确认）。
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.closest('.confirm-dialog')) return;
     event.preventDefault();
     event.stopPropagation();
     emit('confirm');
   }
 }
 
+const cancelBtn = ref<HTMLButtonElement | null>(null);
+
 watch(
   () => props.open,
   (open) => {
-    if (open) window.addEventListener('keydown', handleKeydown);
-    else window.removeEventListener('keydown', handleKeydown);
+    if (open) {
+      window.addEventListener('keydown', handleKeydown);
+      // S42 复测·人类点击习惯：打开确认框时焦点落到「取消」（默认安全项），
+      // Tab 一格即到「删除」，Space/Enter 直接激活聚焦按钮。
+      void nextTick(() => cancelBtn.value?.focus());
+    } else {
+      window.removeEventListener('keydown', handleKeydown);
+    }
   },
   { immediate: true },
 );
@@ -70,7 +82,7 @@ watch(
             {{ warning ?? '此操作不可恢复，文件将永久删除，不进回收站。' }}
           </p>
           <div class="confirm-dialog-actions">
-            <button type="button" class="confirm-dialog-cancel" @click="emit('cancel')">
+            <button ref="cancelBtn" type="button" class="confirm-dialog-cancel" @click="emit('cancel')">
               {{ cancelLabel ?? '取消' }}
             </button>
             <button type="button" class="confirm-dialog-confirm" @click="emit('confirm')">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, nextTick, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type {
   AiMcpStatus,
@@ -427,6 +427,8 @@ const cacheDirChanged = computed(
 const storageRootChanged = computed(() => dataRootChanged.value || cacheDirChanged.value);
 const lockedByEnvironment = computed(() => activeSettings.value?.environmentOverride === true);
 
+const modalRoot = ref<HTMLElement | null>(null);
+
 watch(
   () => [props.open, props.settings] as const,
   ([open, settings]) => {
@@ -435,6 +437,11 @@ watch(
     liveSettings.value = settings;
     browseError.value = null;
     environmentCheck.value = null;
+    // S42 复测·人类点击习惯：弹窗打开即聚焦头部关闭按钮，Tab 即进入表单，
+    // Esc/Enter 手感与桌面软件一致（关闭按钮自身即 Esc 语义）。
+    void nextTick(() => {
+      (modalRoot.value?.querySelector<HTMLButtonElement>('.modal-head button'))?.focus();
+    });
   },
   { immediate: true },
 );
@@ -701,7 +708,7 @@ function submit(): void {
       @pointerdown.self="!saving && !checkingEnvironment && !resettingDefaults
         && requestClose()"
     >
-      <form class="settings-modal" @submit.prevent="submit">
+      <form ref="modalRoot" class="settings-modal" @submit.prevent="submit">
         <header class="modal-head">
           <div>
             <p>WORKSPACE SETTINGS</p>
