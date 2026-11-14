@@ -40,6 +40,7 @@ interface SmokeDeps {
   getMedia?(): MediaService | null;
   getSession?(): SessionService | null;
   getLocalAi?(): LocalVisionService | null;
+  getHardware?(): import('./hardware/hardware-capability-service').HardwareCapabilityService | null;
 }
 
 interface RendererState {
@@ -107,12 +108,15 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let localSettingsChecks: Record<string, unknown> = {};
   let aiSegmentChecks: Record<string, unknown> = {};
   let opencvFrameChecks: Record<string, unknown> = {};
+  let hardwareChecks: Record<string, unknown> = {};
+  let playbackStressChecks: Record<string, unknown> = {};
+  let overlayStressChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, hardwareChecks, playbackStressChecks, overlayStressChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -133,7 +137,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'ai,app,data,detect,export,gpu,media,note,player,project,scope,session,settings,shot,stats,still,tag,term,wall';
+      state?.apiKeys === 'ai,app,data,detect,export,gpu,hardware,media,note,player,project,scope,session,settings,shot,stats,still,tag,term,wall';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -484,6 +488,24 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, opencvFrameChecksAssertions(opencvFrameChecks));
     }
 
+    // S42/Z04：硬件能力扫描（结构化五态 + 重扫刷新 + 缓存）
+    if (process.env['SMOKE_HARDWARE'] === '1') {
+      hardwareChecks = await runHardwareChecks(deps);
+      Object.assign(checks, hardwareChecksAssertions(hardwareChecks));
+    }
+
+    // S42/Z01：Space 连续播放压力（50 次随机间隔，状态与按键序列一致、不滚页）
+    if (process.env['SMOKE_PLAYBACK_STRESS'] === '1') {
+      playbackStressChecks = await runPlaybackStressChecks(win, process.env['SMOKE_VIDEO'] ?? '');
+      Object.assign(checks, playbackStressChecksAssertions(playbackStressChecks));
+    }
+
+    // S42/Z02：分镜墙往返 30 轮 × 轨道档位 × 主窗口 resize，无卡墙/旧框残留
+    if (process.env['SMOKE_OVERLAY_STRESS'] === '1') {
+      overlayStressChecks = await runOverlayStressChecks(win, deps);
+      Object.assign(checks, overlayStressChecksAssertions(overlayStressChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -497,7 +519,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, hardwareChecks, playbackStressChecks, overlayStressChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -5975,4 +5997,272 @@ async function runOpenCvFrameChecks(
     }
   }
   return out;
+}
+
+/** ---------- S42：硬件扫描 / Space 播放压力 / 分镜墙往返压力 ---------- */
+
+async function runHardwareChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  const hardware = deps.getHardware?.() ?? null;
+  if (!hardware) {
+    out.skipped = true;
+    out.reason = 'hardware service unavailable';
+    return out;
+  }
+  const first = await hardware.scan({ force: true });
+  out.scanOk = Boolean(first?.scannedAt && first?.capabilities);
+  const caps = first?.capabilities;
+  const allowed = [
+    'ready',
+    'vram-insufficient',
+    'model-missing',
+    'runtime-missing',
+    'unconfigured',
+    'offline',
+    'privacy-ack-required',
+    'disabled',
+  ];
+  out.fourLines = Boolean(caps?.boundaryHybrid && caps?.boundaryOpencv && caps?.labelsLocal && caps?.labelsCloud);
+  out.statusEnum = [
+    caps?.boundaryHybrid?.status,
+    caps?.boundaryOpencv?.status,
+    caps?.labelsLocal?.status,
+    caps?.labelsCloud?.status,
+  ].every((status) => allowed.includes(String(status)));
+  out.reasonsPresent = [
+    caps?.boundaryHybrid?.reason,
+    caps?.boundaryOpencv?.reason,
+    caps?.labelsLocal?.reason,
+    caps?.labelsCloud?.reason,
+  ].every((reason) => typeof reason === 'string' && reason.length > 0);
+  out.ramPresent = Number(first?.ram?.totalMb) > 0;
+  out.networkFlag = typeof first?.network?.online === 'boolean';
+  const second = await hardware.scan({ force: true });
+  out.rescanUpdates = Date.parse(second.scannedAt) >= Date.parse(first.scannedAt);
+  const cached = await hardware.getStatus();
+  out.cacheHit = cached.scannedAt === second.scannedAt;
+  out.pythonProbed = Boolean(second.python?.path);
+  out.modelChecked = typeof second.models?.transnetv2?.present === 'boolean';
+  out.capabilitySummary = JSON.stringify({
+    hybrid: caps?.boundaryHybrid?.status,
+    opencv: caps?.boundaryOpencv?.status,
+    labelsLocal: caps?.labelsLocal?.status,
+    labelsCloud: caps?.labelsCloud?.status,
+    online: second.network?.online,
+  });
+  return out;
+}
+
+function hardwareChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    hardwareScanOk: result.scanOk === true,
+    hardwareFourLines: result.fourLines === true,
+    hardwareStatusEnum: result.statusEnum === true,
+    hardwareReasons: result.reasonsPresent === true,
+    hardwareRam: result.ramPresent === true,
+    hardwareNetworkFlag: result.networkFlag === true,
+    hardwareRescanUpdates: result.rescanUpdates === true,
+    hardwareCacheHit: result.cacheHit === true,
+    hardwarePythonProbed: result.pythonProbed === true,
+    hardwareModelChecked: result.modelChecked === true,
+  };
+}
+
+async function runPlaybackStressChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
+  if (!videoPath) return { skipped: true, reason: 'SMOKE_VIDEO not set' };
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        window.__S42_PLAYBACK_LOG__ = [];
+        const open = await window.api.player.open({ mediaPath: ${JSON.stringify(videoPath)} });
+        out.openOk = open.ok === true;
+        if (!open.ok) { out.openError = open.error && open.error.message; return out; }
+        await new Promise((r) => setTimeout(r, 300));
+        // 清场：Esc 关闭残留弹层（如会话项目丢失时的导入向导）——弹层打开时空格按设计让位
+        for (let i = 0; i < 3; i++) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+          }));
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        // 诊断：捕获阶段监听全部 keydown，定位"按键未到达 App 处理器"类失败
+        const seenKeys = [];
+        const diagListener = (e) => { if (seenKeys.length < 60) seenKeys.push(e.code || e.key); };
+        window.addEventListener('keydown', diagListener, true);
+        out.activeTag = document.activeElement ? document.activeElement.tagName : null;
+        out.wallHookState = window.__S43_WALL_TEST__ ? window.__S43_WALL_TEST__.state() : null;
+        const target = 50;
+        let pressed = 0;
+        while (pressed < target) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', {
+            code: 'Space', key: ' ', bubbles: true, cancelable: true,
+          }));
+          pressed += 1;
+          // 250~1000ms 随机间隔（Z01 验收口径）
+          await new Promise((r) => setTimeout(r, 250 + Math.floor(Math.random() * 750)));
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        const state = await window.api.player.getState();
+        out.stateOk = state.ok === true;
+        out.paused = state.ok ? state.data.paused : null;
+        out.layer = state.ok ? state.data.layer : null;
+        const log = window.__S42_PLAYBACK_LOG__ ?? [];
+        out.seenKeysCount = seenKeys.length;
+        out.seenKeysHead = seenKeys.slice(0, 5);
+        out.wallStateAfter = window.__S43_WALL_TEST__ ? window.__S43_WALL_TEST__.state() : null;
+        const applied = log.filter((e) => e.event === 'toggle-applied').length;
+        const failed = log.filter((e) => e.event === 'toggle-failed').length;
+        out.togglesPressed = pressed;
+        out.togglesApplied = applied;
+        out.togglesFailed = failed;
+        // open 载入后默认暂停（pause=yes），50 次切换 = 偶数次 → 应回到暂停
+        out.parityOk = state.ok === true && state.data.paused === true;
+        out.allApplied = applied === pressed && failed === 0;
+        out.noScroll =
+          (window.scrollY || 0) === 0 &&
+          (document.documentElement.scrollTop || 0) === 0 &&
+          (document.body.scrollTop || 0) === 0;
+        await window.api.player.close();
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
+}
+
+function playbackStressChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { playbackStressSkipped: true };
+  return {
+    playbackOpenOk: result.openOk === true,
+    playbackTogglesAllApplied: result.allApplied === true,
+    playbackParity: result.parityOk === true,
+    playbackNoScroll: result.noScroll === true,
+    playbackLayerNormal: result.layer === 'normal',
+  };
+}
+
+async function runOverlayStressChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const out: Record<string, any> = {};
+  try {
+    const project = data.projects.create({
+      name: `S42 Overlay Stress ${Date.now()}`,
+      media: { filename: 'overlay-stress.mp4', durationMs: 6000, fps: 25, width: 640, height: 360 },
+    });
+    for (let i = 0; i < 3; i++) {
+      const shot = data.shots.create({ projectId: project.id, startMs: i * 2000, endMs: (i + 1) * 2000 });
+      data.db
+        .prepare('UPDATE shots SET thumbnail = ? WHERE id = ?')
+        .run(`lapian-asset://${project.id}/t${i}.jpg`, shot.id);
+    }
+    const projectId = JSON.stringify(project.id);
+    // 初始化：打开项目 + 首次进墙（含选择卡），后续 30 轮 Esc 关闭 / 重开
+    const init = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        const hook = window.__S43_WALL_TEST__;
+        if (!hook) { out.exception = 'S43 hook missing'; return out; }
+        out.projectOpened = (await hook.openProject(${projectId})).ok === true;
+        await new Promise((r) => setTimeout(r, 300));
+        await hook.openWall();
+        const deadline = Date.now() + 10000;
+        const pick = () => document.querySelector('.picker-option');
+        while (!pick() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+        pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const d1 = Date.now() + 15000;
+        while (!hook.state().wallOpen && Date.now() < d1) await new Promise((r) => setTimeout(r, 100));
+        out.opened = hook.state().wallOpen === true;
+        return out;
+      })()
+    `)) as Record<string, any>;
+    out.projectOpened = init.projectOpened === true;
+    out.firstOpen = init.opened === true;
+
+    const sizes: Array<[number, number]> = [
+      [1280, 800],
+      [1440, 900],
+      [1600, 900],
+      [1366, 768],
+      [1600, 900],
+    ];
+    let openFailures = 0;
+    let closeFailures = 0;
+    for (let round = 1; round <= 30; round++) {
+      const roundResult = (await win.webContents.executeJavaScript(`
+        (async () => {
+          const out = {};
+          const hook = window.__S43_WALL_TEST__;
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          const closeDeadline = Date.now() + 5000;
+          while (hook.state().wallOpen && Date.now() < closeDeadline) await new Promise((r) => setTimeout(r, 60));
+          out.closed = hook.state().wallOpen === false;
+          await new Promise((r) => setTimeout(r, 120));
+          await hook.openWall();
+          const pickDeadline = Date.now() + 5000;
+          const pick = () => document.querySelector('.picker-option');
+          while (!pick() && Date.now() < pickDeadline) await new Promise((r) => setTimeout(r, 60));
+          pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          const openDeadline = Date.now() + 8000;
+          while (!hook.state().wallOpen && Date.now() < openDeadline) await new Promise((r) => setTimeout(r, 60));
+          out.opened = hook.state().wallOpen === true;
+          out.overlayOpen = hook.state().overlayOpen === true;
+          return out;
+        })()
+      `)) as Record<string, any>;
+      if (roundResult.closed !== true) closeFailures += 1;
+      if (roundResult.opened !== true) openFailures += 1;
+      // 每 6 轮做一次主窗口 resize（共 5 次），驱动 bounds 重算与同步链
+      if (round % 6 === 0) {
+        const [width, height] = sizes[(round / 6 - 1) % sizes.length];
+        win.setBounds({ width, height, x: win.getBounds().x, y: win.getBounds().y });
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    out.openFailures = openFailures;
+    out.closeFailures = closeFailures;
+    out.roundsAllOk = openFailures === 0 && closeFailures === 0;
+
+    // 收尾：关墙后检查最终状态（layer 恢复 / video-slot 存在）
+    const final = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        const hook = window.__S43_WALL_TEST__;
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        const deadline = Date.now() + 5000;
+        while (hook.state().wallOpen && Date.now() < deadline) await new Promise((r) => setTimeout(r, 60));
+        out.wallClosed = hook.state().wallOpen === false;
+        out.overlayOpen = hook.state().overlayOpen === true;
+        // 关墙后 layer 恢复是异步 IPC：等待其落地再读状态
+        await new Promise((r) => setTimeout(r, 600));
+        const state = await window.api.player.getState();
+        out.layer = state.ok ? state.data.layer : null;
+        const slot = document.querySelector('.video-slot');
+        out.slotPresent = Boolean(slot);
+        return out;
+      })()
+    `)) as Record<string, any>;
+    out.wallClosed = final.wallClosed === true;
+    out.finalLayerNormal = final.layer === 'normal';
+    out.finalSlotPresent = final.slotPresent === true;
+    // 恢复窗口尺寸
+    win.setBounds({ width: 1600, height: 900, x: win.getBounds().x, y: win.getBounds().y });
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  }
+  return out;
+}
+
+function overlayStressChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { overlayStressSkipped: true };
+  return {
+    overlayStressProject: result.projectOpened === true,
+    overlayStressFirstOpen: result.firstOpen === true,
+    overlayStressRounds: result.roundsAllOk === true,
+    overlayStressFinalClosed: result.wallClosed === true,
+    overlayStressFinalLayer: result.finalLayerNormal === true,
+    overlayStressSlotPresent: result.finalSlotPresent === true,
+  };
 }
