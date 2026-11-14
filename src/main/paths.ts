@@ -20,9 +20,9 @@ export function defaultTimelineSettings(): TimelineSettings {
   return { trackHeight: 96, pxPerSecond: 96 };
 }
 
-/** S36-2：默认识别引擎 = AI（OpenCV 仅隐藏开关）。 */
+/** S36-2：默认识别引擎 = AI（OpenCV 仅隐藏开关）。S42/Z03：标签策略默认 local。 */
 export function defaultRecognitionSettings(): RecognitionSettings {
-  return { engine: 'ai' };
+  return { engine: 'ai', labelStrategy: 'local', cloudLabelsAck: false };
 }
 
 export function defaultShortcutSettings(): ShortcutSettings {

@@ -12,6 +12,13 @@ import type {
 } from '../../shared/types';
 import { shotDetectionResultSchema } from '../../shared/schemas';
 import { decryptApiKey } from './credential-store';
+import {
+  CLOUD_LABEL_PROMPT,
+  buildImageDataUrl,
+  normalizeCloudLabelResults,
+  type CloudVisionLabelInput,
+  type CloudVisionLabelResult,
+} from './cloud-vision-labels';
 
 export class ProviderError extends Error {
   readonly code: string;
@@ -294,6 +301,93 @@ export class OpenAiCompatProvider implements ShotDetectionProvider {
 
   getUsage(): ShotDetectionUsage {
     return { ...this.usage };
+  }
+
+  /**
+   * S42/Z03：云端标签识别（OpenAI 兼容 chat/completions，图片以 data URL 内联）。
+   * 仅用于"标签识别"策略 = cloud；调用前 DetectService 必须完成联网检查与隐私确认。
+   */
+  async analyzeImages(
+    items: CloudVisionLabelInput[],
+    options: { signal: AbortSignal; batchSize?: number; timeoutMs?: number },
+  ): Promise<CloudVisionLabelResult[]> {
+    if (this.aborted) throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
+    if (!this.baseUrl) throw new ProviderError('PROVIDER_BASE_URL_MISSING', '未配置 API 端点 baseUrl');
+    if (!this.apiKey) throw new ProviderError('PROVIDER_API_KEY_MISSING', '未配置 API Key');
+    const batchSize = Math.max(1, Math.min(8, options.batchSize ?? 4));
+    const results: CloudVisionLabelResult[] = [];
+    for (let start = 0; start < items.length; start += batchSize) {
+      if (options.signal.aborted || this.aborted) {
+        throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
+      }
+      const batch = items.slice(start, start + batchSize);
+      results.push(...(await this.analyzeImageBatch(batch, options.signal, options.timeoutMs)));
+    }
+    return results;
+  }
+
+  private async analyzeImageBatch(
+    batch: CloudVisionLabelInput[],
+    signal: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<CloudVisionLabelResult[]> {
+    const model = this.model ?? (await this.probeCapability()).model;
+    if (!model) throw new ProviderError('PROVIDER_MODEL_MISSING', '没有可用的视觉模型');
+    const content: Array<Record<string, unknown>> = [
+      {
+        type: 'text',
+        text: `共 ${batch.length} 张镜头代表帧，按顺序编号 1..${batch.length}。对每一帧输出一个对象。`,
+      },
+    ];
+    for (const item of batch) {
+      content.push({ type: 'text', text: `第 ${item.index} 帧（镜头 ${item.id}）：` });
+      content.push({ type: 'image_url', image_url: { url: buildImageDataUrl(item.imagePath) } });
+    }
+    const body = {
+      model,
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: CLOUD_LABEL_PROMPT },
+        { role: 'user', content },
+      ],
+    };
+    let response: Response;
+    try {
+      response = await net.fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: combinedSignal(signal, timeoutMs ?? this.timeoutMs),
+      });
+    } catch (error) {
+      if (this.aborted || signal.aborted) {
+        throw new ProviderError('PROVIDER_CANCELLED', 'AI 识别已取消');
+      }
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        throw new ProviderError('PROVIDER_REQUEST_TIMEOUT', '云端标签识别请求超时');
+      }
+      throw new ProviderError('PROVIDER_REQUEST_FAILED', `云端标签识别请求失败：${describeFetchError(error)}`);
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new ProviderError('PROVIDER_HTTP', `云端标签识别失败：HTTP ${response.status} ${text.slice(0, 300)}`);
+    }
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
+    };
+    const content0 = extractMessageText(payload.choices?.[0]?.message?.content);
+    if (!content0) throw new ProviderError('CONTRACT_EMPTY', '云端标签识别未返回内容');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripCodeFence(content0));
+    } catch (error) {
+      throw new ProviderError('CONTRACT_JSON_INVALID', `云端标签识别返回不是合法 JSON：${(error as Error).message}`);
+    }
+    return normalizeCloudLabelResults(parsed, batch);
   }
 }
 
