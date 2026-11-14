@@ -20,6 +20,9 @@ const VIDEO_FILTERS = [
   { name: '全部文件', extensions: ['*'] },
 ];
 
+/** S42/Z02：overlay 操作序号（DSH_PLAYER_DEBUG 日志用，可定位时序） */
+let overlayDebugSeq = 0;
+
 /**
  * PlayerService（docs/S01 §5.1）：
  * 负责 libmpv 实例生命周期、播放/暂停/seek/逐帧步进、状态推送，以及原生视频子窗口的位置同步。
@@ -33,13 +36,28 @@ export class PlayerService {
   private layer: OverlayLayer = 'normal';
   private timeTimer: NodeJS.Timeout | null = null;
   private lastDecodeErrorAt = 0;
+  /** S42/Z02：串行化 overlay 状态迁移（hide/show/setZ/setBounds 不再交错） */
+  private overlayQueue: Promise<void> = Promise.resolve();
 
-  private readonly handleWindowBoundsChange = (): void => this.syncOverlayBounds();
-  private readonly handleWindowHide = (): void => this.overlay?.hide();
+  private readonly handleWindowBoundsChange = (): void => {
+    this.enqueueOverlayOp('window-resize-move', () => {
+      this.debugLog('window-bounds-change', { layer: this.layer });
+      this.applyOverlayState();
+    });
+  };
+  private readonly handleWindowHide = (): void => {
+    this.enqueueOverlayOp('window-hide', () => {
+      this.debugLog('window-hide', { layer: this.layer });
+      this.overlay?.hide();
+    });
+  };
   private readonly handleWindowShow = (): void => {
-    if (this.media && this.bounds && this.bounds.width > 2 && this.bounds.height > 2) {
-      this.syncOverlayBounds();
-    }
+    this.enqueueOverlayOp('window-show', () => {
+      this.debugLog('window-show', { layer: this.layer });
+      if (this.media && this.bounds && this.bounds.width > 2 && this.bounds.height > 2) {
+        this.applyOverlayState();
+      }
+    });
   };
 
   constructor(private readonly win: BrowserWindow) {
@@ -56,7 +74,14 @@ export class PlayerService {
 
   setBounds(bounds: RenderBounds): void {
     this.bounds = bounds;
-    this.syncOverlayBounds();
+    this.enqueueOverlayOp('set-bounds', () => {
+      this.debugLog('set-bounds', { bounds, layer: this.layer });
+      try {
+        this.applyOverlayState();
+      } catch (error) {
+        this.emitError('OVERLAY_BOUNDS_FAILED', `写入视频窗口边界失败：${(error as Error).message}`);
+      }
+    });
     if (process.env['DSH_PLAYER_DEBUG']) {
       try {
         const physical = toPhysicalRect(this.win, bounds);
@@ -79,21 +104,104 @@ export class PlayerService {
   }
 
   setLayer(level: OverlayLayer): PlayerState {
+    const previous = this.layer;
     this.layer = level;
-    this.syncOverlayBounds();
+    this.enqueueOverlayOp('set-layer', () => {
+      this.debugLog('set-layer', { layer: level, previous });
+      try {
+        this.applyOverlayState();
+      } catch (error) {
+        // S42/Z02：写入失败时回滚层级并报结构化错误，不残留旧框也不谎报状态
+        this.layer = previous;
+        try {
+          this.applyOverlayState();
+        } catch {
+          // 恢复失败只记录
+        }
+        this.emitError('OVERLAY_LAYER_FAILED', `设置视频画面层级失败：${(error as Error).message}`);
+      }
+    });
     this.emitState();
     return this.getState();
   }
 
-  private syncOverlayBounds(): void {
+  /**
+   * S42/Z02：串行化执行 overlay 状态迁移。所有 hide/show/setZ/setBounds 都经过
+   * 同一条 Promise 链，保证时序可预测、可由 DSH_PLAYER_DEBUG 日志复盘。
+   */
+  private enqueueOverlayOp(_label: string, op: () => void): void {
+    const run = (): void => {
+      try {
+        op();
+      } catch (error) {
+        // 窗口事件路径不允许抛出（Electron 事件回调抛错会打到未捕获异常）：
+        // 记录结构化错误并继续队列。
+        this.debugLog('overlay-op-failed', { message: (error as Error).message });
+        if (process.env['DSH_PLAYER_DEBUG']) {
+          try {
+            appendFileSync(
+              process.env['DSH_PLAYER_DEBUG'],
+              `${JSON.stringify({ seq: ++overlayDebugSeq, at: new Date().toISOString(), event: 'overlay-op-error', message: (error as Error).message })}\n`,
+              'utf8',
+            );
+          } catch {
+            // 忽略日志失败
+          }
+        }
+      }
+    };
+    this.overlayQueue = this.overlayQueue.then(run, run);
+  }
+
+  /**
+   * S42/Z02：把当前 {bounds, layer} 一次性写入子窗口。
+   * 旧 bounds 可能压住时间线轨道（轨高变化瞬间）：先隐藏 → 写正确 bounds → 按层级恢复，
+   * 整个迁移在同一宏任务内完成，不会残留旧框。
+   */
+  private applyOverlayState(): void {
     if (!this.overlay || !this.bounds) return;
     const physical = toPhysicalRect(this.win, this.bounds);
     if (!this.media || physical.width < 2 || physical.height < 2) {
       this.overlay.hide();
       return;
     }
+    const current = this.overlay.getRect();
+    const changed =
+      !current ||
+      current.x !== physical.x ||
+      current.y !== physical.y ||
+      current.width !== physical.width ||
+      current.height !== physical.height;
+    if (changed && this.layer !== 'hidden') {
+      // 旧框先让位，避免变更瞬间旧矩形压住新布局
+      this.overlay.hide();
+    }
     this.overlay.setBounds(physical);
     this.overlay.setZ(this.layer);
+  }
+
+  /** S42/Z02：统一 overlay 状态日志（DSH_PLAYER_DEBUG 指向文件时开启） */
+  private debugLog(event: string, extra: Record<string, unknown> = {}): void {
+    const target = process.env['DSH_PLAYER_DEBUG'];
+    if (!target) return;
+    try {
+      appendFileSync(
+        target,
+        `${JSON.stringify({
+          seq: ++overlayDebugSeq,
+          at: new Date().toISOString(),
+          event,
+          ...extra,
+          layer: this.layer,
+          overlayVisible: this.overlay?.isVisible ?? null,
+          zLevel: this.overlay?.currentZLevel ?? null,
+          overlayRect: this.overlay?.getRect() ?? null,
+        })}\n`,
+        'utf8',
+      );
+    } catch {
+      // 调试日志失败不影响播放
+    }
   }
 
   // ---------- 播放控制 ----------
@@ -141,7 +249,8 @@ export class PlayerService {
       fps: size.fps,
     };
 
-    this.syncOverlayBounds();
+    // S42/Z02：载入完成后立即按当前 bounds+layer 同步子窗口（同一宏任务内原子生效）
+    this.applyOverlayState();
     this.startTimeEvents();
     this.emit(IPC.PLAYER_EVENT_LOADED, this.media);
     this.emitState();
@@ -160,21 +269,28 @@ export class PlayerService {
 
   async play(): Promise<PlayerState> {
     const client = this.requirePlayer();
+    this.debugLog('play-request', {});
     await client.play();
+    this.debugLog('play-applied', { paused: client.isPaused() });
     this.emitState();
     return this.getState();
   }
 
   async pause(): Promise<PlayerState> {
     const client = this.requirePlayer();
+    this.debugLog('pause-request', {});
     await client.pause();
+    this.debugLog('pause-applied', { paused: client.isPaused() });
     this.emitState();
     return this.getState();
   }
 
   async toggle(): Promise<PlayerState> {
     const client = this.requirePlayer();
+    const before = client.isPaused();
+    this.debugLog('toggle-request', { pausedBefore: before });
     await client.toggle();
+    this.debugLog('toggle-applied', { pausedBefore: before, pausedAfter: client.isPaused() });
     this.emitState();
     return this.getState();
   }
@@ -221,6 +337,7 @@ export class PlayerService {
 
   close(): void {
     if (!this.client) return;
+    this.debugLog('close', {});
     this.client.stop();
     this.media = null;
     this.stopTimeEvents();
@@ -262,6 +379,7 @@ export class PlayerService {
   }
 
   destroy(): void {
+    this.debugLog('destroy', {});
     this.stopTimeEvents();
     this.win.removeListener('resize', this.handleWindowBoundsChange);
     this.win.removeListener('move', this.handleWindowBoundsChange);
@@ -286,7 +404,7 @@ export class PlayerService {
         ? toPhysicalRect(this.win, this.bounds)
         : { x: 0, y: 0, width: 1, height: 1 };
       this.overlay = NativeOverlay.create(parent, rect);
-      if (this.bounds) this.syncOverlayBounds();
+      if (this.bounds) this.applyOverlayState();
     }
 
     if (!this.client) {

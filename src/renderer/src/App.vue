@@ -52,6 +52,7 @@ import type {
   WallBoardNodeInfo,
   ExportProgressEvent,
   GpuStatus,
+  HardwareCapabilityReport,
   IpcResult,
   MediaInfo,
   MediaProgressEvent,
@@ -224,6 +225,8 @@ const settingsOpen = ref(false);
 const settings = ref<Settings | null>(null);
 const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
+/** S42/Z04：硬件能力报告（启动时读取一次缓存；设置/检测弹窗可手动重扫） */
+const hardwareReport = ref<HardwareCapabilityReport | null>(null);
 /** S36-1b：统一危险删除确认弹窗状态（Promise 风格，await 确认结果） */
 const confirmState = reactive({
   open: false,
@@ -413,7 +416,8 @@ function hidePlayerForOverlay(): void {
 function restorePlayerLayer(): void {
   if (!overlayPlayerHidden) return;
   overlayPlayerHidden = false;
-  const target = pendingPlayerLayer.value ?? 'normal';
+  // S42/Z02：投影模式活动时原生画面必须保持隐藏，否则 HWND 会盖住投影宫格
+  const target = projectedMode.value ? 'hidden' : (pendingPlayerLayer.value ?? 'normal');
   pendingPlayerLayer.value = null;
   void applyPlayerLayer(target);
 }
@@ -887,6 +891,17 @@ async function closePlayer(): Promise<void> {
   void syncTranscodeConcurrency();
 }
 
+/** S42/Z01：Space 播放切换的串行链——已加载文件时不丢弃任何一次按键 */
+let playbackToggleChain: Promise<void> = Promise.resolve();
+
+/** S42/Z01：播放操作环形日志（连续操作证据；window.__S42_PLAYBACK_LOG__ 供测试取证） */
+function playbackDebugLog(event: string, detail: Record<string, unknown> = {}): void {
+  const log = (window as { __S42_PLAYBACK_LOG__?: unknown[] }).__S42_PLAYBACK_LOG__ ?? [];
+  log.push({ at: new Date().toISOString(), event, ...detail });
+  if (log.length > 300) log.splice(0, log.length - 300);
+  (window as { __S42_PLAYBACK_LOG__?: unknown[] }).__S42_PLAYBACK_LOG__ = log;
+}
+
 async function togglePlayback(): Promise<void> {
   if (projectedMode.value) {
     // S45 投影模式：图片幻灯播放（不依赖 mpv）
@@ -894,26 +909,42 @@ async function togglePlayback(): Promise<void> {
     else startProjectedPlayback();
     return;
   }
-  if (busy.value) return;
-  busy.value = true;
-  try {
-    if (!player.hasFile) {
+  if (!player.hasFile) {
+    // 未加载文件：打开影片是长任务，保持 busy 让位
+    if (busy.value) return;
+    busy.value = true;
+    playbackDebugLog('open-request', { path: activeProject.value?.media.proxyPath ?? null });
+    try {
       const path = activeProject.value?.media.proxyPath || activeProject.value?.source.path;
       if (path) {
         await openMediaPath(path, true);
       } else {
         await openVideo();
       }
-      return;
+    } finally {
+      busy.value = false;
     }
-    const state = unwrap(await window.api.player.toggle());
-    if (state) {
-      Object.assign(player, state);
-      void syncTranscodeConcurrency();
-    }
-  } finally {
-    busy.value = false;
+    return;
   }
+  // S42/Z01：已加载文件时不再被 busy/前次 IPC 吞键——每次空格都入队，
+  // 主进程按序返回权威状态，最后一次为准（快速连按 = 播放→暂停，状态与按键序列一致）。
+  playbackDebugLog('toggle-request', { paused: player.paused });
+  const run = async (): Promise<void> => {
+    try {
+      const state = unwrap(await window.api.player.toggle());
+      if (state) {
+        Object.assign(player, state);
+        void syncTranscodeConcurrency();
+      }
+      playbackDebugLog('toggle-applied', { paused: player.paused, layer: player.layer });
+    } catch (error) {
+      playbackDebugLog('toggle-failed', { message: error instanceof Error ? error.message : String(error) });
+      if (player.hasFile) {
+        showToast(error instanceof Error ? error.message : String(error), 'error', '播放切换失败');
+      }
+    }
+  };
+  playbackToggleChain = playbackToggleChain.then(run, run);
 }
 
 async function stepFrame(dir: 1 | -1): Promise<void> {
@@ -2269,6 +2300,28 @@ async function loadSettings(): Promise<void> {
   }
 }
 
+/** S42/Z04：读取硬件能力报告（主进程 60s 缓存；无缓存自动扫描） */
+async function refreshHardwareReport(): Promise<void> {
+  try {
+    const result = await window.api.hardware.status();
+    if (result.ok) hardwareReport.value = result.data;
+    else console.warn(`[hardware] ${result.error.code} ${result.error.message}`);
+  } catch (error) {
+    console.warn(`[hardware] ${(error as Error).message}`);
+  }
+}
+
+/** S42/Z04：手动重扫（设置/检测弹窗按钮），force 绕过缓存 */
+async function rescanHardware(): Promise<void> {
+  const result = await window.api.hardware.scan({ force: true });
+  if (result.ok) {
+    hardwareReport.value = result.data;
+    showToast('硬件与环境状态已更新。', 'success', '硬件扫描');
+  } else {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
 async function openSettings(): Promise<void> {
   settingsError.value = null;
   if (!settings.value) await loadSettings();
@@ -2855,11 +2908,24 @@ async function startLabelDetection(): Promise<void> {
     showToast('请先完成镜头切分，再运行标签识别。');
     return;
   }
-  const local = await window.api.ai.getLocalStatus();
-  if (!local.ok || !local.data.available) {
-    const message = local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
-    showToast(message, 'error', '标签识别不可用');
-    return;
+  // S42/Z03：按标签策略做启动前检查——云端策略必须在线且已确认隐私提示；本地策略检查 Qwen 环境
+  const strategy = settings.value?.recognition?.labelStrategy ?? 'local';
+  if (strategy === 'cloud') {
+    if (settings.value?.recognition?.cloudLabelsAck !== true) {
+      showToast('云端标签识别会把代表帧上传到配置的供应商；请先在设置中确认隐私提示。', 'error', '需要隐私确认');
+      return;
+    }
+    if (hardwareReport.value && !hardwareReport.value.network.online) {
+      showToast('当前设备离线，云端标签识别不可用；本次不会上传任何数据。', 'error', '设备离线');
+      return;
+    }
+  } else {
+    const local = await window.api.ai.getLocalStatus();
+    if (!local.ok || !local.data.available) {
+      const message = local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
+      showToast(message, 'error', '标签识别不可用');
+      return;
+    }
   }
   stopDetectionPolling();
   detectionJobId.value = null;
@@ -3249,6 +3315,15 @@ function loadImageEl(src: string, timeoutMs = 1500): Promise<HTMLImageElement | 
 const projectedMode = computed(
   () => wallMode.value === 'independent' && projectionOn.value && boardShots.value.length > 0,
 );
+
+// S42/Z02：进入投影隐藏原生画面；退出投影后若无弹层再恢复原层级
+watch(projectedMode, (on) => {
+  if (on) {
+    hidePlayerForOverlay();
+  } else if (!overlayOpen.value) {
+    restorePlayerLayer();
+  }
+});
 
 /** 工作区数据源：投影模式=分镜本节点映射 */
 const workbenchShots = computed(() => (projectedMode.value ? boardShots.value : shots.value));
@@ -3781,7 +3856,12 @@ function setPlayerBounds(bounds: RenderBounds): void {
 }
 
 async function setPlayerLayer(level: OverlayLayer): Promise<void> {
-  if (overlayPlayerHidden) pendingPlayerLayer.value = level;
+  // S42/Z02：弹层把视频压住期间只记账不落盘——此刻应用 layer 会让原生画面
+  // 从弹层后面顶出来（卡墙）。目标层级记入 pendingPlayerLayer，关弹层时统一恢复。
+  if (overlayPlayerHidden || projectedMode.value) {
+    pendingPlayerLayer.value = level;
+    return;
+  }
   await applyPlayerLayer(level);
 }
 
@@ -3956,6 +4036,7 @@ function handleKeydown(event: KeyboardEvent): void {
   }
   if (event.code === 'Space') {
     event.preventDefault();
+    playbackDebugLog('keydown-space', { paused: player.paused, hasFile: player.hasFile, busy: busy.value });
     void togglePlayback();
     return;
   }
@@ -4011,6 +4092,8 @@ onMounted(async () => {
 
   await loadSettings();
   await refreshAiMcpStatus();
+  // S42/Z04：硬件能力报告（不阻塞首屏，失败只告警）
+  void refreshHardwareReport();
 
   let savedSession: WorkspaceState | null = null;
   const sessionResult = await api.session.get();
@@ -4157,6 +4240,10 @@ onMounted(async () => {
       labelsFlow.value = false;
       detectionCapsuleHidden.value = false;
       void syncTranscodeConcurrency();
+      // S42/Z03：云端策略失败回退本地时，把回退事实明确告诉用户
+      if (detectionBoundaryWarning.value) {
+        showToast(detectionBoundaryWarning.value, 'default', '已回退本机识别');
+      }
       labelPreview.value = event.result;
       labelSelected.value = event.result.shots.map((prediction) => prediction.shotId);
       labelPreviewOpen.value = true;
@@ -4741,9 +4828,11 @@ onBeforeUnmount(() => {
       :error="settingsError"
       :mcp-status="aiMcpStatus"
       :mcp-busy="aiMcpBusy"
+      :hardware="hardwareReport"
       @close="closeSettings"
       @save="saveSettings"
       @toggle-mcp="toggleAiMcp"
+      @rescan-hardware="rescanHardware"
     />
 
     <StatsModal
@@ -4767,6 +4856,8 @@ onBeforeUnmount(() => {
       :boundary-engine="detectionBoundaryEngine"
       :boundary-fallback="detectionBoundaryFallback"
       :boundary-warning="detectionBoundaryWarning"
+      :hardware="hardwareReport"
+      :label-strategy="settings?.recognition?.labelStrategy ?? 'local'"
       @close="closeDetection"
       @cancel="cancelDetection"
       @retry="openDetection"
