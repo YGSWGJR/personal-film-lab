@@ -167,6 +167,9 @@ export function resolveAssetRoots(): string[] {
       resolve(join(resolveDataRoot(), 'projects')),
       resolveStillRoot(),
       resolveStillSubDir(),
+      // S42 复测修正：S41 起检测缩略图落在 <frameCache>/thumbs/<project>/detect/<job>/，
+      // 必须加入白名单，否则镜头列表/详情的缩略图全部 403。
+      resolveThumbCacheDir(),
     ]),
   ];
 }
