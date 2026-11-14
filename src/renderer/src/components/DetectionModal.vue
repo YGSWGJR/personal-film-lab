@@ -115,7 +115,7 @@ function applyResult(): void {
 </script>
 
 <template>
-  <transition name="modal">
+  <transition name="modal" :duration="{ enter: 220, leave: 220 }">
     <!-- 0.3.0：移除永不成立的运行态胶囊死代码（S41 起进度胶囊在顶栏） -->
     <div v-if="open" class="modal-mask" @pointerdown.self="emit('close')">
       <section class="detect-modal">

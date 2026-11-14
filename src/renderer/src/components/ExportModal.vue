@@ -89,7 +89,7 @@ function submit(): void {
 </script>
 
 <template>
-  <transition name="modal">
+  <transition name="modal" :duration="{ enter: 220, leave: 220 }">
     <div v-if="open" class="modal-mask" @pointerdown.self="!busy && emit('close')">
       <form class="export-modal" @submit.prevent="submit">
         <header class="modal-head">
