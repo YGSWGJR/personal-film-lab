@@ -23,6 +23,7 @@ import { CaptureService } from './capture/capture-service';
 import { importProjectFrom, scanCandidateRoots } from './data/import-service';
 import { DetectService } from './detect/detect-service';
 import { ExportService } from './export/export-service';
+import { HardwareCapabilityService } from './hardware/hardware-capability-service';
 import { registerIpcHandlers } from './ipc';
 import { MediaService } from './media/media-service';
 import { PlayerService } from './player/player-service';
@@ -44,17 +45,20 @@ const IS_AI_MCP = process.argv.includes('--ai-mcp');
  */
 const CUSTOM_USER_DATA = 'G:\\拉片\\软件数据';
 const DEFAULT_USER_DATA = app.getPath('userData');
+const userDataOverride = process.env['DSH_USER_DATA_ROOT']?.trim();
 try {
-  mkdirSync(CUSTOM_USER_DATA, { recursive: true });
-  app.setPath('userData', CUSTOM_USER_DATA);
+  const userData = userDataOverride ? resolve(userDataOverride) : CUSTOM_USER_DATA;
+  mkdirSync(userData, { recursive: true });
+  app.setPath('userData', userData);
 } catch (error) {
+  if (userDataOverride) throw error;
   console.warn(`[userData] 自定义 userData 不可用，回退默认：${(error as Error).message}`);
 }
 const ACTIVE_USER_DATA = app.getPath('userData');
 
 /** 首次启动时把旧 userData 的 settings.json 迁移到新位置（只迁必要配置，缓存垃圾不迁）。 */
 function migrateUserDataSettingsOnce(): void {
-  if (DEFAULT_USER_DATA === ACTIVE_USER_DATA) return;
+  if (userDataOverride || DEFAULT_USER_DATA === ACTIVE_USER_DATA) return;
   const newSettings = resolve(ACTIVE_USER_DATA, 'settings.json');
   const oldSettings = resolve(DEFAULT_USER_DATA, 'settings.json');
   if (!existsSync(newSettings) && existsSync(oldSettings)) {
@@ -92,6 +96,7 @@ let sessionService: SessionService | null = null;
 let statsService: StatsService | null = null;
 let aiService: AiAccessService | null = null;
 let localVisionService: LocalVisionService | null = null;
+let hardwareService: HardwareCapabilityService | null = null;
 let exitCaptureStarted = false;
 let allowWindowClose = false;
 let closeCaptureStarted = false;
@@ -379,6 +384,7 @@ if (!IS_AI_MCP) {
     getSettings: () => settingsService,
     getAi: () => aiService,
     getLocalAi: () => localVisionService,
+    getHardware: () => hardwareService,
     previewSettingsMigration: () => previewDataRootMigration(),
     confirmSettingsMigration: (projectIds) => confirmDataRootMigration(projectIds),
     skipSettingsMigration: () => skipDataRootMigration(),
@@ -406,6 +412,15 @@ app.whenReady().then(() => {
   );
   bindSettingsProvider(() => settingsService!.get());
   localVisionService ??= new LocalVisionService();
+  // S42/Z04：硬件能力扫描（启动后延迟预热一次，避免阻塞首屏；之后走 60s 缓存）
+  hardwareService = new HardwareCapabilityService({
+    getLocalVision: () => localVisionService,
+    getMedia: () => mediaService,
+    getSettings: () => settingsService?.get() ?? null,
+  });
+  setTimeout(() => {
+    void hardwareService?.scan({ force: false }).catch(() => undefined);
+  }, 3_000).unref?.();
 
   if (!dataLayer) {
     dataLayer = new DataLayer(resolveDataRoot());
@@ -434,6 +449,7 @@ app.whenReady().then(() => {
       getMedia: () => mediaService,
       getSession: () => sessionService,
       getLocalAi: () => localVisionService,
+      getHardware: () => hardwareService,
     });
   }
 
@@ -470,6 +486,7 @@ function cleanupServices(): void {
   aiService = null;
   localVisionService?.dispose();
   localVisionService = null;
+  hardwareService = null;
 }
 
 app.on('before-quit', (event) => {

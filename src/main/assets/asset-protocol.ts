@@ -24,13 +24,20 @@ export function registerAssetProtocol(getAllowedRoots: () => string[]): void {
     try {
       const url = new URL(request.url);
       const projectId = decodeURIComponent(url.hostname);
-      const relativePath = decodeURIComponent(url.pathname.replace(/^\/+/u, ''));
+      const decodedPath = decodeURIComponent(url.pathname.replace(/^\/+/u, ''));
+      // S42 复测修正：standard scheme 会给 pathname 补前导 "/"，Windows 盘符路径
+      // （如 G:/...）decode 后变成 "/G:/..."，isAbsolute 判定失败导致检测缩略图 404。
+      // 剥掉前导 "/" 后按盘符前缀识别绝对路径；白名单校验语义与原逻辑等价。
+      const relativePath = /^[A-Za-z]:[\\/]/u.test(decodedPath)
+        ? decodedPath.replace(/^\/+/u, '')
+        : decodedPath;
+      const isAbsoluteRequest = isAbsolute(relativePath);
       const roots = getAllowedRoots().map((root) => resolve(root));
       const projectRoot = resolve(roots[0] ?? '', projectId);
-      const target = isAbsolute(relativePath)
+      const target = isAbsoluteRequest
         ? resolve(relativePath)
         : resolve(projectRoot, relativePath);
-      const allowed = isAbsolute(relativePath)
+      const allowed = isAbsoluteRequest
         ? roots.some((root) => target === root || target.startsWith(`${root}${sep}`))
         : target.startsWith(`${projectRoot}${sep}`);
       if (!allowed) {

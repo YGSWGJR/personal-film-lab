@@ -55,6 +55,7 @@ import type {
   WallBoardNodeInfo,
   ExportProgressEvent,
   GpuStatus,
+  HardwareCapabilityReport,
   IpcResult,
   MediaInfo,
   MediaProgressEvent,
@@ -240,6 +241,10 @@ const settingsOpen = ref(false);
 const settings = ref<Settings | null>(null);
 const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
+/** S42/B05：反馈弹层关闭后把焦点归还给品牌区触发按钮 */
+const feedbackTrigger = ref<HTMLButtonElement | null>(null);
+/** S42/Z04：硬件能力报告（启动时读取一次缓存；设置/检测弹窗可手动重扫） */
+const hardwareReport = ref<HardwareCapabilityReport | null>(null);
 /** S36-1b：统一危险删除确认弹窗状态（Promise 风格，await 确认结果） */
 const confirmState = reactive({
   open: false,
@@ -395,6 +400,7 @@ const detectionResultOpen = computed(() => detectionOpen.value && !detecting.val
 const overlayOpen = computed(
   () =>
     wallOpen.value ||
+    wallPickerOpen.value ||
     detectionResultOpen.value ||
     exportOpen.value ||
     termEditorOpen.value ||
@@ -407,6 +413,7 @@ const overlayOpen = computed(
     aiAuthRequest.value !== null ||
     // S41 修复：标签预览弹窗与确认框也必须把视频 HWND 降层，否则被画面盖住
     labelPreviewOpen.value ||
+    feedbackOpen.value ||
     confirmState.open,
 );
 const gpuStatusText = computed(() => {
@@ -431,7 +438,8 @@ function hidePlayerForOverlay(): void {
 function restorePlayerLayer(): void {
   if (!overlayPlayerHidden) return;
   overlayPlayerHidden = false;
-  const target = pendingPlayerLayer.value ?? 'normal';
+  // S42/Z02：投影模式活动时原生画面必须保持隐藏，否则 HWND 会盖住投影宫格
+  const target = projectedMode.value ? 'hidden' : (pendingPlayerLayer.value ?? 'normal');
   pendingPlayerLayer.value = null;
   void applyPlayerLayer(target);
 }
@@ -1142,6 +1150,17 @@ async function closePlayer(): Promise<void> {
   void syncTranscodeConcurrency();
 }
 
+/** S42/Z01：Space 播放切换的串行链——已加载文件时不丢弃任何一次按键 */
+let playbackToggleChain: Promise<void> = Promise.resolve();
+
+/** S42/Z01：播放操作环形日志（连续操作证据；window.__S42_PLAYBACK_LOG__ 供测试取证） */
+function playbackDebugLog(event: string, detail: Record<string, unknown> = {}): void {
+  const log = (window as { __S42_PLAYBACK_LOG__?: unknown[] }).__S42_PLAYBACK_LOG__ ?? [];
+  log.push({ at: new Date().toISOString(), event, ...detail });
+  if (log.length > 300) log.splice(0, log.length - 300);
+  (window as { __S42_PLAYBACK_LOG__?: unknown[] }).__S42_PLAYBACK_LOG__ = log;
+}
+
 async function togglePlayback(): Promise<void> {
   if (projectedMode.value) {
     // S45 投影模式：图片幻灯播放（不依赖 mpv）
@@ -1149,26 +1168,42 @@ async function togglePlayback(): Promise<void> {
     else startProjectedPlayback();
     return;
   }
-  if (busy.value) return;
-  busy.value = true;
-  try {
-    if (!player.hasFile) {
+  if (!player.hasFile) {
+    // 未加载文件：打开影片是长任务，保持 busy 让位
+    if (busy.value) return;
+    busy.value = true;
+    playbackDebugLog('open-request', { path: activeProject.value?.media.proxyPath ?? null });
+    try {
       const path = activeProject.value?.media.proxyPath || activeProject.value?.source.path;
       if (path) {
         await openMediaPath(path, true);
       } else {
         await openVideo();
       }
-      return;
+    } finally {
+      busy.value = false;
     }
-    const state = unwrap(await window.api.player.toggle());
-    if (state) {
-      Object.assign(player, state);
-      void syncTranscodeConcurrency();
-    }
-  } finally {
-    busy.value = false;
+    return;
   }
+  // S42/Z01：已加载文件时不再被 busy/前次 IPC 吞键——每次空格都入队，
+  // 主进程按序返回权威状态，最后一次为准（快速连按 = 播放→暂停，状态与按键序列一致）。
+  playbackDebugLog('toggle-request', { paused: player.paused });
+  const run = async (): Promise<void> => {
+    try {
+      const state = unwrap(await window.api.player.toggle());
+      if (state) {
+        Object.assign(player, state);
+        void syncTranscodeConcurrency();
+      }
+      playbackDebugLog('toggle-applied', { paused: player.paused, layer: player.layer });
+    } catch (error) {
+      playbackDebugLog('toggle-failed', { message: error instanceof Error ? error.message : String(error) });
+      if (player.hasFile) {
+        showToast(error instanceof Error ? error.message : String(error), 'error', '播放切换失败');
+      }
+    }
+  };
+  playbackToggleChain = playbackToggleChain.then(run, run);
 }
 
 async function stepFrame(dir: 1 | -1): Promise<void> {
@@ -2553,6 +2588,38 @@ async function loadSettings(): Promise<void> {
   }
 }
 
+/** S42/B05：反馈弹层打开时把焦点落到主操作（人类点击习惯：Enter/Space 即可达） */
+watch(feedbackOpen, async (open) => {
+  await nextTick();
+  if (open) {
+    document.querySelector<HTMLElement>('.feedback-issues')?.focus();
+  } else {
+    feedbackTrigger.value?.focus({ preventScroll: true });
+  }
+});
+
+/** S42/Z04：读取硬件能力报告（主进程 60s 缓存；无缓存自动扫描） */
+async function refreshHardwareReport(): Promise<void> {
+  try {
+    const result = await window.api.hardware.status();
+    if (result.ok) hardwareReport.value = result.data;
+    else console.warn(`[hardware] ${result.error.code} ${result.error.message}`);
+  } catch (error) {
+    console.warn(`[hardware] ${(error as Error).message}`);
+  }
+}
+
+/** S42/Z04：手动重扫（设置/检测弹窗按钮），force 绕过缓存 */
+async function rescanHardware(): Promise<void> {
+  const result = await window.api.hardware.scan({ force: true });
+  if (result.ok) {
+    hardwareReport.value = result.data;
+    showToast('硬件与环境状态已更新。', 'success', '硬件扫描');
+  } else {
+    showToast(result.error.message, 'error', result.error.code);
+  }
+}
+
 async function openSettings(): Promise<void> {
   settingsError.value = null;
   if (!settings.value) await loadSettings();
@@ -3160,11 +3227,24 @@ async function startLabelDetection(): Promise<void> {
     showToast('请先完成镜头切分，再运行标签识别。');
     return;
   }
-  const local = await window.api.ai.getLocalStatus();
-  if (!local.ok || !local.data.available) {
-    const message = local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
-    showToast(message, 'error', '标签识别不可用');
-    return;
+  // S42/Z03：按标签策略做启动前检查——云端策略必须在线且已确认隐私提示；本地策略检查 Qwen 环境
+  const strategy = settings.value?.recognition?.labelStrategy ?? 'local';
+  if (strategy === 'cloud') {
+    if (settings.value?.recognition?.cloudLabelsAck !== true) {
+      showToast('云端标签识别会把代表帧上传到配置的供应商；请先在设置中确认隐私提示。', 'error', '需要隐私确认');
+      return;
+    }
+    if (hardwareReport.value && !hardwareReport.value.network.online) {
+      showToast('当前设备离线，云端标签识别不可用；本次不会上传任何数据。', 'error', '设备离线');
+      return;
+    }
+  } else {
+    const local = await window.api.ai.getLocalStatus();
+    if (!local.ok || !local.data.available) {
+      const message = local.ok ? local.data.error ?? '本地视觉模型环境未就绪' : local.error.message;
+      showToast(message, 'error', '标签识别不可用');
+      return;
+    }
   }
   stopDetectionPolling();
   detectionJobId.value = null;
@@ -3554,6 +3634,15 @@ function loadImageEl(src: string, timeoutMs = 1500): Promise<HTMLImageElement | 
 const projectedMode = computed(
   () => wallMode.value === 'independent' && projectionOn.value && boardShots.value.length > 0,
 );
+
+// S42/Z02：进入投影隐藏原生画面；退出投影后若无弹层再恢复原层级
+watch(projectedMode, (on) => {
+  if (on) {
+    hidePlayerForOverlay();
+  } else if (!overlayOpen.value) {
+    restorePlayerLayer();
+  }
+});
 
 /** 工作区数据源：投影模式=分镜本节点映射 */
 const workbenchShots = computed(() => (projectedMode.value ? boardShots.value : shots.value));
@@ -4113,7 +4202,12 @@ function setPlayerBounds(bounds: RenderBounds): void {
 }
 
 async function setPlayerLayer(level: OverlayLayer): Promise<void> {
-  if (overlayPlayerHidden) pendingPlayerLayer.value = level;
+  // S42/Z02：弹层把视频压住期间只记账不落盘——此刻应用 layer 会让原生画面
+  // 从弹层后面顶出来（卡墙）。目标层级记入 pendingPlayerLayer，关弹层时统一恢复。
+  if (overlayPlayerHidden || projectedMode.value) {
+    pendingPlayerLayer.value = level;
+    return;
+  }
   await applyPlayerLayer(level);
 }
 
@@ -4141,6 +4235,10 @@ function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
 
 /** 0.3.0：按层级关闭最上层的弹层（Esc）；返回是否有弹层被关闭 */
 function closeTopOverlay(): boolean {
+  if (wallPickerOpen.value) {
+    wallPickerOpen.value = false;
+    return true;
+  }
   if (wallOpen.value) {
     wallOpen.value = false;
     return true;
@@ -4151,6 +4249,10 @@ function closeTopOverlay(): boolean {
   }
   if (labelPreviewOpen.value) {
     labelPreviewOpen.value = false;
+    return true;
+  }
+  if (feedbackOpen.value) {
+    feedbackOpen.value = false;
     return true;
   }
   if (settingsOpen.value) {
@@ -4241,6 +4343,22 @@ function handleKeydown(event: KeyboardEvent): void {
   }
   if (overlayOpen.value) return;
 
+  // S42 复测·人类点击习惯：焦点在按钮/链接/可切换控件上时，Space 与 Enter
+  // 归浏览器默认激活（按下即点击该控件），全局播放、seek 等快捷键不抢键。
+  // 焦点在普通区域时才落到下面的全局快捷键分支。
+  if (
+    (event.code === 'Space' || event.key === ' ') ||
+    event.key === 'Enter'
+  ) {
+    if (target?.closest('button, a, [role="button"], summary, select')) return;
+    if (
+      event.key === 'Enter' &&
+      (target?.closest('input, textarea, [contenteditable="true"], [contenteditable=""]'))
+    ) {
+      return;
+    }
+  }
+
   if (event.key === 'Delete') {
     if (overlayOpen.value || contextMenu.visible || busy.value) return;
     const shot = selectedShot.value;
@@ -4318,8 +4436,16 @@ function handleKeydown(event: KeyboardEvent): void {
     void handleSetVolume(Math.round((player.volume + delta) * 100) / 100);
     return;
   }
-  if (event.code === 'Space') {
+  // S42 复测修正：部分输入通道（远程桌面 / 屏幕键盘 / 自动化注入）的 keydown
+  // 没有 code（物理键位），必须用 event.key === ' ' 兜底，否则空格播放失灵。
+  if (event.code === 'Space' || event.key === ' ') {
     event.preventDefault();
+    playbackDebugLog('keydown-space', {
+      paused: player.paused,
+      hasFile: player.hasFile,
+      busy: busy.value,
+      hasCode: event.code === 'Space',
+    });
     void togglePlayback();
     return;
   }
@@ -4375,6 +4501,8 @@ onMounted(async () => {
 
   await loadSettings();
   await refreshAiMcpStatus();
+  // S42/Z04：硬件能力报告（不阻塞首屏，失败只告警）
+  void refreshHardwareReport();
 
   let savedSession: WorkspaceState | null = null;
   const sessionResult = await api.session.get();
@@ -4521,6 +4649,10 @@ onMounted(async () => {
       labelsFlow.value = false;
       detectionCapsuleHidden.value = false;
       void syncTranscodeConcurrency();
+      // S42/Z03：云端策略失败回退本地时，把回退事实明确告诉用户
+      if (detectionBoundaryWarning.value) {
+        showToast(detectionBoundaryWarning.value, 'default', '已回退本机识别');
+      }
       labelPreview.value = event.result;
       labelSelected.value = event.result.shots.map((prediction) => prediction.shotId);
       labelPreviewOpen.value = true;
@@ -4584,6 +4716,7 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <button
         class="brand"
+        ref="feedbackTrigger"
         type="button"
         title="反馈与问题报告"
         aria-label="打开反馈与问题报告"
@@ -4914,7 +5047,7 @@ onBeforeUnmount(() => {
         class="node-edit-mask wall-picker-mask"
         @pointerdown.self="wallPickerOpen = false"
       >
-        <div class="node-edit-card wall-picker-card">
+        <div class="node-edit-card wall-picker-card" role="dialog" aria-modal="true" aria-label="分镜墙">
           <header>
             <h3>分镜墙</h3>
             <button type="button" aria-label="关闭" @click="wallPickerOpen = false">×</button>
@@ -4990,7 +5123,9 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
-    <transition name="import-modal">
+    <!-- S42 复测修正：显式 duration 让 Vue 用定时器收尾过渡，不再依赖 transitionend——
+         窗口后台/合成器节流时 transitionend 可能丢失，离场遮罩会以 opacity:1 永久残留并挡住点击 -->
+    <transition name="import-modal" :duration="{ enter: 200, leave: 220 }">
       <div v-if="importWizardOpen" class="import-modal-mask">
         <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="import-wizard-title">
           <header class="import-wizard-head">
@@ -5148,6 +5283,45 @@ onBeforeUnmount(() => {
       @cancel="resolveConfirm(false)"
     />
 
+    <!-- S42/B05：问题反馈弹层（点击品牌区「反馈」打开；无真实邮箱不显示邮箱行） -->
+    <transition name="modal" :duration="{ enter: 220, leave: 220 }">
+      <div
+        v-if="feedbackOpen"
+        class="feedback-mask"
+        @pointerdown.self="feedbackOpen = false"
+      >
+        <section class="feedback-modal" role="dialog" aria-modal="true" aria-label="问题反馈">
+          <header class="feedback-head">
+            <div>
+              <p>FEEDBACK</p>
+              <h2>问题反馈</h2>
+              <span>遇到 BUG 或有功能建议，欢迎到 GitHub Issues 告诉我们。</span>
+            </div>
+            <button type="button" aria-label="关闭" @click="feedbackOpen = false">×</button>
+          </header>
+          <div class="feedback-body">
+            <p class="feedback-tip">
+              提交前请先搜索既有 Issue；附上<b>版本号、复现步骤与截图</b>能更快定位问题。
+            </p>
+            <div class="feedback-actions">
+              <a
+                class="feedback-issues"
+                href="https://github.com/YGSWGJR/personal-film-lab/issues"
+                target="_blank"
+                rel="noreferrer"
+                @click="feedbackOpen = false"
+              >
+                打开 GitHub Issues
+              </a>
+            </div>
+            <p class="feedback-version">
+              个人拉片工作台 v{{ info?.version ?? '?' }} · {{ info?.platform ?? '' }}
+            </p>
+          </div>
+        </section>
+      </div>
+    </transition>
+
     <SettingsModal
       :open="settingsOpen"
       :settings="settings"
@@ -5155,9 +5329,11 @@ onBeforeUnmount(() => {
       :error="settingsError"
       :mcp-status="aiMcpStatus"
       :mcp-busy="aiMcpBusy"
+      :hardware="hardwareReport"
       @close="closeSettings"
       @save="saveSettings"
       @toggle-mcp="toggleAiMcp"
+      @rescan-hardware="rescanHardware"
     />
 
     <StatsModal
@@ -5181,6 +5357,8 @@ onBeforeUnmount(() => {
       :boundary-engine="detectionBoundaryEngine"
       :boundary-fallback="detectionBoundaryFallback"
       :boundary-warning="detectionBoundaryWarning"
+      :hardware="hardwareReport"
+      :label-strategy="settings?.recognition?.labelStrategy ?? 'local'"
       @close="closeDetection"
       @cancel="cancelDetection"
       @retry="openDetection"
@@ -5456,5 +5634,154 @@ onBeforeUnmount(() => {
 .import-modal-enter-from .import-wizard,
 .import-modal-leave-to .import-wizard {
   transform: translateY(8px) scale(0.985);
+}
+
+/* S42/B05：品牌区反馈入口（人类点击习惯：显式按钮、hover 反馈、键盘可达） */
+.brand-feedback {
+  height: 22px;
+  margin-left: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 10px;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.brand-feedback:hover,
+.brand-feedback:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  outline: none;
+}
+
+/* S42/B05：反馈弹层 */
+.feedback-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  display: grid;
+  padding: 16px;
+  background: rgba(2, 6, 23, 0.64);
+  place-items: center;
+}
+
+.feedback-modal {
+  display: flex;
+  width: 480px;
+  max-width: 100%;
+  max-height: calc(100vh - 32px);
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.5);
+}
+
+.feedback-head {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.feedback-head p,
+.feedback-head h2 {
+  margin: 0 0 4px;
+}
+
+.feedback-head p,
+.feedback-head span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.feedback-head h2 {
+  font-size: 14px;
+}
+
+.feedback-head > button {
+  flex: 0 0 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 20px;
+}
+
+.feedback-head > button:hover {
+  background: var(--bg-hover);
+}
+
+.feedback-mask.modal-enter-active,
+.feedback-mask.modal-leave-active {
+  transition: opacity 220ms ease;
+}
+
+.feedback-mask.modal-enter-from,
+.feedback-mask.modal-leave-to {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.feedback-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 16px 16px;
+}
+
+.feedback-tip {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.feedback-tip b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.feedback-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.feedback-issues {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  border-radius: 6px;
+  background: rgba(30, 58, 95, 0.3);
+  color: var(--blue-hi);
+  font-size: 11px;
+  text-decoration: none;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.feedback-issues:hover,
+.feedback-issues:focus-visible {
+  border-color: rgba(96, 165, 250, 0.6);
+  background: rgba(30, 58, 95, 0.5);
+  outline: none;
+}
+
+.feedback-version {
+  margin: 0;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.4px;
 }
 </style>

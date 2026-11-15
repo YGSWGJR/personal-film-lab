@@ -20,9 +20,9 @@ export function defaultTimelineSettings(): TimelineSettings {
   return { trackHeight: 96, pxPerSecond: 96 };
 }
 
-/** S36-2：默认识别引擎 = AI（OpenCV 仅隐藏开关）。 */
+/** S36-2：默认识别引擎 = AI（OpenCV 仅隐藏开关）。S42/Z03：标签策略默认 local。 */
 export function defaultRecognitionSettings(): RecognitionSettings {
-  return { engine: 'ai' };
+  return { engine: 'ai', labelStrategy: 'local', cloudLabelsAck: false };
 }
 
 export function defaultShortcutSettings(): ShortcutSettings {
@@ -167,6 +167,9 @@ export function resolveAssetRoots(): string[] {
       resolve(join(resolveDataRoot(), 'projects')),
       resolveStillRoot(),
       resolveStillSubDir(),
+      // S42 复测修正：S41 起检测缩略图落在 <frameCache>/thumbs/<project>/detect/<job>/，
+      // 必须加入白名单，否则镜头列表/详情的缩略图全部 403。
+      resolveThumbCacheDir(),
     ]),
   ];
 }

@@ -46,6 +46,10 @@ export const settingsSchema = z.object({
   recognition: z
     .object({
       engine: z.enum(['ai', 'opencv']),
+      /** S42/Z03：标签识别策略（local=本机 Qwen；cloud=已配置的 OpenAI 兼容供应商） */
+      labelStrategy: z.enum(['local', 'cloud']).optional(),
+      /** S42/Z03：用户已确认云端标签识别的隐私提示 */
+      cloudLabelsAck: z.boolean().optional(),
     })
     .optional(),
   ai: z
@@ -74,6 +78,11 @@ export const settingsSchema = z.object({
 });
 
 export const settingsSetArgsSchema = settingsSchema;
+
+/** S42/Z04：hardware:scan 入参（force=true 供"重新扫描"按钮使用） */
+export const hardwareScanArgsSchema = z.object({
+  force: z.boolean().optional(),
+});
 
 export const settingsChooseDirectoryArgsSchema = z.object({
   title: z.string().trim().min(1).max(100).optional(),

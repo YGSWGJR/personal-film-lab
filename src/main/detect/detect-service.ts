@@ -14,6 +14,7 @@ import type {
   DetectEnvCheck,
   DetectJobSnapshot,
   DetectJobStatus,
+  DetectJobMemory,
   DetectOptions,
   DetectPipeline,
   DetectProgressEvent,
@@ -37,8 +38,11 @@ import type {
   ShotPreview,
 } from '../../shared/types';
 import type { AiDetectRunner } from '../ai/ai-detect-runner';
-import type { LocalVisionService } from '../ai/local-vision-service';
+import type { LocalVisionResult, LocalVisionService } from '../ai/local-vision-service';
+import { OpenAiCompatProvider, createProviderFromSettings } from '../ai/provider';
 import type { ShotDetectionProvider } from '../ai/provider';
+import type { CloudVisionLabelInput } from '../ai/cloud-vision-labels';
+import { hasInternetConnection } from '../hardware/internet-connection';
 import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
 import type { MediaService } from '../media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
@@ -71,7 +75,14 @@ interface InternalDetectJob {
   boundaryFallback: boolean;
   boundaryWarning: string | null;
   applied?: number;
+  /** S42/Z03：内存与资源治理记录 */
+  memory: DetectJobMemory;
 }
+
+/** 标签预览缓存上限：旧预览自动驱逐，避免长会话内存无界增长（S42/Z03） */
+const LABEL_PREVIEW_CACHE_LIMIT = 8;
+/** 终态任务记录保留上限：超出后驱逐最老的终态任务（S42/Z03） */
+const JOB_HISTORY_LIMIT = 20;
 
 /** S41：标签预览缓存（几何版本快照用于应用时校验 stale） */
 interface LabelPreviewEntry {
@@ -252,9 +263,36 @@ export class DetectService {
       boundaryEngine: null,
       boundaryFallback: false,
       boundaryWarning: null,
+      memory: { peakRssMb: 0, framesExtracted: 0, framesCleaned: false, childProcesses: 0 },
     };
     this.jobs.set(jobId, job);
+    this.evictFinishedJobs();
     return job;
+  }
+
+  /** S42/Z03：终态任务超过上限时驱逐最老记录，jobs Map 不随会话无界增长 */
+  private evictFinishedJobs(): void {
+    if (this.jobs.size <= JOB_HISTORY_LIMIT) return;
+    const terminal = [...this.jobs.values()].filter(
+      (job) => job.status === 'done' || job.status === 'error' || job.status === 'cancelled',
+    );
+    const overflow = this.jobs.size - JOB_HISTORY_LIMIT;
+    for (const job of terminal.slice(0, overflow)) {
+      this.jobs.delete(job.jobId);
+    }
+  }
+
+  /** S42/Z03：记录主进程 RSS 峰值（检测/抽帧/推理各阶段采样） */
+  private sampleMemory(job: InternalDetectJob, stage: string): void {
+    try {
+      const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+      if (rssMb > job.memory.peakRssMb) job.memory.peakRssMb = rssMb;
+      console.info(
+        `[detect][mem] job=${job.jobId} stage=${stage} rss=${rssMb}MB peak=${job.memory.peakRssMb}MB`,
+      );
+    } catch {
+      // 内存采样失败不影响检测
+    }
   }
 
   private assertNoRunningJob(projectId: string): void {
@@ -297,6 +335,7 @@ export class DetectService {
       boundaryEngine: job.boundaryEngine ?? undefined,
       boundaryFallback: job.boundaryFallback,
       boundaryWarning: job.boundaryWarning,
+      memory: { ...job.memory },
     };
   }
 
@@ -455,6 +494,8 @@ export class DetectService {
         },
       );
       this.assertActive(job);
+      job.memory.framesExtracted = extraction.frames.length;
+      this.sampleMemory(job, 'frames-extracted');
       if (extraction.frames.length === 0) {
         throw new DetectError('DETECT_FRAMES_MISSING', '抽帧完成但没有可用帧，请重新检测', {
           jobId: job.jobId,
@@ -546,12 +587,16 @@ export class DetectService {
       job.error = error instanceof Error ? error.message : String(error);
     } finally {
       this.cleanupDetectFrames(framesDir);
+      // S42/Z03：帧目录回收结果计入任务内存治理记录
+      job.memory.framesCleaned = framesDir ? !existsSync(framesDir) : true;
+      this.sampleMemory(job, `job-${job.status}`);
     }
   }
 
   /**
    * S41 标签任务：读取数据库中真实镜头，逐镜头抽取代表帧后交给 Qwen 分析。
    * 结果只缓存为预览（含几何版本快照），不写库。
+   * S42/Z03：策略 = cloud 时改走云端视觉模型（需联网 + 隐私确认），失败按设置回退本地。
    */
   private async runLabelJob(job: InternalDetectJob, shots: Shot[]): Promise<void> {
     let framesDir: string | null = null;
@@ -607,14 +652,53 @@ export class DetectService {
       }
       job.segmentsTotal = items.length;
       this.setProgress(job, 45, 'analyze');
-      const analyses = await localVision.analyze(items, {
-        signal: job.controller.signal,
-        onProgress: (completed, _total, percent) => {
-          job.currentSegment = completed;
-          this.setProgress(job, 45 + Math.round(percent * 0.5), 'analyze');
-        },
-      });
+      this.sampleMemory(job, 'label-frames-ready');
+      const settings = this.ai?.getSettings();
+      const strategy = settings?.recognition?.labelStrategy ?? 'local';
+      const trackBatches = (completed: number): void => {
+        job.memory.labelBatches = Math.max(job.memory.labelBatches ?? 0, Math.ceil(completed / 4));
+      };
+      let analyses: Awaited<ReturnType<LocalVisionService['analyze']>>;
+      if (strategy === 'cloud') {
+        // S42/Z03：云端标签识别——联网 + 隐私确认 + 供应商配置三道门，失败可回退本地
+        try {
+          analyses = await this.analyzeLabelsViaCloud(job, items, settings);
+        } catch (cloudError) {
+          if (job.controller.signal.aborted) throw cloudError;
+          const localReady = localVision.getStatus().available;
+          const canFallback = settings?.ai?.fallbackToOpenCv !== false && localReady;
+          if (!canFallback) {
+            throw cloudError instanceof DetectError
+              ? cloudError
+              : new DetectError(
+                  'CLOUD_LABELS_FAILED',
+                  `云端标签识别失败：${(cloudError as Error).message}`,
+                );
+          }
+          const notice = `云端标签识别失败，已回退本机 Qwen：${(cloudError as Error).message}`;
+          job.boundaryWarning = notice;
+          console.warn(`[labels][cloud] ${notice}`);
+          analyses = await localVision.analyze(items, {
+            signal: job.controller.signal,
+            onProgress: (completed, _total, percent) => {
+              job.currentSegment = completed;
+              trackBatches(completed);
+              this.setProgress(job, 45 + Math.round(percent * 0.5), 'analyze');
+            },
+          });
+        }
+      } else {
+        analyses = await localVision.analyze(items, {
+          signal: job.controller.signal,
+          onProgress: (completed, _total, percent) => {
+            job.currentSegment = completed;
+            trackBatches(completed);
+            this.setProgress(job, 45 + Math.round(percent * 0.5), 'analyze');
+          },
+        });
+      }
       this.assertActive(job);
+      this.sampleMemory(job, `labels-${strategy}-done`);
       const byId = new Map(analyses.map((analysis) => [analysis.id, analysis]));
       const geometry = new Map<string, { startMs: number; endMs: number }>();
       const predictions: LabelShotPrediction[] = [];
@@ -643,6 +727,7 @@ export class DetectService {
         shots: predictions,
       };
       this.labelPreviews.set(job.jobId, { preview, geometry });
+      this.evictLabelPreviews();
       job.status = 'done';
       job.progress = 100;
       this.setProgress(job, 100, 'analyze');
@@ -657,7 +742,83 @@ export class DetectService {
       job.error = error instanceof Error ? error.message : String(error);
     } finally {
       this.cleanupDetectFrames(framesDir);
+      // S42/Z03：代表帧目录回收结果计入任务内存治理记录
+      job.memory.framesCleaned = framesDir ? !existsSync(framesDir) : true;
+      this.sampleMemory(job, `job-${job.status}`);
     }
+  }
+
+  /** S42/Z03：标签预览缓存超过上限时驱逐最老条目 */
+  private evictLabelPreviews(): void {
+    while (this.labelPreviews.size > LABEL_PREVIEW_CACHE_LIMIT) {
+      const oldest = this.labelPreviews.keys().next().value;
+      if (oldest === undefined) break;
+      this.labelPreviews.delete(oldest);
+      console.info(`[labels] evicted oldest label preview: ${oldest}`);
+    }
+  }
+
+  /**
+   * S42/Z03：云端标签识别。四道门按序校验，任何一道不满足都抛结构化错误，
+   * 绝不静默上云：
+   * 1. 本地 AI 未被显式关闭；
+   * 2. 用户已在设置中确认"代表帧会上传"的隐私提示；
+   * 3. 设备在线，断网直接失败且不发出任何请求；
+   * 4. 已配置真实的 OpenAI 兼容供应商（mock 不能冒充云端服务）。
+   */
+  private async analyzeLabelsViaCloud(
+    job: InternalDetectJob,
+    items: Array<{ id: string; index: number; imagePath: string }>,
+    settings: Settings | undefined,
+  ): Promise<LocalVisionResult[]> {
+    if (settings?.ai?.enabled === false) {
+      throw new DetectError('CLOUD_LABELS_DISABLED', '云端标签识别已在设置中关闭');
+    }
+    if (settings?.recognition?.cloudLabelsAck !== true) {
+      throw new DetectError(
+        'CLOUD_LABELS_PRIVACY_ACK_REQUIRED',
+        '云端标签识别会把镜头代表帧上传到配置的供应商；请先在设置中阅读并确认隐私提示',
+      );
+    }
+    if (!await hasInternetConnection(job.controller.signal)) {
+      throw new DetectError(
+        'CLOUD_OFFLINE',
+        '当前设备处于离线状态，云端标签识别不可用；本次不会上传任何数据',
+      );
+    }
+    this.assertActive(job);
+    const provider = createProviderFromSettings(settings?.ai);
+    if (!(provider instanceof OpenAiCompatProvider)) {
+      throw new DetectError(
+        'CLOUD_LABELS_UNCONFIGURED',
+        '尚未配置可用的云端供应商（需要 OpenAI 兼容端点与 API Key）',
+      );
+    }
+    const payload: CloudVisionLabelInput[] = items.map((item) => ({
+      id: item.id,
+      index: item.index,
+      imagePath: item.imagePath,
+    }));
+    console.info(
+      `[labels][cloud] job=${job.jobId} uploading ${payload.length} representative frames (privacy ack ok, online)`,
+    );
+    const results = await provider.analyzeImages(payload, {
+      signal: job.controller.signal,
+      batchSize: Math.max(1, Math.min(4, settings?.ai?.localBatchSize ?? 4)),
+    });
+    // 统一映射为 LocalVisionResult 形状，供标签预览管线复用
+    return results.map((result) => ({
+      id: result.id,
+      index: items.find((item) => item.id === result.id)?.index ?? 0,
+      remark: result.remark,
+      shotSize: result.shotSize,
+      cameraMethod: result.cameraMethod,
+      movement: '',
+      lighting: '',
+      subjects: [],
+      tags: result.tags,
+      confidence: result.confidence,
+    }));
   }
 
   private async annotateWithLocalVision(
@@ -840,6 +1001,7 @@ export class DetectService {
       },
     });
     job.child = child;
+    job.memory.childProcesses += 1;
     this.setProgress(job, 58, 'analyze');
 
     let buffer = '';
@@ -931,6 +1093,11 @@ export class DetectService {
     } finally {
       job.child = null;
       if (!child.killed) child.stdin.end();
+      // S42/Z03：结果/超时/取消/失败后确保 Python 子进程退出，不残留推理进程
+      if (child.exitCode === null && !child.killed) {
+        child.kill();
+        console.info(`[detect] python child terminated after job end: ${job.jobId}`);
+      }
     }
   }
 
@@ -1096,7 +1263,7 @@ function nearestExtractedFrame(
     : null;
 }
 
-function embeddedPythonExecutable(resourcesPath = process.resourcesPath): string | null {
+export function embeddedPythonExecutable(resourcesPath = process.resourcesPath): string | null {
   const packaged = join(resourcesPath, 'python', 'python.exe');
   if (existsSync(packaged)) return packaged;
   const development = join(__dirname, '..', '..', 'resources', 'python', 'python.exe');
@@ -1109,7 +1276,7 @@ export function resolvePythonExecutable(resourcesPath = process.resourcesPath): 
   return process.env['DSH_PYTHON'] || process.env['PYTHON'] || 'python';
 }
 
-function buildPythonEnvironment(pythonPath: string): NodeJS.ProcessEnv {
+export function buildPythonEnvironment(pythonPath: string): NodeJS.ProcessEnv {
   const embedded =
     embeddedPythonExecutable() !== null && pythonPath === embeddedPythonExecutable();
   return {
@@ -1122,7 +1289,7 @@ function buildPythonEnvironment(pythonPath: string): NodeJS.ProcessEnv {
   };
 }
 
-function probePythonEnvironment(pythonPath: string): DetectEnvCheck {
+export function probePythonEnvironment(pythonPath: string): DetectEnvCheck {
   const installed = embeddedPythonExecutable() !== null;
   const probe = spawnSync(
     pythonPath,

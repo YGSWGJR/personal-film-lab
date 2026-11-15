@@ -101,6 +101,7 @@ import {
   settingsSetArgsSchema,
   statsProjectArgsSchema,
   workspaceStateSchema,
+  hardwareScanArgsSchema,
 } from '../shared/schemas';
 import type {
   AiCopyPromptArgs,
@@ -180,6 +181,7 @@ import type {
   ExtractFrameResult,
   FrameInfo,
   GpuStatus,
+  HardwareCapabilityReport,
   ImportResult,
   IpcResult,
   MediaInfo,
@@ -302,6 +304,8 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.MEDIA_QUEUE_LIST]: emptyArgsSchema,
   [IPC.MEDIA_SET_TRANSCODE_CONCURRENCY]: mediaSetConcurrencyArgsSchema,
   [IPC.GPU_GET_STATUS]: emptyArgsSchema,
+  [IPC.HARDWARE_SCAN]: hardwareScanArgsSchema,
+  [IPC.HARDWARE_STATUS]: emptyArgsSchema,
   [IPC.SCOPE_EXTRACT_AUDIO_WAVEFORM]: scopeExtractAudioWaveformArgsSchema,
 
   [IPC.DETECT_RUN]: detectRunArgsSchema,
@@ -531,6 +535,12 @@ const gpuApi = {
   getStatus: () => invoke<GpuStatus>(IPC.GPU_GET_STATUS),
 };
 
+const hardwareApi = {
+  scan: (args?: { force?: boolean }) =>
+    invoke<HardwareCapabilityReport>(IPC.HARDWARE_SCAN, [args ?? {}]),
+  status: () => invoke<HardwareCapabilityReport>(IPC.HARDWARE_STATUS),
+};
+
 const detectApi = {
   checkEnv: () => invoke<DetectEnvCheck>(IPC.DETECT_CHECK_ENV, [{}]),
   run: (args: DetectRunArgs) => invoke<DetectRunResult>(IPC.DETECT_RUN, [args]),
@@ -706,6 +716,7 @@ const api: WindowApi = {
   player: playerApi,
   media: mediaApi,
   gpu: gpuApi,
+  hardware: hardwareApi,
   scope: scopeApi,
   detect: detectApi,
   wall: wallApi,

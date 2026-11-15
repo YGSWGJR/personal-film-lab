@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import TimelineEditor from './TimelineEditor.vue';
 import type { BoundaryChange, TimelineMarker, WorkspaceShot } from '../types/workspace';
@@ -66,6 +66,8 @@ const timecodeEditing = ref(false);
 const timecodeDraft = ref('');
 let volumeWheelCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let resizeObserver: ResizeObserver | null = null;
+/** S42/Z02：具名 resize 处理器（卸载时可移除） */
+let windowResizeHandler: (() => void) | null = null;
 
 const fpsValue = computed(() => (props.player.hasFile ? props.player.fps : 500 / 21));
 const timecode = computed(() => formatTimecodeFF(props.displayTimeMs, fpsValue.value));
@@ -175,19 +177,53 @@ function pushBounds(): void {
   });
 }
 
+// S42/Z02：布局变化后等待两帧 rAF 再测量 videoSlot——轨道高度/窗口尺寸变化的
+// 同一帧里布局可能尚未稳定，直接上报会把旧 bounds 写进原生窗口（压轨道/卡墙）。
+let boundsRaf = 0;
+let boundsStableFrames = 0;
+let boundsPending = false;
+
+function requestPushBounds(): void {
+  if (boundsPending) return;
+  boundsPending = true;
+  boundsStableFrames = 0;
+  const measure = (): void => {
+    boundsStableFrames += 1;
+    if (boundsStableFrames < 2) {
+      boundsRaf = requestAnimationFrame(measure);
+      return;
+    }
+    boundsRaf = 0;
+    boundsPending = false;
+    pushBounds();
+  };
+  boundsRaf = requestAnimationFrame(measure);
+}
+
+// 轨道高度 / 时间密度档位变化会改变 video-slot 的可用空间
+watch(
+  () => [props.trackHeight, props.pxPerSecond] as const,
+  () => requestPushBounds(),
+);
+
 onMounted(async () => {
   await nextTick();
   pushBounds();
-  resizeObserver = new ResizeObserver(pushBounds);
+  resizeObserver = new ResizeObserver(() => requestPushBounds());
   if (videoSlot.value) resizeObserver.observe(videoSlot.value);
-  window.addEventListener('resize', pushBounds);
+  windowResizeHandler = () => requestPushBounds();
+  window.addEventListener('resize', windowResizeHandler);
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
+  if (boundsRaf) cancelAnimationFrame(boundsRaf);
+  boundsRaf = 0;
+  boundsPending = false;
   if (volumeWheelCloseTimer) clearTimeout(volumeWheelCloseTimer);
-  window.removeEventListener('resize', pushBounds);
+  if (windowResizeHandler) window.removeEventListener('resize', windowResizeHandler);
+  windowResizeHandler = null;
 });
 </script>
 
@@ -297,8 +333,8 @@ onBeforeUnmount(() => {
         <button class="transport-button" type="button" title="上一帧 (←)" @click="emit('step', -1)">
           <AppIcon name="step-back" :size="15" />
         </button>
-        <button class="transport-play" type="button" :title="player.paused ? '播放 (空格)' : '暂停 (空格)'" @click="emit('toggle')">
-          <AppIcon :name="player.paused ? 'play' : 'pause'" :size="16" />
+        <button class="transport-play" type="button" :title="player.ended ? '重新播放 (空格)' : player.paused ? '播放 (空格)' : '暂停 (空格)'" @click="emit('toggle')">
+          <AppIcon :name="player.paused || player.ended ? 'play' : 'pause'" :size="16" />
         </button>
         <button class="transport-button" type="button" title="下一帧 (→)" @click="emit('step', 1)">
           <AppIcon name="step-forward" :size="15" />
