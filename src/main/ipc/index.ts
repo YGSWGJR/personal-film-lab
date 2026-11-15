@@ -1014,15 +1014,40 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.STILL_CAPTURE,
-    withEnvelope((args: StillCaptureArgs): Promise<Still> => requireCapture().capture(args)),
+    withEnvelope(async (args: StillCaptureArgs): Promise<Still> => {
+      const still = await requireCapture().capture(args);
+      // S42 v0.5.1：静帧墙已开过则增量上墙（失败不影响截图本身）
+      try {
+        requireData().wallBoards.addStillToWall(still.projectId, still.id);
+      } catch (error) {
+        console.warn(`[still-wall] 增量上墙失败: ${(error as Error).message}`);
+      }
+      return still;
+    }),
   );
   ipcMain.handle(
     IPC.STILL_CAPTURE_AT,
-    withEnvelope((args: StillCaptureAtArgs): Promise<Still> => requireCapture().captureAt(args)),
+    withEnvelope(async (args: StillCaptureAtArgs): Promise<Still> => {
+      const still = await requireCapture().captureAt(args);
+      try {
+        requireData().wallBoards.addStillToWall(still.projectId, still.id);
+      } catch (error) {
+        console.warn(`[still-wall] 增量上墙失败: ${(error as Error).message}`);
+      }
+      return still;
+    }),
   );
   ipcMain.handle(
     IPC.STILL_CREATE,
-    withEnvelope((args: StillCreateArgs): Still => requireData().stills.create(args)),
+    withEnvelope((args: StillCreateArgs): Still => {
+      const still = requireData().stills.create(args);
+      try {
+        requireData().wallBoards.addStillToWall(still.projectId, still.id);
+      } catch (error) {
+        console.warn(`[still-wall] 增量上墙失败: ${(error as Error).message}`);
+      }
+      return still;
+    }),
   );
   ipcMain.handle(
     IPC.STILL_UPDATE,
@@ -1034,11 +1059,24 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireCapture().setAnnotations(args.id, args.annotations),
     ),
   );
+  // S42 v0.5.1：静帧墙——打开（并同步）项目的静帧专用分镜本
+  ipcMain.handle(
+    IPC.STILL_WALL_OPEN,
+    withEnvelope((args: { projectId: string }): { boardId: string; added: number; removed: number; total: number } =>
+      requireData().wallBoards.openStillWall(args.projectId),
+    ),
+  );
   ipcMain.handle(
     IPC.STILL_DELETE,
     withEnvelope((args: { id: string }): { deleted: true } => {
       const data = requireData();
       const projectId = data.stills.get(args.id).projectId;
+      // S42 v0.5.1：静帧墙已开过则先下墙（删节点与拷贝图片）
+      try {
+        data.wallBoards.removeStillFromWall(projectId, args.id);
+      } catch (error) {
+        console.warn(`[still-wall] 下墙失败: ${(error as Error).message}`);
+      }
       data.stills.delete(args.id, [resolveProjectStillDir(projectId)]);
       return { deleted: true };
     }),

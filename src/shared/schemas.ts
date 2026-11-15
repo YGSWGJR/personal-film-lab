@@ -837,3 +837,8 @@ export const statsProjectArgsSchema = z.object({
 });
 
 export const emptyObjectSchema = z.object({}).optional();
+
+/** S42 v0.5.1：静帧墙打开（并同步）入参 */
+export const stillWallOpenArgsSchema = z.object({
+  projectId: z.string().min(1),
+});

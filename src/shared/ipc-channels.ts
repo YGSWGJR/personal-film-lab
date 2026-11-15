@@ -164,6 +164,9 @@ export const IPC = {
   STILL_DELETE: 'still:delete',
   STILL_EVENT_CREATED: 'still:event:created',
 
+  /** S42 v0.5.1：静帧墙——打开（并同步）项目的静帧专用分镜本 */
+  STILL_WALL_OPEN: 'still-wall:open',
+
   TAG_LIST: 'tag:list',
   TAG_CREATE: 'tag:create',
   TAG_UPDATE: 'tag:update',

@@ -80,6 +80,7 @@ import {
   stillListArgsSchema,
   stillSetAnnotationArgsSchema,
   stillUpdateArgsSchema,
+  stillWallOpenArgsSchema,
   storyboardExportArgsSchema,
   tagAssignArgsSchema,
   tagCreateArgsSchema,
@@ -383,6 +384,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.STILL_CAPTURE]: stillCaptureArgsSchema,
   [IPC.STILL_CAPTURE_AT]: stillCaptureAtArgsSchema,
   [IPC.STILL_UPDATE]: stillUpdateArgsSchema,
+  [IPC.STILL_WALL_OPEN]: stillWallOpenArgsSchema,
   [IPC.STILL_SET_ANNOTATION]: stillSetAnnotationArgsSchema,
   [IPC.STILL_DELETE]: idArgsSchema,
 
@@ -652,6 +654,11 @@ const shotApi = {
 const stillApi = {
   list: (args: { projectId?: string; shotId?: string; mediaId?: string }) =>
     invoke<Still[]>(IPC.STILL_LIST, [args]),
+  openStillWall: (args: { projectId: string }) =>
+    invoke<{ boardId: string; added: number; removed: number; total: number }>(
+      IPC.STILL_WALL_OPEN,
+      [args],
+    ),
   get: (args: { id: string }) => invoke<Still>(IPC.STILL_GET, [args]),
   create: (args: StillCreateArgs) => invoke<Still>(IPC.STILL_CREATE, [args]),
   capture: (args: StillCaptureArgs) => invoke<Still>(IPC.STILL_CAPTURE, [args]),

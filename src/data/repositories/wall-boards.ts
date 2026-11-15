@@ -1,6 +1,9 @@
+import { copyFileSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { DataLayer } from '../db';
 import { DataError } from '../errors';
+import type { Still } from '../../shared/types';
 
 export interface WallBoardNode {
   id: string;
@@ -391,6 +394,175 @@ export class WallBoardsRepository {
     const node = this.db.prepare('SELECT id FROM wall_nodes WHERE id = ? AND board_id = ?').get(nodeId, boardId);
     if (!node) {
       throw new DataError('WALL_NODE_NOT_FOUND', '节点不存在或不属于该分镜本', { nodeId, boardId });
+    }
+  }
+
+  // ===== S42 v0.5.1：静帧墙——每项目一面自动同步的专用分镜本 =====
+  // 全部截取静帧（stills.role='main'）以图片节点上墙；功能与分镜墙完全一致
+  // （画布缩放/拖拽/连线/分组/复合/标注/放映/单张模式/导出），由独立板承载。
+  // 静帧 PNG 复制到 <dataRoot>/projects/boards/<boardId>/（asset 白名单内），
+  // 映射记录在 still_wall_nodes（still 删除时经 CASCADE 自动清映射，节点需显式下墙）。
+
+  /** 打开（并全量对账同步）项目的静帧墙 */
+  openStillWall(projectId: string): { boardId: string; added: number; removed: number; total: number } {
+    this.layer.projects.get(projectId);
+    const boardId = this.ensureStillBoard(projectId);
+    const result = this.syncStillWall(projectId, boardId);
+    return { boardId, ...result };
+  }
+
+  /** 新静帧增量上墙（截图 IPC 后调用；静帧墙未开过时不预建板） */
+  addStillToWall(projectId: string, stillId: string): { added: boolean; boardId: string | null } {
+    const boardId = this.stillBoardId(projectId);
+    if (!boardId) return { added: false, boardId: null };
+    const still = this.layer.stills.get(stillId);
+    if (still.role !== 'main') return { added: false, boardId };
+    if (this.isStillMapped(projectId, stillId)) return { added: false, boardId };
+    const added = this.attachStill(projectId, boardId, still, this.stillNodeCount(boardId));
+    return { added, boardId };
+  }
+
+  /** 静帧删除后的增量下墙（删节点与拷贝的图片文件） */
+  removeStillFromWall(projectId: string, stillId: string): { removed: boolean; boardId: string | null } {
+    const boardId = this.stillBoardId(projectId);
+    if (!boardId) return { removed: false, boardId: null };
+    const nodeId = this.stillNodeId(projectId, stillId);
+    if (!nodeId) return { removed: false, boardId: null };
+    this.detachStill(boardId, nodeId);
+    this.db
+      .prepare('DELETE FROM still_wall_nodes WHERE project_id = ? AND still_id = ?')
+      .run(projectId, stillId);
+    return { removed: true, boardId };
+  }
+
+  private stillBoardId(projectId: string): string | null {
+    const row = this.db
+      .prepare('SELECT board_id FROM still_wall_boards WHERE project_id = ?')
+      .get(projectId) as { board_id: string } | undefined;
+    if (!row) return null;
+    // 板被手删时映射记录已随 CASCADE 消失；再防御性确认板本体存在
+    return this.db.prepare('SELECT id FROM wall_boards WHERE id = ?').get(row.board_id)
+      ? row.board_id
+      : null;
+  }
+
+  private ensureStillBoard(projectId: string): string {
+    const existing = this.stillBoardId(projectId);
+    if (existing) return existing;
+    const created = this.createBoard('静帧墙');
+    this.db
+      .prepare(
+        "INSERT INTO still_wall_boards (project_id, board_id, created_at) VALUES (?, ?, strftime('%s','now') * 1000)",
+      )
+      .run(projectId, created.id);
+    return created.id;
+  }
+
+  private isStillMapped(projectId: string, stillId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare('SELECT 1 FROM still_wall_nodes WHERE project_id = ? AND still_id = ?')
+        .get(projectId, stillId),
+    );
+  }
+
+  private stillNodeId(projectId: string, stillId: string): string | null {
+    const row = this.db
+      .prepare('SELECT node_id FROM still_wall_nodes WHERE project_id = ? AND still_id = ?')
+      .get(projectId, stillId) as { node_id: string } | undefined;
+    return row?.node_id ?? null;
+  }
+
+  private stillNodeCount(boardId: string): number {
+    return Number(
+      (this.db.prepare('SELECT COUNT(*) AS c FROM wall_nodes WHERE board_id = ?').get(boardId) as { c: number }).c,
+    );
+  }
+
+  /** 静帧上墙：复制 PNG 到板资产目录 + 建图片节点 + 记映射。返回是否成功 */
+  private attachStill(projectId: string, boardId: string, still: Still, order: number): boolean {
+    const abs = this.resolveStillFile(projectId, still);
+    if (!abs) return false;
+    const boardsDir = join(this.layer.dataRoot, 'projects', 'boards', boardId);
+    mkdirSync(boardsDir, { recursive: true });
+    const fileName = `${randomUUID()}.png`;
+    copyFileSync(abs, join(boardsDir, fileName));
+    const label = still.caption?.trim() || `静帧 #${String(order + 1).padStart(2, '0')}`;
+    const node = this.addNode(boardId, {
+      source: 'image',
+      assetPath: `boards/${boardId}/${fileName}`,
+      title: `${label} · ${(still.timeMs / 1000).toFixed(1)}s`,
+      x: 120 + (order % 6) * 340,
+      y: 120 + Math.floor(order / 6) * 260,
+    });
+    this.db
+      .prepare('INSERT INTO still_wall_nodes (project_id, still_id, node_id) VALUES (?, ?, ?)')
+      .run(projectId, still.id, node.id);
+    return true;
+  }
+
+  /** 下墙：删节点并清理拷贝的 PNG（原静帧文件不动） */
+  private detachStill(boardId: string, nodeId: string): void {
+    const row = this.db.prepare('SELECT asset_path FROM wall_nodes WHERE id = ?').get(nodeId) as
+      | { asset_path: string | null }
+      | undefined;
+    this.deleteNode(nodeId);
+    const assetPath = row?.asset_path;
+    if (assetPath && assetPath.startsWith(`boards/${boardId}/`)) {
+      try {
+        unlinkSync(join(this.layer.dataRoot, 'projects', assetPath));
+      } catch {
+        // 拷贝文件清理失败不阻断
+      }
+    }
+  }
+
+  /** 全量对账：新静帧上墙、已删静帧下墙 */
+  private syncStillWall(projectId: string, boardId: string): { added: number; removed: number; total: number } {
+    const stills = this.layer.stills
+      .list({ projectId })
+      .filter((s) => s.role === 'main')
+      .sort((a, b) => a.timeMs - b.timeMs);
+    const maps = this.db
+      .prepare('SELECT still_id, node_id FROM still_wall_nodes WHERE project_id = ?')
+      .all(projectId) as Array<{ still_id: string; node_id: string }>;
+    const mapped = new Map(maps.map((m) => [m.still_id, m.node_id]));
+    const stillIds = new Set(stills.map((s) => s.id));
+    let added = 0;
+    let removed = 0;
+    // 已删静帧 → 下墙
+    for (const [stillId, nodeId] of [...mapped]) {
+      if (!stillIds.has(stillId)) {
+        this.detachStill(boardId, nodeId);
+        this.db
+          .prepare('DELETE FROM still_wall_nodes WHERE project_id = ? AND still_id = ?')
+          .run(projectId, stillId);
+        mapped.delete(stillId);
+        removed += 1;
+      }
+    }
+    // 新静帧 → 上墙（按 timeMs 顺序追加网格位）
+    let order = mapped.size;
+    for (const still of stills) {
+      if (mapped.has(still.id)) continue;
+      if (this.attachStill(projectId, boardId, still, order)) {
+        order += 1;
+        added += 1;
+      }
+    }
+    return { added, removed, total: stills.length };
+  }
+
+  private resolveStillFile(projectId: string, still: Still): string | null {
+    const raw = still.filePath;
+    if (!raw) return null;
+    const abs = /^[a-zA-Z]:[\\/]/u.test(raw) || raw.startsWith('/')
+      ? raw
+      : join(this.layer.dataRoot, 'projects', projectId, raw);
+    try {
+      return statSync(abs).isFile() ? abs : null;
+    } catch {
+      return null;
     }
   }
 }

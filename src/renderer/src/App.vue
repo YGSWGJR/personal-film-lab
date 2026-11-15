@@ -3401,6 +3401,28 @@ async function openProjectWall(): Promise<void> {
   wallOpen.value = true;
 }
 
+/** S42 v0.5.1：静帧墙——全部截取静帧自动同步为独立板节点，功能与分镜墙一致 */
+async function openStillWall(): Promise<void> {
+  if (demoMode.value || !activeProject.value) {
+    showToast('请先导入影片并截取静帧，再打开静帧墙。');
+    return;
+  }
+  projectionManuallyExited.value = false;
+  const result = await window.api.still.openStillWall({ projectId: activeProject.value.id });
+  if (!result.ok) {
+    showToast(result.error.message, 'error', result.error.code);
+    return;
+  }
+  // 无条件加载节点（重开且无变化时 boardNodes 也可能为空）
+  await loadBoardNodes();
+  wallMode.value = 'independent';
+  wallBoardId.value = result.data.boardId;
+  wallBoardName.value = '静帧墙';
+  const base = settings.value?.wallViewState?.[activeProject.value.id] ?? null;
+  wallViewState.value = base;
+  wallOpen.value = true;
+}
+
 async function pickIndependentBoard(boardId: string | null): Promise<void> {
   wallPickerOpen.value = false;
   await openIndependentBoard(boardId);
@@ -4767,6 +4789,15 @@ onBeforeUnmount(() => {
           @click="openWall"
         >
           分镜墙
+        </button>
+        <button
+          class="nav-item"
+          type="button"
+          :disabled="demoMode"
+          title="全部截取静帧自动上墙，功能与分镜墙一致"
+          @click="openStillWall"
+        >
+          静帧墙
         </button>
         <button class="nav-item" type="button" @click="captureStill">
           <AppIcon name="camera" :size="16" />

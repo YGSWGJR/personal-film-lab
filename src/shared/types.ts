@@ -1771,6 +1771,10 @@ export interface ShotApi {
 export interface StillApi {
   list(args: { projectId?: string; shotId?: string; mediaId?: string }): Promise<IpcResult<Still[]>>;
   get(args: { id: string }): Promise<IpcResult<Still>>;
+  /** S42 v0.5.1：打开（并同步）项目的静帧墙，返回独立板 id 与同步计数 */
+  openStillWall(args: { projectId: string }): Promise<
+    IpcResult<{ boardId: string; added: number; removed: number; total: number }>
+  >;
   create(args: StillCreateArgs): Promise<IpcResult<Still>>;
   capture(args: StillCaptureArgs): Promise<IpcResult<Still>>;
   captureAt(args: StillCaptureAtArgs): Promise<IpcResult<Still>>;

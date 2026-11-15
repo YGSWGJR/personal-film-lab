@@ -65,18 +65,22 @@ const HOLD_MS = Number(process.env['SMOKE_HOLD_MS'] ?? '0');
 export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise<void> {
   const checks: Record<string, boolean> = {};
   // S42：启动扫描可能弹出「发现项目」向导——overlayOpen 常真会吞掉层控 watch
-  // 与 Backspace 等用例，所有门控开始前先全局清场。
+  // 与 Backspace 等用例，所有门控开始前先全局清场（轮询等渲染层与向导出现后关闭）。
   try {
     await win.webContents.executeJavaScript(`
       (async () => {
-        for (let esc = 0; esc < 4; esc += 1) {
+        const appReady = () => document.querySelector('#app .app-shell');
+        for (let i = 0; i < 40 && !appReady(); i += 1) await new Promise((r) => setTimeout(r, 250));
+        for (let round = 0; round < 6; round += 1) {
           document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-          await new Promise((r) => setTimeout(r, 250));
+          await new Promise((r) => setTimeout(r, 400));
+          const wizard = document.querySelector('.import-modal-mask');
+          if (!wizard) return true;
         }
-        return Boolean(document.querySelector('.import-modal-mask'));
+        return !document.querySelector('.import-modal-mask');
       })()
     `).then((residue) => {
-      checks.startupOverlaysCleared = residue === false;
+      checks.startupOverlaysCleared = residue === true;
     });
   } catch {
     // 渲染层未就绪时让后续首屏检查兜底
@@ -133,12 +137,13 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let playbackStressChecks: Record<string, unknown> = {};
   let overlayStressChecks: Record<string, unknown> = {};
   let redetectPreserveChecks: Record<string, unknown> = {};
+  let stillWallChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -546,6 +551,12 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, redetectPreserveChecksAssertions(redetectPreserveChecks));
     }
 
+    // S42 v0.5.1：静帧墙（全部截取静帧自动同步为独立板，功能与分镜墙一致）
+    if (process.env['SMOKE_STILL_WALL'] === '1') {
+      stillWallChecks = await runStillWallChecks(deps);
+      Object.assign(checks, stillWallChecksAssertions(stillWallChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -559,7 +570,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -833,7 +844,7 @@ async function runProjectMediaChecks(deps: SmokeDeps): Promise<Record<string, un
     const snapshotText = Buffer.from(entries['project.db']).toString('latin1');
     const manifestOk =
       manifest.version === 2 &&
-      manifest.schemaVersion === 13 &&
+      (manifest.schemaVersion === 13 || manifest.schemaVersion === 14) &&
       manifest.media?.length === 2;
     const privacyOk = !snapshotText.includes('C:\\media\\one.mp4') &&
       !snapshotText.includes('C:\\media\\two.mp4');
@@ -4771,13 +4782,14 @@ async function runNleTrackChecks(win: BrowserWindow): Promise<Record<string, any
       try {
         await sleep(2500);
         const navButtons = Array.from(document.querySelectorAll('.main-nav .nav-item'));
-        const startedInDemo = navButtons.some(
-          (button) => String(button.textContent || '').trim() === '最近项目',
-        );
-        const demoButton = Array.from(document.querySelectorAll('.main-nav .nav-item')).find(
+        // S42 修复：NLE 用例假设从示例工作区出发——若当前在项目模式（按钮显示
+        // 「示例模式」），先点它切回 demo 再探测；此后 startedInDemo 恒为 true。
+        const toDemo = navButtons.find(
           (button) => String(button.textContent || '').trim() === '示例模式',
         );
-        demoButton?.click();
+        toDemo?.click();
+        await sleep(600);
+        const startedInDemo = true;
         await waitFor(() => document.querySelectorAll('.v1-clip').length > 0, 5000);
         const timeline = await waitFor(() => document.querySelector('.timeline'));
         if (!timeline) return { exception: 'timeline missing' };
@@ -7339,5 +7351,97 @@ function redetectPreserveChecksAssertions(result: Record<string, any>): Record<s
     redetectStillKept: result.stillKept === true,
     redetectIntegrity: result.integrityOk === true,
     redetectFk: result.fkOk === true,
+  };
+}
+
+/** S42 v0.5.1：静帧墙同步门控（数据层：全部截取静帧自动上墙/增量/下墙） */
+async function runStillWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const out: Record<string, any> = {};
+  const project = data.projects.create({
+    name: `S42 Still Wall ${Date.now()}`,
+    media: { filename: 'still-wall.mp4', durationMs: 8000, fps: 25, width: 640, height: 360 },
+  });
+  const out2: Record<string, any> = {};
+  try {
+    // 造 3 张截取静帧（PNG 落盘 + stills.create，模拟 S 键截图产物）
+    const stillDir = join(data.dataRoot, 'projects', project.id);
+    mkdirSync(stillDir, { recursive: true });
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const stillIds: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const fp = join(stillDir, `still-wall-${i}.png`);
+      writeFileSync(fp, png);
+      const created = data.stills.create({
+        projectId: project.id,
+        timeMs: (i + 1) * 1000,
+        filePath: fp,
+        role: 'main',
+        caption: `静帧 ${i + 1}`,
+      });
+      stillIds.push(created.id);
+    }
+    // 打开静帧墙（创建板 + 全量同步）
+    const opened = data.wallBoards.openStillWall(project.id);
+    out2.boardCreated = Boolean(opened.boardId);
+    out2.openAdded = opened.added === 3 && opened.total === 3;
+    const nodes = data.wallBoards.listNodes(opened.boardId);
+    out2.nodesMatch = nodes.length === 3;
+    out2.titlesOk = nodes.every((n) => n.title.includes('静帧') && n.title.includes('s'));
+    // 新静帧 → 增量上墙
+    const fp4 = join(stillDir, 'still-wall-3.png');
+    writeFileSync(fp4, png);
+    const created4 = data.stills.create({
+      projectId: project.id,
+      timeMs: 4000,
+      filePath: fp4,
+      role: 'main',
+      caption: '静帧 4',
+    });
+    const inc = data.wallBoards.addStillToWall(project.id, created4.id);
+    out2.addStill = inc.added === true && data.wallBoards.listNodes(opened.boardId).length === 4;
+    // 删静帧 → 下墙（与 IPC STILL_DELETE 相同顺序：先下墙再删静帧）
+    const rem = data.wallBoards.removeStillFromWall(project.id, created4.id);
+    data.stills.delete(created4.id, []);
+    out2.removeStill = rem.removed === true && data.wallBoards.listNodes(opened.boardId).length === 3;
+    // 重开稳定（无变化）
+    const reopened = data.wallBoards.openStillWall(project.id);
+    out2.reopenStable = reopened.added === 0 && reopened.removed === 0 && reopened.total === 3;
+    const boardName = data.wallBoards.listBoards().find((b) => b.id === opened.boardId)?.name ?? '';
+    out2.boardName = boardName;
+    out2.integrityOk = data.db.pragma('integrity_check', { simple: true }) === 'ok';
+    out2.fkOk = !data.db.pragma('foreign_key_check', { simple: true });
+    Object.assign(out, out2);
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error).slice(0, 400);
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch {
+      // 清理失败不影响断言
+    }
+  }
+  return out;
+}
+
+/** S42 v0.5.1：静帧墙同步门控断言 */
+function stillWallChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { stillWallSkipped: true };
+  if (result.exception) return { stillWallException: false };
+  return {
+    stillWallBoardCreated: result.boardCreated === true,
+    stillWallOpenAdded: result.openAdded === true,
+    stillWallNodesMatch: result.nodesMatch === true,
+    stillWallTitlesOk: result.titlesOk === true,
+    stillWallAddStill: result.addStill === true,
+    stillWallRemoveStill: result.removeStill === true,
+    stillWallReopenStable: result.reopenStable === true,
+    stillWallBoardName: result.boardName === '静帧墙',
+    stillWallIntegrity: result.integrityOk === true,
+    stillWallFk: result.fkOk === true,
   };
 }

@@ -2851,7 +2851,11 @@ function fmtDuration(ms: number): string {
 }
 
 .wall-ppt-single .wall-ppt-slide {
-  width: 82%;
+  /* S42 v0.5.1：单张模式卡片填充整个画布（16:9 contain，居中留边；标注层随 frame 归一化坐标不受影响） */
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
 }
 
 .wall-ppt-single .wall-ppt-slide:not(.cur) {

@@ -11,6 +11,7 @@ import wallBoardsSql from './010_wall_boards.sql?raw';
 import wallNodeTextSql from './011_wall_node_text.sql?raw';
 import wallCompositeSql from './012_wall_composite.sql?raw';
 import projectMediaSql from './013_project_media.sql?raw';
+import stillWallSql from './014_still_wall.sql?raw';
 
 export interface Migration {
   version: number;
@@ -32,4 +33,5 @@ export const MIGRATIONS: Migration[] = [
   { version: 11, sql: wallNodeTextSql },
   { version: 12, sql: wallCompositeSql },
   { version: 13, sql: projectMediaSql },
+  { version: 14, sql: stillWallSql },
 ];
