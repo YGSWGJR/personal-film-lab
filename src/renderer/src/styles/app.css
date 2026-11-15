@@ -599,7 +599,6 @@ select:focus-visible {
 }
 
 @media (max-height: 720px) {
-@media (max-height: 720px) {
   .app-shell {
     grid-template-rows: 40px minmax(0, 1fr) 24px;
   }

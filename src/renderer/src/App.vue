@@ -227,6 +227,7 @@ const settingsSaving = ref(false);
 const settingsError = ref<string | null>(null);
 /** S42/B05：品牌区反馈入口弹层（GitHub Issues；无真实邮箱时不提供邮箱行） */
 const feedbackOpen = ref(false);
+const feedbackTrigger = ref<HTMLButtonElement | null>(null);
 /** S42/Z04：硬件能力报告（启动时读取一次缓存；设置/检测弹窗可手动重扫） */
 const hardwareReport = ref<HardwareCapabilityReport | null>(null);
 /** S36-1b：统一危险删除确认弹窗状态（Promise 风格，await 确认结果） */
@@ -384,6 +385,7 @@ const detectionResultOpen = computed(() => detectionOpen.value && !detecting.val
 const overlayOpen = computed(
   () =>
     wallOpen.value ||
+    wallPickerOpen.value ||
     detectionResultOpen.value ||
     exportOpen.value ||
     termEditorOpen.value ||
@@ -2305,9 +2307,12 @@ async function loadSettings(): Promise<void> {
 
 /** S42/B05：反馈弹层打开时把焦点落到主操作（人类点击习惯：Enter/Space 即可达） */
 watch(feedbackOpen, async (open) => {
-  if (!open) return;
   await nextTick();
-  (document.querySelector('.feedback-issues') as HTMLElement | null)?.focus();
+  if (open) {
+    document.querySelector<HTMLElement>('.feedback-issues')?.focus();
+  } else {
+    feedbackTrigger.value?.focus({ preventScroll: true });
+  }
 });
 
 /** S42/Z04：读取硬件能力报告（主进程 60s 缓存；无缓存自动扫描） */
@@ -3899,6 +3904,10 @@ function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
 
 /** 0.3.0：按层级关闭最上层的弹层（Esc）；返回是否有弹层被关闭 */
 function closeTopOverlay(): boolean {
+  if (wallPickerOpen.value) {
+    wallPickerOpen.value = false;
+    return true;
+  }
   if (wallOpen.value) {
     wallOpen.value = false;
     return true;
@@ -4349,6 +4358,7 @@ onBeforeUnmount(() => {
         </div>
         <!-- S42/B05：品牌区反馈入口——点击 / Enter / Space 打开，Esc 关闭 -->
         <button
+          ref="feedbackTrigger"
           class="brand-feedback"
           type="button"
           title="问题反馈（GitHub Issues）"
@@ -4635,7 +4645,7 @@ onBeforeUnmount(() => {
     />
 
     <div v-if="wallPickerOpen" class="node-edit-mask" @pointerdown.self="wallPickerOpen = false">
-      <div class="node-edit-card">
+      <div class="node-edit-card" role="dialog" aria-modal="true" aria-label="分镜墙">
         <header>
           <h3>分镜墙</h3>
           <button type="button" aria-label="关闭" @click="wallPickerOpen = false">×</button>
@@ -4874,11 +4884,11 @@ onBeforeUnmount(() => {
     <transition name="modal" :duration="{ enter: 220, leave: 220 }">
       <div
         v-if="feedbackOpen"
-        class="modal-mask feedback-mask"
+        class="feedback-mask"
         @pointerdown.self="feedbackOpen = false"
       >
         <section class="feedback-modal" role="dialog" aria-modal="true" aria-label="问题反馈">
-          <header class="modal-head">
+          <header class="feedback-head">
             <div>
               <p>FEEDBACK</p>
               <h2>问题反馈</h2>
@@ -5246,19 +5256,76 @@ onBeforeUnmount(() => {
 
 /* S42/B05：反馈弹层 */
 .feedback-mask {
+  position: fixed;
+  inset: 0;
   z-index: 92;
+  display: grid;
+  padding: 16px;
+  background: rgba(2, 6, 23, 0.64);
+  place-items: center;
 }
 
 .feedback-modal {
   display: flex;
   width: 480px;
+  max-width: 100%;
   max-height: calc(100vh - 32px);
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg-panel);
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.5);
+}
+
+.feedback-head {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.feedback-head p,
+.feedback-head h2 {
+  margin: 0 0 4px;
+}
+
+.feedback-head p,
+.feedback-head span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.feedback-head h2 {
+  font-size: 14px;
+}
+
+.feedback-head > button {
+  flex: 0 0 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 20px;
+}
+
+.feedback-head > button:hover {
+  background: var(--bg-hover);
+}
+
+.feedback-mask.modal-enter-active,
+.feedback-mask.modal-leave-active {
+  transition: opacity 220ms ease;
+}
+
+.feedback-mask.modal-enter-from,
+.feedback-mask.modal-leave-to {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .feedback-body {
