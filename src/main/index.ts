@@ -45,17 +45,20 @@ const IS_AI_MCP = process.argv.includes('--ai-mcp');
  */
 const CUSTOM_USER_DATA = 'G:\\拉片\\软件数据';
 const DEFAULT_USER_DATA = app.getPath('userData');
+const userDataOverride = process.env['DSH_USER_DATA_ROOT']?.trim();
 try {
-  mkdirSync(CUSTOM_USER_DATA, { recursive: true });
-  app.setPath('userData', CUSTOM_USER_DATA);
+  const userData = userDataOverride ? resolve(userDataOverride) : CUSTOM_USER_DATA;
+  mkdirSync(userData, { recursive: true });
+  app.setPath('userData', userData);
 } catch (error) {
+  if (userDataOverride) throw error;
   console.warn(`[userData] 自定义 userData 不可用，回退默认：${(error as Error).message}`);
 }
 const ACTIVE_USER_DATA = app.getPath('userData');
 
 /** 首次启动时把旧 userData 的 settings.json 迁移到新位置（只迁必要配置，缓存垃圾不迁）。 */
 function migrateUserDataSettingsOnce(): void {
-  if (DEFAULT_USER_DATA === ACTIVE_USER_DATA) return;
+  if (userDataOverride || DEFAULT_USER_DATA === ACTIVE_USER_DATA) return;
   const newSettings = resolve(ACTIVE_USER_DATA, 'settings.json');
   const oldSettings = resolve(DEFAULT_USER_DATA, 'settings.json');
   if (!existsSync(newSettings) && existsSync(oldSettings)) {
