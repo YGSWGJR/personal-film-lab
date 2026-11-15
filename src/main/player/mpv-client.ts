@@ -185,8 +185,9 @@ export class MpvClient {
     this.fileLoaded = true;
   }
 
-  play(): Promise<void> {
-    return this.setPaused(false);
+  async play(): Promise<void> {
+    if (this.isEnded()) await this.seekMs(0);
+    await this.setPaused(false);
   }
 
   pause(): Promise<void> {
@@ -194,8 +195,11 @@ export class MpvClient {
   }
 
   async toggle(): Promise<void> {
-    const paused = this.getFlag('pause') ?? true;
-    await this.setPaused(!paused);
+    if (this.isPaused() || this.isEnded()) {
+      await this.play();
+    } else {
+      await this.pause();
+    }
   }
 
   async seekMs(timeMs: number, exact = true): Promise<void> {
@@ -474,6 +478,9 @@ export class MpvClient {
     } else {
       this.properties.set(name, value);
     }
+    // keep-open holds the final frame, so reaching EOF can change the property
+    // without immediately emitting END_FILE.
+    if (name === 'eof-reached' && typeof value === 'boolean') this.onEnded?.();
 
     for (const waiter of Array.from(this.waiters)) {
       if (waiter.name !== name) continue;

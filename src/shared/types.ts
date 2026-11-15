@@ -29,8 +29,20 @@ export type RecognitionEngine = 'ai' | 'opencv';
 /** S39：镜头边界引擎。与 RecognitionEngine 分离，后者继续控制 Qwen 语义标注。 */
 export type ShotBoundaryEngine = 'hybrid' | 'transnetv2' | 'opencv';
 
+/**
+ * S42/Z03：标签识别策略。
+ * local = 本机 Qwen3-VL（代表帧不出本机）；cloud = 已配置的 OpenAI 兼容供应商
+ * （代表帧上传前必须联网且用户已确认隐私提示）。云端只用于标签识别，
+ * 边界切分（hybrid/transnetv2/opencv）永远本地执行，不提供"云端切分"选项。
+ */
+export type LabelStrategy = 'local' | 'cloud';
+
 export interface RecognitionSettings {
   engine: RecognitionEngine;
+  /** S42/Z03：标签识别策略，缺省 local */
+  labelStrategy?: LabelStrategy;
+  /** S42/Z03：用户已确认"云端标签识别会上传镜头代表帧"的隐私提示 */
+  cloudLabelsAck?: boolean;
 }
 
 /** S36-7：单个 AI 检测供应商配置。apiKey 为 safeStorage 密文。 */
@@ -85,8 +97,8 @@ export interface LocalAiStatus {
   error: string | null;
 }
 
-/** S36-3a：轨道高度档位（px）；S37 起支持折叠到 1px。 */
-export const TRACK_HEIGHT_LEVELS: readonly number[] = [1, 48, 96, 144, 192, 240];
+/** S36-3a：轨道高度档位（px），最低保持 48px，保证轨道内容可操作。 */
+export const TRACK_HEIGHT_LEVELS: readonly number[] = [48, 96, 144, 192, 240];
 
 /** S36-3b：横向时间密度 6 档（px/s）。 */
 export const PX_PER_SEC_LEVELS: readonly number[] = [24, 48, 96, 192, 384, 768];
@@ -365,12 +377,27 @@ export interface WallApi {
 
 export interface WorkspaceState {
   projectId: string | null;
+  activeMediaId?: string | null;
   timeMs: number;
   selectedShotId: string | null;
   leftCollapsed: boolean;
   rightCollapsed: boolean;
   volume: number;
   shotScrollTop?: number;
+  mediaSessions?: Record<
+    string,
+    {
+      timeMs: number;
+      selectedShotId: string | null;
+      shotScrollTop?: number;
+      detectionState?: {
+        detectionResult?: unknown;
+        boundaryNotice?: unknown;
+        labelPreview?: unknown;
+        detectionJobId?: string | null;
+      };
+    }
+  >;
 }
 
 export interface SessionApi {
@@ -696,6 +723,7 @@ export interface WindowApi {
   stats: StatsApi;
   ai: AiApi;
   wall: WallApi;
+  hardware: HardwareApi;
 }
 /** ---------- 数据层（S01 §7 / §7.4） ---------- */
 
@@ -717,6 +745,16 @@ export interface ProjectMedia {
   audioCodec: string | null;
   sizeBytes: number | null;
   proxyPath: string | null;
+}
+
+export interface ProjectMediaItem extends ProjectMedia {
+  id: string;
+  projectId: string;
+  index: number;
+  source: ProjectSource;
+  detectOptions: DetectOptions;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DetectWeights {
@@ -759,7 +797,10 @@ export interface Project {
   id: string;
   name: string;
   source: ProjectSource;
+  /** 兼容字段：始终投影为当前激活媒体的元信息。 */
   media: ProjectMedia;
+  activeMediaId: string | null;
+  mediaItems: ProjectMediaItem[];
   detectOptions: DetectOptions;
   createdAt: string;
   updatedAt: string;
@@ -770,6 +811,29 @@ export interface ProjectCreateArgs {
   source?: Partial<ProjectSource>;
   media?: Partial<ProjectMedia>;
   detectOptions?: Partial<DetectOptions>;
+}
+
+export interface ProjectMediaAddArgs {
+  projectId: string;
+  source?: Partial<ProjectSource>;
+  media?: Partial<ProjectMedia>;
+  detectOptions?: Partial<DetectOptions>;
+  activate?: boolean;
+}
+
+export interface ProjectMediaUpdateArgs {
+  projectId: string;
+  mediaId: string;
+  patch: {
+    source?: Partial<ProjectSource>;
+    media?: Partial<ProjectMedia>;
+    detectOptions?: Partial<DetectOptions>;
+  };
+}
+
+export interface ProjectMediaActivateArgs {
+  projectId: string;
+  mediaId: string;
 }
 
 export interface ProjectUpdateArgs {
@@ -810,6 +874,7 @@ export interface ProjectOpenResult {
 export interface Shot {
   id: string;
   projectId: string;
+  mediaId?: string;
   index: number;
   startMs: number;
   endMs: number;
@@ -831,6 +896,7 @@ export interface Shot {
 export interface Scene {
   id: string;
   projectId: string;
+  mediaId?: string;
   index: number;
   label: string | null;
   startMs: number;
@@ -863,6 +929,19 @@ export interface DetectResult {
 
 export type DetectJobStatus = 'queued' | 'running' | 'done' | 'cancelled' | 'error';
 
+/**
+ * S42/Z03：检测任务内存与资源治理记录。
+ * peakRssMb = 主进程 RSS 峰值；framesExtracted/framesCleaned = 本任务抽帧数量与回收；
+ * childProcesses = 子进程（Python / 推理）启动数；labelBatches = 标签任务完成的批次数。
+ */
+export interface DetectJobMemory {
+  peakRssMb: number;
+  framesExtracted: number;
+  framesCleaned: boolean;
+  childProcesses: number;
+  labelBatches?: number;
+}
+
 export interface DetectJobSnapshot {
   jobId: string;
   projectId: string;
@@ -884,6 +963,8 @@ export interface DetectJobSnapshot {
   pipeline: DetectPipeline;
   /** S41：边界任务自动应用的镜头数量 */
   applied?: number;
+  /** S42/Z03：内存与资源回收记录 */
+  memory?: DetectJobMemory;
 }
 
 export interface DetectRunArgs {
@@ -1364,6 +1445,7 @@ export interface AiJobSnapshot {
 
 export interface ShotCreateArgs {
   projectId: string;
+  mediaId?: string | null;
   startMs: number;
   endMs: number;
   index?: number;
@@ -1434,6 +1516,7 @@ export interface Annotation {
 export interface Still {
   id: string;
   projectId: string;
+  mediaId?: string;
   shotId: string | null;
   timeMs: number;
   filePath: string;
@@ -1449,6 +1532,7 @@ export interface Still {
 
 export interface StillCreateArgs {
   projectId: string;
+  mediaId?: string | null;
   shotId?: string | null;
   timeMs: number;
   filePath: string;
@@ -1462,6 +1546,7 @@ export interface StillCreateArgs {
 
 export interface StillCaptureArgs {
   projectId: string;
+  mediaId?: string | null;
   timeMs: number;
   shotId?: string | null;
   caption?: string | null;
@@ -1480,6 +1565,7 @@ export interface StillSetAnnotationArgs {
 export interface StillUpdateArgs {
   id: string;
   patch: {
+    mediaId?: string;
     shotId?: string | null;
     timeMs?: number;
     filePath?: string;
@@ -1660,6 +1746,10 @@ export interface ProjectApi {
   list(): Promise<IpcResult<Project[]>>;
   get(args: { id: string }): Promise<IpcResult<Project>>;
   update(args: ProjectUpdateArgs): Promise<IpcResult<Project>>;
+  listMedia(args: { projectId: string }): Promise<IpcResult<ProjectMediaItem[]>>;
+  addMedia(args: ProjectMediaAddArgs): Promise<IpcResult<ProjectMediaItem>>;
+  updateMedia(args: ProjectMediaUpdateArgs): Promise<IpcResult<ProjectMediaItem>>;
+  activateMedia(args: ProjectMediaActivateArgs): Promise<IpcResult<Project>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
   save(args: ProjectSaveArgs): Promise<IpcResult<ProjectSaveResult>>;
   saveAs(args: { id: string; targetPath: string }): Promise<IpcResult<ProjectSaveResult>>;
@@ -1667,7 +1757,7 @@ export interface ProjectApi {
 }
 
 export interface ShotApi {
-  list(args: { projectId: string }): Promise<IpcResult<Shot[]>>;
+  list(args: { projectId: string; mediaId?: string }): Promise<IpcResult<Shot[]>>;
   get(args: { id: string }): Promise<IpcResult<Shot>>;
   create(args: ShotCreateArgs): Promise<IpcResult<Shot>>;
   update(args: ShotUpdateArgs): Promise<IpcResult<Shot>>;
@@ -1679,7 +1769,7 @@ export interface ShotApi {
 }
 
 export interface StillApi {
-  list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Still[]>>;
+  list(args: { projectId?: string; shotId?: string; mediaId?: string }): Promise<IpcResult<Still[]>>;
   get(args: { id: string }): Promise<IpcResult<Still>>;
   create(args: StillCreateArgs): Promise<IpcResult<Still>>;
   capture(args: StillCaptureArgs): Promise<IpcResult<Still>>;
@@ -1747,4 +1837,93 @@ export interface StatsApi {
   tagDistribution(args: { projectId: string }): Promise<IpcResult<StatsTagDistributionItem[]>>;
   rhythm(args: { projectId: string }): Promise<IpcResult<StatsRhythmPoint[]>>;
   progress(args: { projectId: string }): Promise<IpcResult<StatsProgress>>;
+}
+
+/** ---------- S42/Z04：硬件能力扫描 ---------- */
+
+/** 硬件能力状态：ready=满足；其余为结构化的不可用原因分类 */
+export type HardwareCapabilityStatus =
+  | 'ready'
+  | 'vram-insufficient'
+  | 'model-missing'
+  | 'runtime-missing'
+  | 'unconfigured'
+  | 'offline'
+  | 'privacy-ack-required'
+  | 'disabled';
+
+export interface HardwareCapabilityState {
+  status: HardwareCapabilityStatus;
+  /** 用户可读的当前状态说明（含缺失项 / 数值） */
+  reason: string;
+  /** 不可用时的修复指引（可空） */
+  fix: string | null;
+}
+
+export interface HardwareRamInfo {
+  totalMb: number;
+  freeMb: number;
+}
+
+export interface HardwareGpuInfo {
+  /** nvidia-smi 里的 GPU 名称；无独立 GPU 时为 null */
+  name: string | null;
+  driver: string | null;
+  vramTotalMb: number | null;
+  vramUsedMb: number | null;
+  vramFreeMb: number | null;
+  source: 'nvidia-smi' | 'none';
+  error: string | null;
+}
+
+export interface HardwarePythonInfo {
+  path: string | null;
+  version: string | null;
+  embedded: boolean;
+  packages: {
+    opencv: boolean;
+    numpy: boolean;
+    onnxRuntime: boolean;
+  };
+  error: string | null;
+}
+
+export interface HardwareModelInfo {
+  path: string | null;
+  present: boolean;
+  sizeBytes: number | null;
+}
+
+export interface HardwareNetworkInfo {
+  online: boolean;
+  checkedAt: string;
+}
+
+/** 五类状态对应的四条能力线（Z04）：边界混合 / OpenCV 边界 / 本地标签 / 云端标签 */
+export interface HardwareCapabilities {
+  boundaryHybrid: HardwareCapabilityState;
+  boundaryOpencv: HardwareCapabilityState;
+  labelsLocal: HardwareCapabilityState;
+  labelsCloud: HardwareCapabilityState;
+}
+
+export interface HardwareCapabilityReport {
+  scannedAt: string;
+  durationMs: number;
+  ram: HardwareRamInfo;
+  gpu: HardwareGpuInfo;
+  python: HardwarePythonInfo;
+  models: {
+    transnetv2: HardwareModelInfo;
+    qwen: HardwareModelInfo;
+  };
+  network: HardwareNetworkInfo;
+  capabilities: HardwareCapabilities;
+}
+
+export interface HardwareApi {
+  /** 触发一次扫描（force=true 忽略缓存，供"重新扫描"按钮使用） */
+  scan(args?: { force?: boolean }): Promise<IpcResult<HardwareCapabilityReport>>;
+  /** 读取缓存报告；无缓存时自动扫描一次 */
+  status(): Promise<IpcResult<HardwareCapabilityReport>>;
 }

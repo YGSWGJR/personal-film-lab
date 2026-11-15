@@ -7,6 +7,7 @@ import { unzipSync } from 'fflate';
 import type { DataLayer } from '../data/db';
 import { DataError } from '../data/errors';
 import { removeProjectDir, removeProjectFiles } from '../data/paths';
+import { ProjectPackageService } from '../data/project-package';
 import { IPC } from '../shared/ipc-channels';
 import { withEnvelope } from '../shared/ipc-result';
 import type { WorkspaceState, WallBoardFilePayload } from '../shared/types';
@@ -40,6 +41,7 @@ interface SmokeDeps {
   getMedia?(): MediaService | null;
   getSession?(): SessionService | null;
   getLocalAi?(): LocalVisionService | null;
+  getHardware?(): import('./hardware/hardware-capability-service').HardwareCapabilityService | null;
 }
 
 interface RendererState {
@@ -62,6 +64,23 @@ const HOLD_MS = Number(process.env['SMOKE_HOLD_MS'] ?? '0');
  */
 export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise<void> {
   const checks: Record<string, boolean> = {};
+  // S42：启动扫描可能弹出「发现项目」向导——overlayOpen 常真会吞掉层控 watch
+  // 与 Backspace 等用例，所有门控开始前先全局清场。
+  try {
+    await win.webContents.executeJavaScript(`
+      (async () => {
+        for (let esc = 0; esc < 4; esc += 1) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        return Boolean(document.querySelector('.import-modal-mask'));
+      })()
+    `).then((residue) => {
+      checks.startupOverlaysCleared = residue === false;
+    });
+  } catch {
+    // 渲染层未就绪时让后续首屏检查兜底
+  }
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
   let mediaChecks: Record<string, unknown> = {};
@@ -70,6 +89,9 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let sessionChecks: Record<string, unknown> = {};
   let dataChecks: Record<string, unknown> = {};
   let importChecks: Record<string, unknown> = {};
+  let projectMediaChecks: Record<string, unknown> = {};
+  let s42WallChecks: Record<string, unknown> = {};
+  let s42ProjectChecks: Record<string, unknown> = {};
   let detectChecks: Record<string, unknown> = {};
   let sessionRecoveryChecks: Record<string, unknown> = {};
   let settingsMigrationChecks: Record<string, unknown> = {};
@@ -107,12 +129,16 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let localSettingsChecks: Record<string, unknown> = {};
   let aiSegmentChecks: Record<string, unknown> = {};
   let opencvFrameChecks: Record<string, unknown> = {};
+  let hardwareChecks: Record<string, unknown> = {};
+  let playbackStressChecks: Record<string, unknown> = {};
+  let overlayStressChecks: Record<string, unknown> = {};
+  let redetectPreserveChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -133,7 +159,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
     checks.bridgeExposed = state?.bridge === true;
     checks.ipcRoundTrip = state?.ipcOk === true;
     checks.whitelistOnly =
-      state?.apiKeys === 'ai,app,data,detect,export,gpu,media,note,player,project,scope,session,settings,shot,stats,still,tag,term,wall';
+      state?.apiKeys === 'ai,app,data,detect,export,gpu,hardware,media,note,player,project,scope,session,settings,shot,stats,still,tag,term,wall';
     checks.infoRendered = Boolean(
       state?.info?.version && state?.info?.platform && state?.info?.appDataPath,
     );
@@ -196,6 +222,18 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
     if (process.env['SMOKE_IMPORT_DATA'] === '1') {
       importChecks = await runImportChecks(win);
       Object.assign(checks, importChecksAssertions(importChecks));
+    }
+    if (process.env['SMOKE_PROJECT_MEDIA'] === '1') {
+      projectMediaChecks = await runProjectMediaChecks(deps);
+      Object.assign(checks, projectMediaChecksAssertions(projectMediaChecks));
+    }
+    if (process.env['SMOKE_S42_WALL_UI'] === '1') {
+      s42WallChecks = await runS42WallChecks(win, deps);
+      Object.assign(checks, s42WallChecksAssertions(s42WallChecks));
+    }
+    if (process.env['SMOKE_S42_PROJECT_UI'] === '1') {
+      s42ProjectChecks = await runS42ProjectCenterChecks(win, deps);
+      Object.assign(checks, s42ProjectChecksAssertions(s42ProjectChecks));
     }
 
     if (process.env['SMOKE_DETECT_CHECKS'] === '1') {
@@ -484,6 +522,30 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, opencvFrameChecksAssertions(opencvFrameChecks));
     }
 
+    // S42/Z04：硬件能力扫描（结构化五态 + 重扫刷新 + 缓存）
+    if (process.env['SMOKE_HARDWARE'] === '1') {
+      hardwareChecks = await runHardwareChecks(deps);
+      Object.assign(checks, hardwareChecksAssertions(hardwareChecks));
+    }
+
+    // S42/Z01：Space 连续播放压力（50 次随机间隔，状态与按键序列一致、不滚页）
+    if (process.env['SMOKE_PLAYBACK_STRESS'] === '1') {
+      playbackStressChecks = await runPlaybackStressChecks(win, process.env['SMOKE_VIDEO'] ?? '');
+      Object.assign(checks, playbackStressChecksAssertions(playbackStressChecks));
+    }
+
+    // S42/Z02：分镜墙往返 30 轮 × 轨道档位 × 主窗口 resize，无卡墙/旧框残留
+    if (process.env['SMOKE_OVERLAY_STRESS'] === '1') {
+      overlayStressChecks = await runOverlayStressChecks(win, deps);
+      Object.assign(checks, overlayStressChecksAssertions(overlayStressChecks));
+    }
+
+    // S42：重切数据保全（笔记/连线/标注/布局/分组/静帧六类实体不丢失）
+    if (process.env['SMOKE_REDETECT_PRESERVE'] === '1') {
+      redetectPreserveChecks = await runRedetectPreserveChecks(deps);
+      Object.assign(checks, redetectPreserveChecksAssertions(redetectPreserveChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -497,7 +559,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -586,6 +648,750 @@ function importChecksAssertions(result: Record<string, any>): Record<string, boo
   };
 }
 
+function projectMediaChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    projectMediaCreated: result.createdOk === true,
+    projectMediaLegacyCounts: result.countsOk === true,
+    projectMediaBackfill: result.backfillOk === true,
+    projectMediaIsolation: result.isolationOk === true,
+    projectMediaFastSwitch: result.switch20Ok === true,
+    projectMediaPackageV2: result.manifestOk === true,
+    projectMediaPackageRoundtrip: result.roundtripOk === true,
+    projectMediaPackageEmpty: result.emptyRoundtripOk === true,
+    projectMediaPackagePrivacy: result.privacyOk === true,
+  };
+}
+
+function s42WallChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    s42StillLibraryOpens: result.stillLibraryOpens === true,
+    s42StillLibraryMainOnly: result.mainOnly === true,
+    s42StillWheelZoom: result.wheelZoom === true,
+    s42StillDoubleClickPlayer: result.doubleClickPlayer === true,
+    s42StillReturnsToList: result.returnsToList === true,
+    s42StillStateRestored: result.stateRestored === true,
+    s42StillCtrl0Reset: result.ctrl0Reset === true,
+    s42BrushSizes: result.brushSizes === true,
+    s42OneStrokeOneObject: result.oneStrokeOneObject === true,
+    s42EraserOneUndo: result.eraserOneUndo === true,
+    s42EscapeCancelsDraft: result.escapeCancelsDraft === true,
+    s42OldAnnotationFallback: result.oldAnnotationFallback === true,
+    s42AnnotationPersistence: result.savedAnnotationCount === 3,
+    s42BoardBackspaceGuard: result.boardBackspaceGuard === true,
+    s42BoardBackspaceDialog: result.boardBackspaceDialog === true,
+    s42BoardBackspaceDelete: result.boardBackspaceDelete === true,
+    s42FeedbackOpens: result.feedbackOpen === true,
+    s42FeedbackIssuesLink: result.feedbackIssues === true,
+    s42FeedbackEmailHidden: result.feedbackNoEmail === true,
+    s42FeedbackEsc: result.feedbackEsc === true,
+  };
+}
+
+function s42ProjectChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    s42MediaTabs: result.tabsOk === true,
+    s42MediaFilenameLabels: result.labelsOk === true,
+    s42MediaSwitch20: result.switch20Ok === true,
+    s42MediaSession: result.sessionOk === true,
+    s42ProjectCenterOpen: result.centerOpen === true,
+    s42EmptyProjectNoMedia: result.emptyProjectOk === true,
+  };
+}
+
+async function runProjectMediaChecks(deps: SmokeDeps): Promise<Record<string, unknown>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { ok: false, error: 'data unavailable' };
+
+  const projectIds: string[] = [];
+  const packagePath = join(data.dataRoot, 'packages', `s42-project-media-${Date.now()}.lapian`);
+  const emptyPackagePath = join(
+    data.dataRoot,
+    'packages',
+    `s42-project-empty-${Date.now()}.lapian`,
+  );
+  try {
+    const packageService = new ProjectPackageService(data);
+    const project = data.projects.create({
+      name: 'S42 project media smoke',
+      source: { type: 'local', path: 'C:\\media\\one.mp4' },
+      media: {
+        filename: 'one.mp4',
+        container: 'mp4',
+        durationMs: 120_000,
+        width: 1920,
+        height: 1080,
+        fps: 24,
+      },
+    });
+    projectIds.push(project.id);
+    const first = project.mediaItems[0];
+    const second = data.projectMedia.add({
+      projectId: project.id,
+      source: { type: 'local', path: 'C:\\media\\two.mp4' },
+      media: {
+        filename: 'two.mp4',
+        container: 'mp4',
+        durationMs: 90_000,
+        width: 1280,
+        height: 720,
+        fps: 25,
+      },
+      activate: false,
+    });
+
+    data.projectMedia.activate(project.id, first.id);
+    const shotOne = data.shots.create({
+      projectId: project.id,
+      mediaId: first.id,
+      startMs: 0,
+      endMs: 4000,
+    });
+    data.scenes.replace(project.id, [
+      {
+        id: 'ignored',
+        projectId: project.id,
+        mediaId: first.id,
+        index: 1,
+        label: 'Media one',
+        startMs: 0,
+        endMs: 4000,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ], first.id);
+    data.stills.create({
+      projectId: project.id,
+      mediaId: first.id,
+      shotId: shotOne.id,
+      timeMs: 2000,
+      filePath: 'stills/one.png',
+      role: 'main',
+    });
+
+    data.projectMedia.activate(project.id, second.id);
+    const shotTwo = data.shots.create({
+      projectId: project.id,
+      mediaId: second.id,
+      startMs: 0,
+      endMs: 3000,
+    });
+    data.scenes.replace(project.id, [
+      {
+        id: 'ignored',
+        projectId: project.id,
+        mediaId: second.id,
+        index: 1,
+        label: 'Media two',
+        startMs: 0,
+        endMs: 3000,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ], second.id);
+    data.stills.create({
+      projectId: project.id,
+      mediaId: second.id,
+      shotId: shotTwo.id,
+      timeMs: 1500,
+      filePath: 'stills/two.png',
+      role: 'main',
+    });
+
+    const countsOk =
+      data.shots.list(project.id, first.id).length === 1 &&
+      data.shots.list(project.id, second.id).length === 1 &&
+      data.stills.list({ projectId: project.id, mediaId: first.id }).length === 1 &&
+      data.stills.list({ projectId: project.id, mediaId: second.id }).length === 1;
+    const backfillOk =
+      data.shots.list(project.id, first.id)[0]?.mediaId === first.id &&
+      data.shots.list(project.id, second.id)[0]?.mediaId === second.id;
+    const isolationOk =
+      data.shots.list(project.id, first.id)[0]?.id !==
+      data.shots.list(project.id, second.id)[0]?.id;
+
+    let switch20Ok = true;
+    for (let index = 0; index < 20; index += 1) {
+      const target = index % 2 === 0 ? first : second;
+      data.projectMedia.activate(project.id, target.id);
+      if (data.shots.list(project.id).length !== 1) switch20Ok = false;
+    }
+
+    packageService.exportProject({
+      id: project.id,
+      targetPath: packagePath,
+      includeAssets: false,
+      includeMedia: false,
+    });
+    const entries = unzipSync(new Uint8Array(readFileSync(packagePath)));
+    const manifest = JSON.parse(
+      new TextDecoder().decode(entries['manifest.json']),
+    ) as {
+      version?: number;
+      schemaVersion?: number;
+      media?: unknown[];
+    };
+    const snapshotText = Buffer.from(entries['project.db']).toString('latin1');
+    const manifestOk =
+      manifest.version === 2 &&
+      manifest.schemaVersion === 13 &&
+      manifest.media?.length === 2;
+    const privacyOk = !snapshotText.includes('C:\\media\\one.mp4') &&
+      !snapshotText.includes('C:\\media\\two.mp4');
+
+    const imported = packageService.importProject(packagePath);
+    projectIds.push(imported.project.id);
+    let roundtripOk = imported.project.mediaItems.length === 2;
+    for (const media of imported.project.mediaItems) {
+      imported.project = data.projects.activateMedia({
+        projectId: imported.project.id,
+        mediaId: media.id,
+      });
+      roundtripOk &&= data.shots.list(imported.project.id).length === 1;
+    }
+
+    const emptyProject = data.projects.create({ name: 'S42 empty project smoke' });
+    projectIds.push(emptyProject.id);
+    packageService.exportProject({
+      id: emptyProject.id,
+      targetPath: emptyPackagePath,
+      includeAssets: false,
+      includeMedia: false,
+    });
+    const importedEmpty = packageService.importProject(emptyPackagePath).project;
+    projectIds.push(importedEmpty.id);
+    const emptyRoundtripOk =
+      importedEmpty.mediaItems.length === 0 &&
+      importedEmpty.activeMediaId === null &&
+      data.shots.list(importedEmpty.id).length === 0;
+
+    return {
+      ok:
+        countsOk &&
+        backfillOk &&
+        isolationOk &&
+        switch20Ok &&
+        manifestOk &&
+        privacyOk &&
+        roundtripOk &&
+        emptyRoundtripOk,
+      createdOk: data.projectMedia.list(project.id).length === 2,
+      countsOk,
+      backfillOk,
+      isolationOk,
+      switch20Ok,
+      manifestOk,
+      privacyOk,
+      roundtripOk,
+      emptyRoundtripOk,
+      firstShot: shotOne.id,
+      secondShot: shotTwo.id,
+    };
+  } finally {
+    for (const projectId of projectIds.reverse()) {
+      try {
+        data.projects.delete(projectId);
+      } catch {
+        // best-effort isolated smoke cleanup
+      }
+    }
+    rmSync(packagePath, { force: true });
+    rmSync(emptyPackagePath, { force: true });
+  }
+}
+
+async function runS42ProjectCenterChecks(
+  win: BrowserWindow,
+  deps: SmokeDeps,
+): Promise<Record<string, unknown>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { ok: false, error: 'data unavailable' };
+  const projectIds: string[] = [];
+  const mediaOnePath =
+    process.env['SMOKE_PROJECT_VIDEO_ONE'] ?? 'C:\\media\\center-one.mp4';
+  const mediaTwoPath =
+    process.env['SMOKE_PROJECT_VIDEO_TWO'] ?? 'C:\\media\\center-two.mp4';
+  try {
+    const project = data.projects.create({
+      name: `S42 project center ${Date.now()}`,
+      source: { type: 'local', path: mediaOnePath },
+      media: {
+        filename: 'center-one.mp4',
+        container: 'mp4',
+        durationMs: 4000,
+        width: 640,
+        height: 360,
+        fps: 25,
+      },
+    });
+    projectIds.push(project.id);
+    const first = project.mediaItems[0];
+    if (!first) throw new Error('first media missing');
+    const second = data.projectMedia.add({
+      projectId: project.id,
+      source: { type: 'local', path: mediaTwoPath },
+      media: {
+        filename: 'center-two.mp4',
+        container: 'mp4',
+        durationMs: 4000,
+        width: 640,
+        height: 360,
+        fps: 25,
+      },
+      activate: false,
+    });
+    data.projectMedia.activate(project.id, first.id);
+    data.shots.create({
+      projectId: project.id,
+      mediaId: first.id,
+      startMs: 0,
+      endMs: 2000,
+    });
+    data.projectMedia.activate(project.id, second.id);
+    data.shots.create({
+      projectId: project.id,
+      mediaId: second.id,
+      startMs: 0,
+      endMs: 3000,
+    });
+
+    const result = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const waitFor = async (check, timeoutMs = 25000) => {
+          const deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            const value = await check();
+            if (value) return value;
+            await sleep(100);
+          }
+          return null;
+        };
+        const out = {};
+        try {
+          await window.__S43_WALL_TEST__.openProject('${project.id}');
+          const tabs = await waitFor(() => {
+            const list = [...document.querySelectorAll('.media-tab')];
+            return list.length === 2 ? list : null;
+          });
+          out.tabsOk = Boolean(tabs);
+          if (!tabs) return out;
+          out.labelsOk =
+            tabs.some((tab) => tab.textContent.includes('center-one.mp4')) &&
+            tabs.some((tab) => tab.textContent.includes('center-two.mp4'));
+
+          for (let index = 0; index < 20; index += 1) {
+            document.querySelectorAll('.media-tab')[index % 2]?.click();
+            await sleep(100);
+          }
+          await waitFor(() => {
+            const current = [...document.querySelectorAll('.media-tab')];
+            return current.length === 2 &&
+              current[1].classList.contains('active') &&
+              document.querySelectorAll('.shot-row').length === 1;
+          }, 30000);
+          const finalTabs = [...document.querySelectorAll('.media-tab')];
+          out.switch20Ok =
+            finalTabs.length === 2 &&
+            finalTabs[1].classList.contains('active') &&
+            document.querySelectorAll('.shot-row').length === 1;
+          const session = await waitFor(async () => {
+            const current = await window.api.session.get();
+            return current.ok &&
+              current.data?.activeMediaId === '${second.id}' &&
+              current.data?.projectId === '${project.id}'
+              ? current
+              : null;
+          }, 30000);
+          out.sessionOk = Boolean(session);
+
+          const centerButton = [...document.querySelectorAll('.main-nav .nav-item')].find(
+            (button) => button.textContent.trim() === '项目中心',
+          );
+          centerButton?.click();
+          const center = await waitFor(() => document.querySelector('.project-center'));
+          out.centerOpen = Boolean(center);
+          const emptyButton = center
+            ? [...center.querySelectorAll('button')].find(
+                (button) => button.textContent.trim() === '新建空项目',
+              )
+            : null;
+          emptyButton?.click();
+          await waitFor(() => !document.querySelector('.project-center'), 8000);
+          await sleep(400);
+          out.emptyProjectOk =
+            document.querySelectorAll('.media-tab').length === 0 &&
+            Boolean(document.querySelector('.media-empty'));
+          const list = await window.api.project.list();
+          const created = list.ok
+            ? list.data.find((item) => item.name.startsWith('未命名项目')) ?? null
+            : null;
+          out.createdEmptyId = created?.id ?? null;
+          if (created) await window.api.project.delete({ id: created.id });
+          return out;
+        } catch (error) {
+          return { ...out, exception: String(error?.stack ?? error) };
+        }
+      })()
+    `)) as Record<string, unknown>;
+    return {
+      ...result,
+      ok: Object.values(result).includes(false) === false && !result.exception,
+    };
+  } finally {
+    for (const projectId of projectIds.reverse()) {
+      try {
+        data.projects.delete(projectId);
+      } catch {
+        // best-effort isolated cleanup
+      }
+    }
+  }
+}
+
+async function runS42WallChecks(
+  win: BrowserWindow,
+  deps: SmokeDeps,
+): Promise<Record<string, unknown>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { ok: false, error: 'data unavailable' };
+  let projectId: string | null = null;
+  try {
+    const project = data.projects.create({
+      name: `S42 wall smoke ${Date.now()}`,
+      source: { type: 'local', path: 'C:\\media\\wall-smoke.mp4' },
+      media: {
+        filename: 'wall-smoke.mp4',
+        container: 'mp4',
+        durationMs: 30_000,
+        width: 1920,
+        height: 1080,
+        fps: 24,
+      },
+    });
+    projectId = project.id;
+    const shot = data.shots.create({
+      projectId,
+      mediaId: project.activeMediaId,
+      startMs: 0,
+      endMs: 8000,
+    });
+    const stillDir = join(data.dataRoot, 'projects', project.id, 'stills');
+    mkdirSync(stillDir, { recursive: true });
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    for (let index = 0; index < 3; index += 1) {
+      const filePath = join(stillDir, `main-${index}.png`);
+      writeFileSync(filePath, png);
+      data.stills.create({
+        projectId,
+        mediaId: project.activeMediaId,
+        shotId: shot.id,
+        timeMs: 1000 + index * 900,
+        filePath,
+        thumbPath: filePath,
+        caption: `Main still ${index + 1}`,
+        role: 'main',
+      });
+    }
+    const autoPath = join(stillDir, 'auto-thumb.png');
+    writeFileSync(autoPath, png);
+    data.stills.create({
+      projectId,
+      mediaId: project.activeMediaId,
+      shotId: shot.id,
+      timeMs: 7200,
+      filePath: autoPath,
+      thumbPath: autoPath,
+      caption: 'Auto thumb',
+      role: 'auto-thumb',
+    });
+    data.wall.saveAnnotations(project.id, shot.id, [
+      {
+        type: 'brush',
+        color: '#ff5a5a',
+        data: {
+          pts: [
+            { x: 8, y: 8 },
+            { x: 18, y: 8 },
+          ],
+        },
+      },
+    ]);
+
+    const result = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const waitFor = async (check, timeoutMs = 6000) => {
+          const deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            const value = await check();
+            if (value) return value;
+            await sleep(80);
+          }
+          return null;
+        };
+        const byText = (selector, text, root = document) =>
+          Array.from(root.querySelectorAll(selector)).find(
+            (el) => String(el.textContent || '').trim() === text,
+          );
+        const byPrefix = (selector, prefix, root = document) =>
+          Array.from(root.querySelectorAll(selector)).find((el) =>
+            String(el.textContent || '').trim().startsWith(prefix),
+          );
+        const pointer = (type, target, x, y, id = 17) =>
+          target.dispatchEvent(new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            pointerId: id,
+            pointerType: 'mouse',
+            isPrimary: true,
+            button: 0,
+            buttons: type === 'pointerup' ? 0 : 1,
+            clientX: x,
+            clientY: y,
+          }));
+        const out = {};
+        try {
+          localStorage.removeItem('pfl:wall-view:${project.id}');
+          await window.__S43_WALL_TEST__.openProject('${project.id}');
+          await window.__S43_WALL_TEST__.openProjectWall();
+          const wall = await waitFor(() => document.querySelector('.wall-stage'));
+          if (!wall) return { exception: 'wall missing' };
+          const stillButton = await waitFor(() => byText('.wall-hud-btn', '静'));
+          stillButton?.click();
+          await waitFor(() => document.querySelectorAll('.still-card').length >= 3, 4500);
+          out.stillLibraryOpens = Boolean(document.querySelector('.still-library'));
+          out.mainOnly =
+            document.querySelectorAll('.still-card').length === 3 &&
+            !Array.from(document.querySelectorAll('.still-card')).some((card) =>
+              String(card.textContent || '').includes('Auto thumb'),
+            );
+
+          const grid = document.querySelector('.still-grid');
+          const firstCard = document.querySelector('.still-card');
+          const beforeWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--still-width'));
+          firstCard?.dispatchEvent(new WheelEvent('wheel', {
+            bubbles: true,
+            cancelable: true,
+            deltaY: -420,
+            clientX: firstCard.getBoundingClientRect().left + 10,
+            clientY: firstCard.getBoundingClientRect().top + 10,
+          }));
+          await sleep(180);
+          const afterWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--still-width'));
+          out.wheelZoom = afterWidth > beforeWidth && afterWidth >= 120 && afterWidth <= 420;
+          out.widthBefore = beforeWidth;
+          out.widthAfter = afterWidth;
+
+          document.querySelector('.still-card')?.dispatchEvent(
+            new MouseEvent('dblclick', { bubbles: true }),
+          );
+          await waitFor(() => document.querySelector('.wall-still-time'));
+          out.doubleClickPlayer = Boolean(document.querySelector('.wall-ppt')) &&
+            Boolean(document.querySelector('.wall-still-time'));
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await waitFor(() => !document.querySelector('.wall-ppt'));
+          out.returnsToList = Boolean(await waitFor(() => document.querySelector('.still-library')));
+          const returnedGrid = await waitFor(() => document.querySelector('.still-grid'));
+          out.returnWidth = returnedGrid
+            ? parseFloat(getComputedStyle(returnedGrid).getPropertyValue('--still-width'))
+            : null;
+          out.stateRestored = Boolean(
+            returnedGrid &&
+            Math.abs(out.returnWidth - afterWidth) < 1,
+          );
+          returnedGrid?.focus();
+          returnedGrid?.dispatchEvent(new KeyboardEvent('keydown', {
+            key: '0',
+            code: 'Digit0',
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }));
+          await sleep(120);
+          out.resetWidth = parseFloat(
+            getComputedStyle(document.querySelector('.still-grid')).getPropertyValue('--still-width'),
+          );
+          out.ctrl0Reset = Math.abs(out.resetWidth - 240) < 1;
+
+          document.querySelector('.still-card')?.dispatchEvent(
+            new MouseEvent('dblclick', { bubbles: true }),
+          );
+          const svg = await waitFor(
+            () => document.querySelector('.wall-ppt-slide.cur .sbg-annlayer'),
+          );
+          if (!svg) return { ...out, exception: 'annotation svg missing' };
+          const rect = svg.getBoundingClientRect();
+          const px = (x) => rect.left + (x / 100) * rect.width;
+          const py = (y) => rect.top + (y / 56.25) * rect.height;
+          const polyCount = () => svg.querySelectorAll('polyline').length;
+          const sizeInput = document.querySelector('.ann-size input[type="range"]');
+          const setSize = (value) => {
+            if (!sizeInput) return;
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+              ?.set?.call(sizeInput, String(value));
+            sizeInput.dispatchEvent(new Event('input', { bubbles: true }));
+          };
+          const draw = async (y, size) => {
+            setSize(size);
+            byText('.wall-ppt-tool', '画笔1')?.click();
+            const before = polyCount();
+            pointer('pointerdown', svg, px(20), py(y));
+            pointer('pointermove', svg, px(45), py(y));
+            pointer('pointermove', svg, px(75), py(y));
+            pointer('pointerup', svg, px(82), py(y));
+            await sleep(180);
+            return polyCount() - before;
+          };
+          const oneAt48 = await draw(28, 48);
+          const oneAt1 = await draw(30, 1);
+          out.oneStrokeOneObject = oneAt48 === 1 && oneAt1 === 1;
+          const strokes = Array.from(svg.querySelectorAll('polyline'));
+          const widths = strokes.map((line) => Number(line.getAttribute('stroke-width')));
+          out.brushSizes = widths.includes(4) && widths.some((value) => value > 0.08 && value < 0.09);
+          out.oldAnnotationFallback = widths.some((value) => Math.abs(value - 0.125) < 0.002);
+
+          const beforeErase = polyCount();
+          byPrefix('.wall-ppt-tool', '橡皮')?.click();
+          await sleep(60);
+          out.eraserSelected = Boolean(
+            byPrefix('.wall-ppt-tool.on', '橡皮'),
+          );
+          setSize(48);
+          const parsePoints = (line) =>
+            String(line.getAttribute('points') || '')
+              .trim()
+              .split(/\s+/)
+              .map((pair) => pair.split(',').map(Number))
+              .filter((pair) => pair.length === 2 && pair.every(Number.isFinite));
+          const drawnStrokes = strokes.slice(-2).map(parsePoints).filter((pts) => pts.length > 0);
+          const eraseStart = drawnStrokes[0]?.[0] ?? [20, 30];
+          const eraseMid = drawnStrokes[0]?.at(-1) ?? [55, 30];
+          const eraseEnd = drawnStrokes[1]?.at(-1) ?? [80, 30];
+          pointer('pointerdown', svg, px(eraseStart[0]), py(eraseStart[1]));
+          pointer('pointermove', svg, px(eraseMid[0]), py(eraseMid[1]));
+          pointer('pointermove', svg, px(eraseEnd[0]), py(eraseEnd[1]));
+          for (const x of [35, 50, 65, 80]) {
+            pointer('pointermove', svg, px(x), py(eraseEnd[1]));
+            await sleep(25);
+          }
+          pointer('pointerup', svg, px(eraseEnd[0]), py(eraseEnd[1]));
+          await sleep(180);
+          const afterErase = polyCount();
+          byText('.wall-ppt-btn', '撤销')?.click();
+          await sleep(180);
+          const afterUndo = polyCount();
+          out.eraserOneUndo = afterErase < beforeErase && afterUndo === beforeErase;
+          out.beforeErase = beforeErase;
+          out.afterErase = afterErase;
+          out.afterUndo = afterUndo;
+
+          byText('.wall-ppt-tool', '画笔1')?.click();
+          const beforeCancel = polyCount();
+          pointer('pointerdown', svg, px(22), py(44));
+          pointer('pointermove', svg, px(60), py(44));
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(120);
+          out.escapeCancelsDraft = polyCount() === beforeCancel && Boolean(document.querySelector('.wall-ppt'));
+          await sleep(700);
+          const persisted = await window.api.wall.listAnnotations({
+            projectId: '${project.id}',
+            shotIds: ['${shot.id}'],
+          });
+          out.rendererPersistedCount =
+            persisted.ok ? (persisted.data['${shot.id}'] ?? []).length : -1;
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await waitFor(() => !document.querySelector('.wall-ppt'));
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await waitFor(() => !document.querySelector('.wall-stage'));
+
+          await window.__S43_WALL_TEST__.openIndependent();
+          const boardNodeId = await window.__S43_WALL_TEST__.addTextNode();
+          const boardCard = await waitFor(() => document.querySelector('.wall-card'));
+          boardCard?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+          const boardTextarea = await waitFor(() => document.querySelector('.wall-text-edit'));
+          boardTextarea?.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Backspace',
+            bubbles: true,
+            cancelable: true,
+          }));
+          await sleep(120);
+          out.boardBackspaceGuard =
+            Boolean(boardNodeId) &&
+            document.querySelectorAll('.wall-card').length === 1 &&
+            !document.querySelector('.confirm-dialog');
+          boardTextarea?.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }));
+          const selectedCard = document.querySelector('.wall-card');
+          if (selectedCard) {
+            const cardRect = selectedCard.getBoundingClientRect();
+            pointer('pointerdown', selectedCard, cardRect.left + 12, cardRect.top + 12, 23);
+            pointer('pointerup', selectedCard, cardRect.left + 12, cardRect.top + 12, 23);
+            selectedCard.click();
+          }
+          await sleep(80);
+          window.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Backspace',
+            bubbles: true,
+            cancelable: true,
+          }));
+          const boardDialog = await waitFor(() => document.querySelector('.confirm-dialog'));
+          out.boardBackspaceDialog = Boolean(boardDialog);
+          window.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          }));
+          out.boardBackspaceDelete = Boolean(await waitFor(
+            () => document.querySelectorAll('.wall-card').length === 0,
+          ));
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await waitFor(() => !document.querySelector('.wall-stage'));
+          const boardId = window.__S43_WALL_TEST__.state().boardId;
+          if (boardId) await window.api.wall.deleteBoard({ boardId });
+          document.querySelector('.brand')?.click();
+          const feedback = await waitFor(() => document.querySelector('.feedback-dialog'));
+          out.feedbackOpen = Boolean(feedback);
+          const issuesLink = feedback?.querySelector('a[href*="/issues"]');
+          out.feedbackIssues =
+            issuesLink?.getAttribute('href') ===
+            'https://github.com/YGSWGJR/personal-film-lab/issues';
+          out.feedbackNoEmail = !feedback?.querySelector('a[href^="mailto:"]');
+          window.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }));
+          out.feedbackEsc = Boolean(await waitFor(() => !document.querySelector('.feedback-dialog')));
+          return out;
+        } catch (error) {
+          return { ...out, exception: String(error?.stack ?? error) };
+        }
+      })()
+    `)) as Record<string, unknown>;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const saved = data.wall.listAnnotations(projectId, [shot.id])[shot.id] ?? [];
+    return {
+      ...result,
+      savedAnnotationCount: saved.length,
+      ok: Object.values(result).includes(false) === false && !result.exception,
+    };
+  } finally {
+    if (projectId) {
+      try {
+        data.projects.delete(projectId);
+      } catch {
+        // best-effort isolated cleanup
+      }
+    }
+  }
+}
+
 function detectChecksAssertions(result: Record<string, any>): Record<string, boolean> {
   return {
     detectProjectNotFound: result.projectNotFoundOk === true,
@@ -656,6 +1462,8 @@ function deleteUiChecksAssertions(result: Record<string, any>): Record<string, b
     deleteStillRightClick: result.stillDeleted === true,
     deleteKeyGuard: result.inputGuardOk === true,
     deleteKeyShot: result.deleteKeyOk === true,
+    deleteBackspaceDialog: result.deleteBackspaceDialogShown === true,
+    deleteBackspaceCancel: result.deleteBackspaceCancelOk === true,
     deleteNoOrphans: result.noOrphansOk === true,
     // S36-1：统一确认弹窗 + 永久删除 + 失败显式报错 + confirmUserContent 设置
     deleteConfirmDialogShown: result.confirmDialogOk === true,
@@ -746,16 +1554,16 @@ async function runDeletePermanentChecks(
           if (current.data.environmentOverride === true) {
             // DSH_DATA_ROOT 锁定模式下 settings.set 被禁用，跳过往返
             out.settingsRoundtrip = true;
-            return out;
+          } else {
+            const off = await window.api.settings.set({ ...current.data, confirmUserContent: false });
+            const readOff = await window.api.settings.get();
+            const on = await window.api.settings.set({ ...off.data, confirmUserContent: true });
+            const readOn = await window.api.settings.get();
+            out.settingsRoundtrip = off.ok === true
+              && readOff.ok === true && readOff.data.confirmUserContent === false
+              && on.ok === true
+              && readOn.ok === true && readOn.data.confirmUserContent === true;
           }
-          const off = await window.api.settings.set({ ...current.data, confirmUserContent: false });
-          const readOff = await window.api.settings.get();
-          const on = await window.api.settings.set({ ...off.data, confirmUserContent: true });
-          const readOn = await window.api.settings.get();
-          out.settingsRoundtrip = off.ok === true
-            && readOff.ok === true && readOff.data.confirmUserContent === false
-            && on.ok === true
-            && readOn.ok === true && readOn.data.confirmUserContent === true;
 
           const missing = await window.api.project.delete({ id: 'no-such-smoke-project' });
           out.missingProjectErrorOk = missing.ok === false
@@ -966,11 +1774,13 @@ async function runDeleteUiChecks(
         // 输入框聚焦时 Delete 键不触发删除（守卫保持）
         const textarea = document.querySelector('.note-section textarea');
         textarea?.focus();
-        textarea?.dispatchEvent(new KeyboardEvent('keydown', {
-          key: 'Delete',
-          bubbles: true,
-          cancelable: true,
-        }));
+        for (const key of ['Delete', 'Backspace']) {
+          textarea?.dispatchEvent(new KeyboardEvent('keydown', {
+            key,
+            bubbles: true,
+            cancelable: true,
+          }));
+        }
         await sleep(300);
         const guardedShots = await window.api.shot.list({ projectId });
         out.inputGuardOk = guardedShots.ok
@@ -979,7 +1789,17 @@ async function runDeleteUiChecks(
           && !dialog();
 
         textarea?.blur();
-        // Delete 键 → 弹窗 → Esc 取消 → 镜头保留
+        // Backspace 键 → 弹窗 → Esc 取消 → 镜头保留
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Backspace',
+          bubbles: true,
+          cancelable: true,
+        }));
+        out.deleteBackspaceDialogShown = Boolean(await waitFor(() => dialog()));
+        pressKey('Escape');
+        out.deleteBackspaceCancelOk = Boolean(await waitFor(() => !dialog()))
+          && (await shotCount()) === 1;
+
         window.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'Delete',
           bubbles: true,
@@ -3906,9 +4726,10 @@ function timelineZoomChecksAssertions(result: Record<string, any>): Record<strin
     zoomSnapPure: result.snap === true,
     zoomCapsule: result.capsule === true,
     zoomPopover: result.popover === true,
+    zoomPanelFlow: result.panelFlow === true,
     zoomHeightSlider: result.heightSlider === true,
     zoomMinHeight: result.minHeight === true,
-    zoomMinCollapsed: Number(result.minHeightRowPx ?? 99) <= 2,
+    zoomMinInteractive: Number(result.minHeightRowPx ?? 0) >= 40,
     zoomDensitySlider: result.densitySlider === true,
     zoomDirectInput: result.directInput === true,
     zoomWheel: result.wheel === true,
@@ -4021,8 +4842,8 @@ async function runNleTrackChecks(win: BrowserWindow): Promise<Record<string, any
 
         const zoomButton = timeline.querySelector('.zoom-btn');
         zoomButton?.click();
-        await sleep(80);
-        const zoomPop = timeline.querySelector('.zoom-pop');
+        await sleep(200);
+        const zoomPop = timeline.querySelector('.zoom-panel-row');
         out.zoom = Boolean(zoomButton && zoomPop && getComputedStyle(zoomPop).display !== 'none');
         if (zoomPop) {
           const popRect = zoomPop.getBoundingClientRect();
@@ -4031,10 +4852,12 @@ async function runNleTrackChecks(win: BrowserWindow): Promise<Record<string, any
             popRect.left + popRect.width / 2,
             popRect.top + popRect.height / 2,
           );
-          out.zoomUnclipped = popRect.height > 50
-            && Boolean(rulerRect)
-            && popRect.bottom > rulerRect.bottom
-            && Boolean(point?.closest('.zoom-pop'));
+          out.zoomUnclipped =
+            popRect.height > 50 &&
+            Boolean(rulerRect) &&
+            popRect.bottom > rulerRect.bottom &&
+            getComputedStyle(zoomPop).overflow !== 'hidden' &&
+            Boolean(point);
         }
         zoomButton?.click();
         v2Toggle?.click();
@@ -4107,6 +4930,8 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
         input.dispatchEvent(new Event('change', { bubbles: true }));
       };
       const readTimeline = async () => {
+        const uiState = window.__S36_TIMELINE_UI_STATE__?.();
+        if (uiState?.environmentOverride) return uiState.timeline ?? null;
         const current = await window.api.settings.get();
         return current.ok ? current.data.timeline : null;
       };
@@ -4116,9 +4941,18 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
         out.capsule = Boolean(button);
         if (!button) return out;
         button.click();
-        const pop = await waitFor(() => document.querySelector('.zoom-pop'), 5000);
+        const pop = await waitFor(() => document.querySelector('.zoom-panel-row'), 5000);
         out.popover = Boolean(pop) && getComputedStyle(pop).display !== 'none';
         if (!pop) return out;
+        const panelRect = pop.getBoundingClientRect();
+        const rulerRowRect = document.querySelector('.ruler-row')?.getBoundingClientRect();
+        const tracksRect = document.querySelector('.tracks')?.getBoundingClientRect();
+        out.panelFlow = Boolean(
+          rulerRowRect &&
+          tracksRect &&
+          panelRect.top >= rulerRowRect.bottom - 1 &&
+          tracksRect.top >= panelRect.bottom - 1,
+        );
         const ranges = pop.querySelectorAll('.zoom-row input[type="range"]');
         const numbers = pop.querySelectorAll('.zoom-num');
         out.rangeCount = ranges.length;
@@ -4172,8 +5006,8 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
         heightNumber.focus();
         setValue(heightNumber, 1);
         heightNumber.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        await waitFor(async () => (await readTimeline())?.trackHeight === 1, 4000);
-        out.minHeight = (await readTimeline())?.trackHeight === 1;
+        await waitFor(async () => (await readTimeline())?.trackHeight === 48, 4000);
+        out.minHeight = (await readTimeline())?.trackHeight === 48;
         out.minHeightRowPx = Math.round(
           document.querySelector('.track-row-v1')?.getBoundingClientRect().height ?? 99,
         );
@@ -4197,7 +5031,7 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
           // 等 App 的 400ms 防抖写入落定，再做恢复，避免恢复被迟到的写入覆盖。
           await sleep(700);
           const current = await window.api.settings.get();
-          if (current.ok) {
+          if (current.ok && current.data.environmentOverride !== true) {
             await window.api.settings.set({ ...current.data, timeline: originalTimeline });
           }
         } catch {
@@ -4864,6 +5698,9 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     wallUiEdgeDelClick: result.edgeDelClick === true,
     wallUiPlayer: result.player === true,
     wallUiTools: result.tools === true,
+    wallUiAnnotationSave: result.annotationSaved === true,
+    wallUiAnnotationUndo: result.annotationUndo === true,
+    wallUiAnnotationRedo: result.annotationRedo === true,
     wallUiEsc: result.escClosed === true,
     boardUiOpen: result.boardOpen === true,
     boardUiCard: result.boardCard === true,
@@ -5045,6 +5882,15 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       const pick = () => document.querySelector('.picker-option');
       while (!pick() && Date.now() < pickDeadline) await new Promise((r) => setTimeout(r, 100));
       out.pickerShown = Boolean(pick());
+      const pickerCard = document.querySelector('.wall-picker-card');
+      const pickerMask = document.querySelector('.wall-picker-mask');
+      out.pickerGeometry = {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        bodyHeight: document.body.getBoundingClientRect().height,
+        mask: pickerMask?.getBoundingClientRect().toJSON() ?? null,
+        card: pickerCard?.getBoundingClientRect().toJSON() ?? null,
+      };
       // 第一个选项 = 本项目分镜本
       pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       const d1 = Date.now() + 15000;
@@ -5089,7 +5935,7 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       while (!hook.state().playerOpen && Date.now() < d4) await new Promise((r) => setTimeout(r, 100));
       const p1 = hook.state();
       out.player = p1.playerOpen === true && p1.slides === 1;
-      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       out.escClosed = hook.state().playerOpen === false;
     `],
@@ -5113,7 +5959,73 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       const p2 = hook.state();
       out.playerChain = p2.playerOpen === true && p2.slides === 2;
       out.tools = p2.tools === 10;
-      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+      // Pointer release may target the window even when pointer capture is active.
+      // This exercises the production fallback and verifies annotation persistence/history.
+      const layer = document.querySelector('.wall-ppt-slide.cur .sbg-annlayer');
+      if (layer) {
+        const rect = layer.getBoundingClientRect();
+        const eventAt = (type, x, y) => new PointerEvent(type, {
+          bubbles: true,
+          pointerId: 71,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: type === 'pointermove' ? -1 : 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: x,
+          clientY: y,
+        });
+        const x1 = rect.left + rect.width * 0.35;
+        const y1 = rect.top + rect.height * 0.35;
+        const x2 = rect.left + rect.width * 0.65;
+        const y2 = rect.top + rect.height * 0.65;
+        const currentShotId = shots4[1].id;
+        const readCurrent = async () => {
+          const result = await window.api.wall.listAnnotations({
+            projectId: ${JSON.stringify(project.id)},
+            shotIds: [currentShotId],
+          });
+          return result.ok ? (result.data[currentShotId] ?? []) : null;
+        };
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }));
+        layer.dispatchEvent(eventAt('pointerdown', x1, y1));
+        layer.dispatchEvent(eventAt('pointermove', x2, y2));
+        window.dispatchEvent(eventAt('pointerup', x2, y2));
+        let current = null;
+        const saveDeadline = Date.now() + 5000;
+        while (Date.now() < saveDeadline) {
+          current = await readCurrent();
+          if (current?.some((item) => item.type === 'brush' && item.data?.size === 8)) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        out.annotationSaved = current?.some(
+          (item) => item.type === 'brush' && item.data?.size === 8,
+        ) === true;
+
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }),
+        );
+        const undoDeadline = Date.now() + 5000;
+        while (Date.now() < undoDeadline) {
+          current = await readCurrent();
+          if (current && current.length === 0) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        out.annotationUndo = current?.length === 0;
+
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true, bubbles: true }),
+        );
+        const redoDeadline = Date.now() + 5000;
+        while (Date.now() < redoDeadline) {
+          current = await readCurrent();
+          if (current?.length === 1) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        out.annotationRedo = current?.length === 1;
+
+      }
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
     `],
     ['board', `
@@ -5212,7 +6124,7 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
         await new Promise((r) => setTimeout(r, 300));
       }
       out.compositeDissolved = document.querySelectorAll('.wall-card').length === 2;
-      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       out.boardEditEsc = hook.state().wallOpen === false;
     `],
@@ -5222,9 +6134,10 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       await hook.openIndependent();
       const dProj = Date.now() + 15000;
       while (!hook.state().wallOpen && Date.now() < dProj) await new Promise((r) => setTimeout(r, 100));
+      await hook.setProjection(false);
       await hook.addTextNode();
       await new Promise((r) => setTimeout(r, 400));
-      const mode = await hook.projectToggle();
+      const mode = await hook.setProjection(true);
       const ps = hook.projectedState();
       out.projectedMode = mode === 'on' && ps.projectedMode === true;
       out.projectedRows = ps.rows === 1;
@@ -5975,4 +6888,456 @@ async function runOpenCvFrameChecks(
     }
   }
   return out;
+}
+
+/** ---------- S42：硬件扫描 / Space 播放压力 / 分镜墙往返压力 ---------- */
+
+async function runHardwareChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  const hardware = deps.getHardware?.() ?? null;
+  if (!hardware) {
+    out.skipped = true;
+    out.reason = 'hardware service unavailable';
+    return out;
+  }
+  const first = await hardware.scan({ force: true });
+  out.scanOk = Boolean(first?.scannedAt && first?.capabilities);
+  const caps = first?.capabilities;
+  const allowed = [
+    'ready',
+    'vram-insufficient',
+    'model-missing',
+    'runtime-missing',
+    'unconfigured',
+    'offline',
+    'privacy-ack-required',
+    'disabled',
+  ];
+  out.fourLines = Boolean(caps?.boundaryHybrid && caps?.boundaryOpencv && caps?.labelsLocal && caps?.labelsCloud);
+  out.statusEnum = [
+    caps?.boundaryHybrid?.status,
+    caps?.boundaryOpencv?.status,
+    caps?.labelsLocal?.status,
+    caps?.labelsCloud?.status,
+  ].every((status) => allowed.includes(String(status)));
+  out.reasonsPresent = [
+    caps?.boundaryHybrid?.reason,
+    caps?.boundaryOpencv?.reason,
+    caps?.labelsLocal?.reason,
+    caps?.labelsCloud?.reason,
+  ].every((reason) => typeof reason === 'string' && reason.length > 0);
+  out.ramPresent = Number(first?.ram?.totalMb) > 0;
+  out.networkFlag = typeof first?.network?.online === 'boolean';
+  const second = await hardware.scan({ force: true });
+  out.rescanUpdates = Date.parse(second.scannedAt) >= Date.parse(first.scannedAt);
+  const cached = await hardware.getStatus();
+  out.cacheHit = cached.scannedAt === second.scannedAt;
+  out.pythonProbed = Boolean(second.python?.path);
+  out.modelChecked = typeof second.models?.transnetv2?.present === 'boolean';
+  out.capabilitySummary = JSON.stringify({
+    hybrid: caps?.boundaryHybrid?.status,
+    opencv: caps?.boundaryOpencv?.status,
+    labelsLocal: caps?.labelsLocal?.status,
+    labelsCloud: caps?.labelsCloud?.status,
+    online: second.network?.online,
+  });
+  return out;
+}
+
+function hardwareChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  return {
+    hardwareScanOk: result.scanOk === true,
+    hardwareFourLines: result.fourLines === true,
+    hardwareStatusEnum: result.statusEnum === true,
+    hardwareReasons: result.reasonsPresent === true,
+    hardwareRam: result.ramPresent === true,
+    hardwareNetworkFlag: result.networkFlag === true,
+    hardwareRescanUpdates: result.rescanUpdates === true,
+    hardwareCacheHit: result.cacheHit === true,
+    hardwarePythonProbed: result.pythonProbed === true,
+    hardwareModelChecked: result.modelChecked === true,
+  };
+}
+
+async function runPlaybackStressChecks(win: BrowserWindow, videoPath: string): Promise<Record<string, any>> {
+  if (!videoPath) return { skipped: true, reason: 'SMOKE_VIDEO not set' };
+  return (await win.webContents.executeJavaScript(`
+    (async () => {
+      const out = {};
+      try {
+        window.__S42_PLAYBACK_LOG__ = [];
+        const open = await window.api.player.open({ mediaPath: ${JSON.stringify(videoPath)} });
+        out.openOk = open.ok === true;
+        if (!open.ok) { out.openError = open.error && open.error.message; return out; }
+        await new Promise((r) => setTimeout(r, 300));
+        // 清场：Esc 关闭残留弹层（如会话项目丢失时的导入向导）——弹层打开时空格按设计让位
+        for (let i = 0; i < 3; i++) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+          }));
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        // 诊断：捕获阶段监听全部 keydown，定位"按键未到达 App 处理器"类失败
+        const seenKeys = [];
+        const diagListener = (e) => { if (seenKeys.length < 60) seenKeys.push(e.code || e.key); };
+        window.addEventListener('keydown', diagListener, true);
+        out.activeTag = document.activeElement ? document.activeElement.tagName : null;
+        out.wallHookState = window.__S43_WALL_TEST__ ? window.__S43_WALL_TEST__.state() : null;
+        const target = 50;
+        let pressed = 0;
+        while (pressed < target) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', {
+            code: 'Space', key: ' ', bubbles: true, cancelable: true,
+          }));
+          pressed += 1;
+          // 250~1000ms 随机间隔（Z01 验收口径）
+          await new Promise((r) => setTimeout(r, 250 + Math.floor(Math.random() * 750)));
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        const state = await window.api.player.getState();
+        out.stateOk = state.ok === true;
+        out.paused = state.ok ? state.data.paused : null;
+        out.layer = state.ok ? state.data.layer : null;
+        const log = window.__S42_PLAYBACK_LOG__ ?? [];
+        out.seenKeysCount = seenKeys.length;
+        out.seenKeysHead = seenKeys.slice(0, 5);
+        out.wallStateAfter = window.__S43_WALL_TEST__ ? window.__S43_WALL_TEST__.state() : null;
+        const applied = log.filter((e) => e.event === 'toggle-applied').length;
+        const failed = log.filter((e) => e.event === 'toggle-failed').length;
+        out.togglesPressed = pressed;
+        out.togglesApplied = applied;
+        out.togglesFailed = failed;
+        // open 载入后默认暂停（pause=yes），50 次切换 = 偶数次 → 应回到暂停
+        out.parityOk = state.ok === true && state.data.paused === true;
+        out.allApplied = applied === pressed && failed === 0;
+        out.noScroll =
+          (window.scrollY || 0) === 0 &&
+          (document.documentElement.scrollTop || 0) === 0 &&
+          (document.body.scrollTop || 0) === 0;
+        await window.api.player.close();
+      } catch (error) {
+        out.exception = String(error && error.stack ? error.stack : error);
+      }
+      return out;
+    })()
+  `)) as Record<string, any>;
+}
+
+function playbackStressChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { playbackStressSkipped: true };
+  return {
+    playbackOpenOk: result.openOk === true,
+    playbackTogglesAllApplied: result.allApplied === true,
+    playbackParity: result.parityOk === true,
+    playbackNoScroll: result.noScroll === true,
+    playbackLayerNormal: result.layer === 'normal',
+  };
+}
+
+async function runOverlayStressChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const out: Record<string, any> = {};
+  try {
+    const project = data.projects.create({
+      name: `S42 Overlay Stress ${Date.now()}`,
+      media: { filename: 'overlay-stress.mp4', durationMs: 6000, fps: 25, width: 640, height: 360 },
+    });
+    for (let i = 0; i < 3; i++) {
+      const shot = data.shots.create({ projectId: project.id, startMs: i * 2000, endMs: (i + 1) * 2000 });
+      data.db
+        .prepare('UPDATE shots SET thumbnail = ? WHERE id = ?')
+        .run(`lapian-asset://${project.id}/t${i}.jpg`, shot.id);
+    }
+    const projectId = JSON.stringify(project.id);
+    // 初始化：打开项目 + 首次进墙（含选择卡），后续 30 轮 Esc 关闭 / 重开
+    const init = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        // 清场：启动扫描可能弹出「发现项目」向导（overlayOpen 常真会吞掉后续
+        // 层控 watch），先把可见弹层全部 Esc 关掉再开始
+        for (let esc = 0; esc < 4; esc += 1) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        out.startupWizardResidue = Boolean(document.querySelector('.import-modal-mask'));
+        const hook = window.__S43_WALL_TEST__;
+        if (!hook) { out.exception = 'S43 hook missing'; return out; }
+        out.projectOpened = (await hook.openProject(${projectId})).ok === true;
+        await new Promise((r) => setTimeout(r, 300));
+        await hook.openWall();
+        const deadline = Date.now() + 10000;
+        const pick = () => document.querySelector('.picker-option');
+        while (!pick() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+        pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const d1 = Date.now() + 15000;
+        while (!hook.state().wallOpen && Date.now() < d1) await new Promise((r) => setTimeout(r, 100));
+        out.opened = hook.state().wallOpen === true;
+        return out;
+      })()
+    `)) as Record<string, any>;
+    out.projectOpened = init.projectOpened === true;
+    out.firstOpen = init.opened === true;
+
+    const sizes: Array<[number, number]> = [
+      [1280, 800],
+      [1440, 900],
+      [1600, 900],
+      [1366, 768],
+      [1600, 900],
+    ];
+    let openFailures = 0;
+    let closeFailures = 0;
+    for (let round = 1; round <= 30; round++) {
+      const roundResult = (await win.webContents.executeJavaScript(`
+        (async () => {
+          const out = {};
+          const hook = window.__S43_WALL_TEST__;
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          const closeDeadline = Date.now() + 5000;
+          while (hook.state().wallOpen && Date.now() < closeDeadline) await new Promise((r) => setTimeout(r, 60));
+          out.closed = hook.state().wallOpen === false;
+          await new Promise((r) => setTimeout(r, 120));
+          await hook.openWall();
+          const pickDeadline = Date.now() + 5000;
+          const pick = () => document.querySelector('.picker-option');
+          while (!pick() && Date.now() < pickDeadline) await new Promise((r) => setTimeout(r, 60));
+          pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          const openDeadline = Date.now() + 8000;
+          while (!hook.state().wallOpen && Date.now() < openDeadline) await new Promise((r) => setTimeout(r, 60));
+          out.opened = hook.state().wallOpen === true;
+          out.overlayOpen = hook.state().overlayOpen === true;
+          return out;
+        })()
+      `)) as Record<string, any>;
+      if (roundResult.closed !== true) closeFailures += 1;
+      if (roundResult.opened !== true) openFailures += 1;
+      // 每 6 轮做一次主窗口 resize（共 5 次），驱动 bounds 重算与同步链
+      if (round % 6 === 0) {
+        const [width, height] = sizes[(round / 6 - 1) % sizes.length];
+        win.setBounds({ width, height, x: win.getBounds().x, y: win.getBounds().y });
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    out.openFailures = openFailures;
+    out.closeFailures = closeFailures;
+    out.roundsAllOk = openFailures === 0 && closeFailures === 0;
+
+    // 收尾：关墙后检查最终状态（layer 恢复 / video-slot 存在）
+    const final = (await win.webContents.executeJavaScript(`
+      (async () => {
+        const out = {};
+        const hook = window.__S43_WALL_TEST__;
+        // Esc 清层：第一层可能关 picker（wallPickerOpen 也在 overlayOpen 内），循环关到无弹层
+        for (let esc = 0; esc < 3; esc += 1) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 300));
+          if (!hook.state().wallOpen && !document.querySelector('.wall-picker-mask')) break;
+        }
+        const deadline = Date.now() + 5000;
+        while (hook.state().wallOpen && Date.now() < deadline) await new Promise((r) => setTimeout(r, 60));
+        out.wallClosed = hook.state().wallOpen === false;
+        out.pickerResidue = Boolean(document.querySelector('.wall-picker-mask'));
+        out.maskResidue = Boolean(document.querySelector('.modal-mask, .node-edit-mask'));
+        // 关墙后 layer 恢复是异步 IPC：等待其落地再读状态
+        await new Promise((r) => setTimeout(r, 600));
+        const state = await window.api.player.getState();
+        out.layer = state.ok ? state.data.layer : null;
+        const slot = document.querySelector('.video-slot');
+        out.slotPresent = Boolean(slot);
+        return out;
+      })()
+    `)) as Record<string, any>;
+    out.wallClosed = final.wallClosed === true;
+    out.finalLayerNormal = final.layer === 'normal';
+    out.finalSlotPresent = final.slotPresent === true;
+    out.finalLayerValue = final.layer;
+    out.pickerResidue = final.pickerResidue === true;
+    out.maskResidue = final.maskResidue === true;
+    // 恢复窗口尺寸
+    win.setBounds({ width: 1600, height: 900, x: win.getBounds().x, y: win.getBounds().y });
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error);
+  }
+  return out;
+}
+
+function overlayStressChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { overlayStressSkipped: true };
+  return {
+    overlayStressProject: result.projectOpened === true,
+    overlayStressFirstOpen: result.firstOpen === true,
+    overlayStressRounds: result.roundsAllOk === true,
+    overlayStressFinalClosed: result.wallClosed === true,
+    overlayStressFinalLayer: result.finalLayerNormal === true,
+    overlayStressSlotPresent: result.finalSlotPresent === true,
+  };
+}
+
+/**
+ * S42：重切数据保全门控（QA-01 推广）。
+ * 重切删除 auto 镜头时，笔记/连线/标注/布局/分组成员/静帧全部 CASCADE——
+ * 修复后在同事务内按时码重关联。本用例在数据层验证六类实体均不丢失。
+ */
+async function runRedetectPreserveChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const project = data.projects.create({
+    name: `S42 Preserve ${Date.now()}`,
+    media: { filename: 'preserve.mp4', durationMs: 8000, fps: 25, width: 640, height: 360 },
+  });
+  const out: Record<string, any> = {};
+  try {
+    // 第一轮切分：生成 4 个 auto 镜头（模拟真实流程：切分 → 用户加工 → 重切）
+    const init = data.shots.applyDetected(project.id, [
+      { id: 'init-1', index: 1, startMs: 0, endMs: 2000, durationMs: 2000 },
+      { id: 'init-2', index: 2, startMs: 2000, endMs: 4000, durationMs: 2000 },
+      { id: 'init-3', index: 3, startMs: 4000, endMs: 6000, durationMs: 2000 },
+      { id: 'init-4', index: 4, startMs: 6000, endMs: 8000, durationMs: 2000 },
+    ]);
+    out.initApplied = init.applied === 4;
+    const initial = data.shots.list(project.id);
+    const s1 = initial.find((s) => s.startMs === 0);
+    const s2 = initial.find((s) => s.startMs === 2000);
+    const s3 = initial.find((s) => s.startMs === 4000);
+    const s4 = initial.find((s) => s.startMs === 6000);
+    if (!s1 || !s2 || !s3 || !s4) {
+      out.exception = 'initial auto shots missing';
+      return out;
+    }
+    out.initIds = initial.map((s) => `${s.startMs}:${s.id.slice(0, 6)}:${s.origin}`);
+    // 用户内容：笔记（挂 s2）、连线 s2→s3、标注（宿主 s2）、布局（s2）、分组（s1+s2）、静帧（挂 s2）
+    data.notes.upsert({ projectId: project.id, shotId: s2.id, text: 'S42 保全用例笔记' });
+    data.wall.addEdge(project.id, s3.id, s4.id, 'solid');
+    data.wall.saveAnnotations(project.id, s2.id, [
+      { type: 'brush', color: '#ff0000', data: { points: [[10, 20], [30, 40]] } },
+    ]);
+    data.wall.saveLayout(project.id, [{ shotId: s2.id, x: 120, y: 80 }]);
+    data.wall.createGroup(project.id, '保全组', [s1.id, s2.id]);
+    // 静帧夹具：迁移 13 后真实静帧都带 media_id，这里显式取项目活动媒体
+    const activeMedia = data.db
+      .prepare('SELECT active_media_id AS id FROM projects WHERE id = ?')
+      .get(project.id) as { id: string } | undefined;
+    out.activeMediaId = activeMedia?.id ?? null;
+    data.db
+      .prepare(
+        `INSERT INTO stills (id, project_id, media_id, shot_id, time_ms, file_path, role, annotations_json, created_at, updated_at)
+         VALUES ('still-preserve', ?, ?, ?, 2500, 'preserve/p.png', 'main', '[]', ?, ?)`,
+      )
+      .run(project.id, activeMedia?.id ?? null, s2.id, Date.now(), Date.now());
+
+    // 重切前快照（调试：收集 SQL 应命中这些行）
+    out.beforeNotes = data.db
+      .prepare(
+        `SELECT n.id, n.shot_id, s.origin FROM notes n JOIN shots s ON s.id = n.shot_id WHERE n.project_id = ?`,
+      )
+      .all(project.id);
+    out.preCollect = {
+      notes: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM notes n JOIN shots s ON s.id = n.shot_id
+           WHERE n.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+      edges: data.db
+        .prepare('SELECT COUNT(*) AS c FROM shot_edges WHERE project_id = ?')
+        .get(project.id),
+      annotations: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM shot_annotations a JOIN shots s ON s.id = a.shot_id
+           WHERE a.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+      layouts: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM shot_layout l JOIN shots s ON s.id = l.shot_id
+           WHERE l.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+      groupMembers: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM shot_group_members m JOIN shots s ON s.id = m.shot_id
+           WHERE m.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+    };
+    // 重切：三个新镜头 0-3000 / 3000-6000 / 6000-8000（全部旧 auto 镜头被替换）
+    const result = data.shots.applyDetected(project.id, [
+      { id: 'p1', index: 1, startMs: 0, endMs: 3000, durationMs: 3000 },
+      { id: 'p2', index: 2, startMs: 3000, endMs: 6000, durationMs: 3000 },
+      { id: 'p3', index: 3, startMs: 6000, endMs: 8000, durationMs: 2000 },
+    ]);
+    out.preserved = result.preserved;
+    const shots = data.shots.list(project.id);
+    out.newShotCount = shots.length === 3;
+    const newA = shots.find((s) => s.startMs === 0);
+    const newB = shots.find((s) => s.startMs === 3000);
+    const newC = shots.find((s) => s.startMs === 6000);
+    out.newShotsOk = Boolean(newA && newB && newC);
+    // 笔记：原 id 保留、重挂到覆盖 2500ms 的新镜头
+    const notes = data.notes.list({ projectId: project.id });
+    out.noteKept =
+      notes.length === 1 && notes[0].text.includes('保全用例');
+    // 笔记锚点 = 宿主 s2.startMs=2000 → 精确落点为新镜头 A（0-3000）
+    out.noteRehosted = notes.length === 1 && notes[0].shotId === newA?.id;
+    // 连线：两端按锚点重连（s3@4000→B、s4@6000→C；s3→s4 不与组 [s1,s2] 跨组）
+    const edges = data.wall.listEdges(project.id);
+    out.edgeRelinked =
+      edges.length === 1 &&
+      edges[0].fromShotId !== s3.id &&
+      edges[0].toShotId !== s4.id &&
+      edges[0].fromShotId === newB?.id &&
+      edges[0].toShotId === newC?.id;
+    // 标注：宿主 s2 锚点 2000 → 新镜头 A（0-3000）
+    const anns = data.wall.listAnnotations(project.id, shots.map((s) => s.id));
+    const annTotal = Object.values(anns).reduce((sum, list) => sum + (list as unknown[]).length, 0);
+    out.annotationKept = annTotal === 1;
+    // 布局：x=120 保留、挂新镜头
+    const layout = data.wall.getLayout(project.id);
+    out.layoutKept = layout.length === 1 && layout[0].x === 120 && layout[0].shotId !== s2.id;
+    // 分组：组保留；成员锚点（0）落新镜头 A，重挂后成员仍 1 条
+    const groups = data.wall.listGroups(project.id);
+    out.groupKept =
+      groups.length === 1 &&
+      groups[0].shotIds.length === 1 &&
+      groups[0].shotIds[0] === newA?.id;
+    // 静帧：QA-01 回归——重挂到新镜头且文件引用不变
+    const stillRow = data.db
+      .prepare('SELECT shot_id, time_ms, file_path FROM stills WHERE id = ?')
+      .get('still-preserve') as { shot_id: string; time_ms: number; file_path: string } | undefined;
+    out.stillKept =
+      Boolean(stillRow) && stillRow?.shot_id !== s2.id && stillRow?.time_ms === 2500 && stillRow.file_path === 'preserve/p.png';
+    // 完整性
+    const integrity = data.db.pragma('integrity_check', { simple: true });
+    out.integrityOk = integrity === 'ok';
+    const fkErrors = data.db.pragma('foreign_key_check', { simple: true });
+    out.fkOk = !fkErrors;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error).slice(0, 500);
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch {
+      // 清理失败不影响断言
+    }
+  }
+  return out;
+}
+
+function redetectPreserveChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { redetectPreserveSkipped: true };
+  if (result.exception) return { redetectPreserveException: false };
+  return {
+    redetectApplied: result.newShotCount === true,
+    redetectNewShots: result.newShotsOk === true,
+    redetectNoteKept: result.noteKept === true,
+    redetectNoteRehosted: result.noteRehosted === true,
+    redetectEdgeRelinked: result.edgeRelinked === true,
+    redetectAnnotationKept: result.annotationKept === true,
+    redetectLayoutKept: result.layoutKept === true,
+    redetectGroupKept: result.groupKept === true,
+    redetectStillKept: result.stillKept === true,
+    redetectIntegrity: result.integrityOk === true,
+    redetectFk: result.fkOk === true,
+  };
 }

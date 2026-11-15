@@ -1,23 +1,34 @@
-import type { DetectOptions, Project, ProjectCreateArgs, ProjectMedia, ProjectSource, ProjectUpdateArgs } from '../../shared/types';
+import type {
+  DetectOptions,
+  Project,
+  ProjectCreateArgs,
+  ProjectMedia,
+  ProjectMediaActivateArgs,
+  ProjectMediaAddArgs,
+  ProjectMediaItem,
+  ProjectMediaUpdateArgs,
+  ProjectSource,
+  ProjectUpdateArgs,
+} from '../../shared/types';
 import type { DataLayer } from '../db';
 import { DataError } from '../errors';
 import { ensureProjectDirs, removeProjectDir } from '../paths';
 
-const DEFAULT_DETECT_OPTIONS: DetectOptions = {
+export const DEFAULT_DETECT_OPTIONS: DetectOptions = {
   sensitivity: 0.62,
   minShotSeconds: 0.5,
   filterTransitions: true,
   weights: { s: 0.3, c: 0.3, h: 0.4 },
 };
 
-const DEFAULT_SOURCE: ProjectSource = {
+export const DEFAULT_SOURCE: ProjectSource = {
   type: 'local',
   path: null,
   url: null,
   platform: null,
 };
 
-const DEFAULT_MEDIA: ProjectMedia = {
+export const DEFAULT_MEDIA: ProjectMedia = {
   filename: null,
   container: null,
   durationMs: 0,
@@ -48,8 +59,16 @@ interface ProjectRow {
   media_size_bytes: number | null;
   proxy_path: string | null;
   detect_options_json: string;
+  active_media_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export function defaultDetectOptions(): DetectOptions {
+  return {
+    ...DEFAULT_DETECT_OPTIONS,
+    weights: { ...DEFAULT_DETECT_OPTIONS.weights },
+  };
 }
 
 export function nowIso(): string {
@@ -65,13 +84,13 @@ export class ProjectRepository {
 
   list(): Project[] {
     const rows = this.db.prepare('SELECT * FROM projects ORDER BY updated_at DESC').all() as ProjectRow[];
-    return rows.map(mapProject);
+    return rows.map((row) => this.mapProject(row));
   }
 
   get(id: string): Project {
     const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as ProjectRow | undefined;
     if (!row) throw new DataError('PROJECT_NOT_FOUND', `项目不存在：${id}`, { id });
-    return mapProject(row);
+    return this.mapProject(row);
   }
 
   exists(id: string): boolean {
@@ -90,6 +109,13 @@ export class ProjectRepository {
     };
     const id = randomUuid();
     const now = nowIso();
+    const hasMedia = Boolean(
+      source.path ||
+        source.url ||
+        media.filename ||
+        media.proxyPath ||
+        (args.media?.durationMs ?? 0) > 0,
+    );
 
     ensureProjectDirs(this.layer.dataRoot, id);
 
@@ -101,12 +127,12 @@ export class ProjectRepository {
               id, name, source_type, source_path, source_url, source_platform,
               media_filename, media_container, media_duration_ms, media_width, media_height, media_fps,
               media_video_codec, media_audio_codec, media_size_bytes, proxy_path,
-              detect_options_json, created_at, updated_at
+              detect_options_json, active_media_id, created_at, updated_at
             ) VALUES (
               @id, @name, @sourceType, @sourcePath, @sourceUrl, @sourcePlatform,
               @mediaFilename, @mediaContainer, @mediaDurationMs, @mediaWidth, @mediaHeight, @mediaFps,
               @mediaVideoCodec, @mediaAudioCodec, @mediaSizeBytes, @proxyPath,
-              @detectOptionsJson, @createdAt, @updatedAt
+              @detectOptionsJson, NULL, @createdAt, @updatedAt
             )`,
           )
           .run({
@@ -130,6 +156,15 @@ export class ProjectRepository {
             createdAt: now,
             updatedAt: now,
           });
+        if (hasMedia) {
+          this.layer.projectMedia.add({
+            projectId: id,
+            source,
+            media,
+            detectOptions,
+            activate: true,
+          });
+        }
       });
     } catch (error) {
       removeProjectDir(this.layer.dataRoot, id);
@@ -144,51 +179,82 @@ export class ProjectRepository {
     const patch = args.patch ?? {};
     const name = patch.name?.trim() ?? current.name;
     if (!name) throw new DataError('INVALID_ARGUMENT', '项目名不能为空');
-
-    const source: ProjectSource = { ...current.source, ...(patch.source ?? {}) };
-    const media: ProjectMedia = { ...current.media, ...(patch.media ?? {}) };
-    const detectOptions: DetectOptions = {
-      ...current.detectOptions,
-      ...(patch.detectOptions ?? {}),
-      weights: { ...current.detectOptions.weights, ...(patch.detectOptions?.weights ?? {}) },
-    };
     const now = nowIso();
 
     this.layer.transaction(() => {
       this.db
-        .prepare(
-          `UPDATE projects SET
-            name = @name, source_type = @sourceType, source_path = @sourcePath, source_url = @sourceUrl,
-            source_platform = @sourcePlatform, media_filename = @mediaFilename, media_container = @mediaContainer,
-            media_duration_ms = @mediaDurationMs, media_width = @mediaWidth, media_height = @mediaHeight,
-            media_fps = @mediaFps, media_video_codec = @mediaVideoCodec, media_audio_codec = @mediaAudioCodec,
-            media_size_bytes = @mediaSizeBytes, proxy_path = @proxyPath, detect_options_json = @detectOptionsJson,
-            updated_at = @updatedAt
-          WHERE id = @id`,
-        )
-        .run({
-          id: current.id,
-          name,
-          sourceType: source.type,
-          sourcePath: source.path,
-          sourceUrl: source.url,
-          sourcePlatform: source.platform,
-          mediaFilename: media.filename,
-          mediaContainer: media.container,
-          mediaDurationMs: Math.max(0, Math.round(media.durationMs ?? 0)),
-          mediaWidth: media.width,
-          mediaHeight: media.height,
-          mediaFps: media.fps,
-          mediaVideoCodec: media.videoCodec,
-          mediaAudioCodec: media.audioCodec,
-          mediaSizeBytes: media.sizeBytes,
-          proxyPath: media.proxyPath,
-          detectOptionsJson: JSON.stringify(detectOptions),
-          updatedAt: now,
+        .prepare('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?')
+        .run(name, now, current.id);
+
+      const hasMediaPatch = Boolean(patch.source || patch.media || patch.detectOptions);
+      if (hasMediaPatch && current.activeMediaId) {
+        this.layer.projectMedia.update({
+          projectId: current.id,
+          mediaId: current.activeMediaId,
+          patch: {
+            source: patch.source,
+            media: patch.media,
+            detectOptions: patch.detectOptions,
+          },
         });
+      } else if (hasMediaPatch && current.mediaItems.length === 0) {
+        this.layer.projectMedia.add({
+          projectId: current.id,
+          source: patch.source,
+          media: patch.media,
+          detectOptions: patch.detectOptions,
+          activate: true,
+        });
+      }
     });
 
     return this.get(current.id);
+  }
+
+  listMedia(projectId: string): ProjectMediaItem[] {
+    return this.layer.projectMedia.list(projectId);
+  }
+
+  addMedia(args: ProjectMediaAddArgs): ProjectMediaItem {
+    return this.layer.projectMedia.add(args);
+  }
+
+  updateMedia(args: ProjectMediaUpdateArgs): ProjectMediaItem {
+    return this.layer.projectMedia.update(args);
+  }
+
+  activateMedia(args: ProjectMediaActivateArgs): Project {
+    this.layer.projectMedia.activate(args.projectId, args.mediaId);
+    return this.get(args.projectId);
+  }
+
+  private mapProject(row: ProjectRow): Project {
+    const mediaItems = this.layer.projectMedia.list(row.id);
+    const active =
+      mediaItems.find((item) => item.id === row.active_media_id) ?? mediaItems[0] ?? null;
+    if (!active) return mapLegacyProject(row, mediaItems);
+    return {
+      id: row.id,
+      name: row.name,
+      source: { ...active.source },
+      media: {
+        filename: active.filename,
+        container: active.container,
+        durationMs: active.durationMs,
+        width: active.width,
+        height: active.height,
+        fps: active.fps,
+        videoCodec: active.videoCodec,
+        audioCodec: active.audioCodec,
+        sizeBytes: active.sizeBytes,
+        proxyPath: active.proxyPath,
+      },
+      activeMediaId: active.id,
+      mediaItems,
+      detectOptions: active.detectOptions,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   delete(id: string): void {
@@ -209,7 +275,7 @@ function randomUuid(): string {
   return crypto.randomUUID();
 }
 
-function mapProject(row: ProjectRow): Project {
+function mapLegacyProject(row: ProjectRow, mediaItems: ProjectMediaItem[] = []): Project {
   return {
     id: row.id,
     name: row.name,
@@ -231,13 +297,15 @@ function mapProject(row: ProjectRow): Project {
       sizeBytes: row.media_size_bytes,
       proxyPath: row.proxy_path,
     },
+    activeMediaId: null,
+    mediaItems,
     detectOptions: parseDetectOptions(row.detect_options_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-function parseDetectOptions(json: string): DetectOptions {
+export function parseDetectOptions(json: string): DetectOptions {
   try {
     const parsed = JSON.parse(json) as Partial<DetectOptions>;
     return {

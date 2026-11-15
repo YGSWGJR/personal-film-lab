@@ -23,6 +23,7 @@ export class CaptureService {
 
   async capture(args: {
     projectId: string;
+    mediaId?: string | null;
     timeMs: number;
     shotId?: string | null;
     caption?: string | null;
@@ -33,6 +34,7 @@ export class CaptureService {
   private async captureWithRole(
     args: {
       projectId: string;
+      mediaId?: string | null;
       timeMs: number;
       shotId?: string | null;
       caption?: string | null;
@@ -40,7 +42,18 @@ export class CaptureService {
     role: 'main' | 'auto-thumb',
   ): Promise<Still> {
     const project = this.data.projects.get(args.projectId);
-    const sourcePath = project.source.path || project.media.proxyPath;
+    let mediaId: string | null = null;
+    if (args.shotId) {
+      const shot = this.data.shots.get(args.shotId);
+      mediaId = shot.mediaId ?? null;
+    } else {
+      mediaId = args.mediaId ?? this.data.projectMedia.activeId(project.id);
+    }
+    if (!mediaId) {
+      throw new CaptureError('CAPTURE_SOURCE_MISSING', '项目没有可读取的视频');
+    }
+    const media = this.data.projectMedia.get(project.id, mediaId);
+    const sourcePath = media.source.path || media.proxyPath;
     if (!sourcePath) {
       throw new CaptureError('CAPTURE_SOURCE_MISSING', '项目没有可读取的本地影片路径', {
         projectId: project.id,
@@ -58,7 +71,7 @@ export class CaptureService {
       }
     } else {
       const shot = this.data.shots
-        .list(project.id)
+        .list(project.id, mediaId)
         .find((item) => args.timeMs >= item.startMs && args.timeMs < item.endMs);
       shotId = shot?.id ?? null;
     }
@@ -87,6 +100,7 @@ export class CaptureService {
 
       const still = this.data.stills.create({
         projectId: project.id,
+        mediaId,
         shotId,
         timeMs: capturedTimeMs,
         filePath: pngPath,
@@ -124,6 +138,7 @@ export class CaptureService {
     if (existing) return existing;
     return this.captureWithRole({
       projectId: shot.projectId,
+      mediaId: shot.mediaId,
       shotId: shot.id,
       timeMs: Math.round((shot.startMs + shot.endMs) / 2),
       caption: args.caption ?? `镜头 ${String(shot.index).padStart(2, '0')} 自动缩略图`,

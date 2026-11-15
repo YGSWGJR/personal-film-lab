@@ -71,6 +71,16 @@ export class NativeOverlay {
     this.hwnd = hwnd;
   }
 
+  /** S42/Z02：调试与状态日志用——子窗口当前是否可见 */
+  get isVisible(): boolean {
+    return this.visible;
+  }
+
+  /** S42/Z02：调试与状态日志用——当前层级状态（normal/bottom/hidden） */
+  get currentZLevel(): OverlayLayer {
+    return this.zLevel;
+  }
+
   static create(parentHwnd: bigint, rect: PhysicalRect): NativeOverlay {
     // 使用系统预置 "STATIC" 窗口类：不抢焦点（WS_EX_NOACTIVATE），由 mpv 负责绘制
     const hwnd = CreateWindowExA(

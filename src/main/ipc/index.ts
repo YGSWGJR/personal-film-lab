@@ -71,6 +71,10 @@ import type {
   OverlayLayer,
   Project,
   ProjectCreateArgs,
+  ProjectMediaActivateArgs,
+  ProjectMediaAddArgs,
+  ProjectMediaItem,
+  ProjectMediaUpdateArgs,
   ProjectOpenArgs,
   ProjectOpenResult,
   ProjectSaveArgs,
@@ -128,6 +132,7 @@ import type { ProjectPackageService } from '../../data/project-package';
 import { MediaError } from '../media/media-error';
 import type { MediaService } from '../media/media-service';
 import type { AiAccessService } from '../ai/mcp-server';
+import type { HardwareCapabilityReport } from '../../shared/types';
 import { PlayerError } from '../player/mpv-lib';
 import type { PlayerService } from '../player/player-service';
 import type { ScopeService } from '../scope/scope-service';
@@ -158,6 +163,7 @@ export interface IpcDeps {
   getStats(): StatsService | null;
   getAi(): AiAccessService | null;
   getLocalAi(): import('../ai/local-vision-service').LocalVisionService | null;
+  getHardware(): import('../hardware/hardware-capability-service').HardwareCapabilityService | null;
 }
 
 /**
@@ -183,6 +189,11 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   const requireLocalAi = (): import('../ai/local-vision-service').LocalVisionService => {
     const service = deps.getLocalAi();
     if (!service) throw new Error('本地视觉模型服务尚未就绪');
+    return service;
+  };
+  const requireHardware = (): import('../hardware/hardware-capability-service').HardwareCapabilityService => {
+    const service = deps.getHardware();
+    if (!service) throw new Error('硬件能力扫描服务尚未就绪');
     return service;
   };
   const requireData = (): DataLayer => {
@@ -459,6 +470,18 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requireMedia().setTranscodeConcurrency(args.concurrency);
       return { concurrency: args.concurrency };
     }),
+  );
+
+  // ---------- hardware（S42/Z04：硬件能力扫描） ----------
+  ipcMain.handle(
+    IPC.HARDWARE_SCAN,
+    withEnvelope((args: { force?: boolean } | undefined): Promise<HardwareCapabilityReport> =>
+      requireHardware().scan({ force: args?.force === true }),
+    ),
+  );
+  ipcMain.handle(
+    IPC.HARDWARE_STATUS,
+    withEnvelope((): Promise<HardwareCapabilityReport> => requireHardware().getStatus()),
   );
 
   // ---------- scope ----------
@@ -869,6 +892,30 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: ProjectUpdateArgs): Project => requireData().projects.update(args)),
   );
   ipcMain.handle(
+    IPC.PROJECT_LIST_MEDIA,
+    withEnvelope((args: { projectId: string }): ProjectMediaItem[] =>
+      requireData().projects.listMedia(args.projectId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_ADD_MEDIA,
+    withEnvelope((args: ProjectMediaAddArgs): ProjectMediaItem =>
+      requireData().projects.addMedia(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_UPDATE_MEDIA,
+    withEnvelope((args: ProjectMediaUpdateArgs): ProjectMediaItem =>
+      requireData().projects.updateMedia(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_ACTIVATE_MEDIA,
+    withEnvelope((args: ProjectMediaActivateArgs): Project =>
+      requireData().projects.activateMedia(args),
+    ),
+  );
+  ipcMain.handle(
     IPC.PROJECT_DELETE,
     withEnvelope((args: { id: string }): { deleted: true } => {
       requireData().projects.delete(args.id);
@@ -893,7 +940,9 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // ---------- data: shot ----------
   ipcMain.handle(
     IPC.SHOT_LIST,
-    withEnvelope((args: { projectId: string }): Shot[] => requireData().shots.list(args.projectId)),
+    withEnvelope((args: { projectId: string; mediaId?: string }): Shot[] =>
+      requireData().shots.list(args.projectId, args.mediaId),
+    ),
   );
   ipcMain.handle(
     IPC.SHOT_GET,
@@ -955,7 +1004,9 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // ---------- data: still ----------
   ipcMain.handle(
     IPC.STILL_LIST,
-    withEnvelope((args: { projectId?: string; shotId?: string }): Still[] => requireData().stills.list(args)),
+    withEnvelope((args: { projectId?: string; shotId?: string; mediaId?: string }): Still[] =>
+      requireData().stills.list(args),
+    ),
   );
   ipcMain.handle(
     IPC.STILL_GET,

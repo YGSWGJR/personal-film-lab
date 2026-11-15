@@ -119,6 +119,12 @@ select:focus-visible {
   min-width: 0;
   align-items: center;
   gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .brand-mark {
@@ -384,8 +390,16 @@ select:focus-visible {
   place-items: center;
 }
 
+.workspace-stack {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
 .workbench {
   display: grid;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   grid-template-columns: var(--left-column, 260px) minmax(480px, 1fr) var(--right-column, 300px);
@@ -599,7 +613,6 @@ select:focus-visible {
 }
 
 @media (max-height: 720px) {
-@media (max-height: 720px) {
   .app-shell {
     grid-template-rows: 40px minmax(0, 1fr) 24px;
   }
@@ -633,8 +646,11 @@ select:focus-visible {
   position: fixed;
   inset: 0;
   z-index: 140;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 24px;
   background: rgba(2, 6, 23, 0.68);
 }
 
@@ -642,7 +658,8 @@ select:focus-visible {
   display: flex;
   width: 420px;
   max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 48px);
+  max-height: 100%;
+  box-sizing: border-box;
   overflow: hidden auto;
   flex-direction: column;
   gap: 12px;
@@ -719,6 +736,20 @@ select:focus-visible {
 
 .picker-option:hover {
   border-color: var(--blue-hi);
+}
+
+.wall-picker-mask {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 24px;
+}
+
+.wall-picker-card {
+  width: 460px;
+  max-height: calc(100dvh - 48px);
+  margin: auto;
 }
 
 .picker-option b {

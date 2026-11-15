@@ -273,7 +273,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <transition name="modal">
+  <transition name="modal" :duration="{ enter: 220, leave: 220 }">
     <div v-if="open" class="modal-mask" @pointerdown.self="emit('close')">
       <section class="stats-modal">
         <header class="stats-head">

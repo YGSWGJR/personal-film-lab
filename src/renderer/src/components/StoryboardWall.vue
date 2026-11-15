@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import ContextMenu from './ContextMenu.vue';
+import StillLibraryGrid from './StillLibraryGrid.vue';
 import type {
+  Still,
   WallEdge,
   WallEdgeKind,
   WallGroup,
@@ -47,6 +49,7 @@ const emit = defineEmits<{
   openBoardDir: [];
   createComposite: [ids: string[]];
   dissolveComposite: [compositeId: string];
+  deleteSelection: [ids: string[]];
   project: [];
 }>();
 
@@ -55,6 +58,41 @@ const activeBoardId = computed(() => props.boardId ?? props.projectId);
 
 /* ---------- 批次9：复合节点展开托盘 ---------- */
 const expandedCompositeId = ref<string | null>(null);
+const stillsOpen = ref(false);
+const playerReturnToStills = ref(false);
+const playerStillTimeMs = ref<number | null>(null);
+
+function stillViewStorageKey(): string {
+  return `pfl:wall-view:${props.projectId}`;
+}
+
+function restoreStillViewMode(): void {
+  if (props.boardMode) return;
+  try {
+    stillsOpen.value = localStorage.getItem(stillViewStorageKey()) === 'stills';
+  } catch {
+    stillsOpen.value = false;
+  }
+}
+
+function toggleStillLibrary(): void {
+  if (player.value.open) closePlayer();
+  stillsOpen.value = !stillsOpen.value;
+  try {
+    localStorage.setItem(stillViewStorageKey(), stillsOpen.value ? 'stills' : 'canvas');
+  } catch {
+    // ignore storage restrictions
+  }
+}
+
+function stillFullAssetUrl(still: Still): string {
+  const encodedPath = still.filePath
+    .split(/[\\/]/u)
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `lapian-asset://${props.projectId}/${encodedPath}`;
+}
 const trayComposite = computed(
   () => visibleShots.value.find((item) => item.shot.id === expandedCompositeId.value) ?? null,
 );
@@ -131,7 +169,16 @@ interface Ann {
   id: string;
   type: AnnType;
   color: string;
-  data: { pts?: Array<{ x: number; y: number }>; x?: number; y?: number; w?: number; h?: number; text?: string };
+  size?: number;
+  data: {
+    pts?: Array<{ x: number; y: number }>;
+    x?: number;
+    y?: number;
+    w?: number;
+    h?: number;
+    text?: string;
+    size?: number;
+  };
 }
 const player = ref({
   open: false,
@@ -143,8 +190,41 @@ const player = ref({
 const annotations = ref<Map<string, Ann[]>>(new Map());
 const annTool = ref<AnnType | 'select' | 'eraser'>('brush');
 const annColor = ref('#ff5a5a');
+const annBrushSize = ref(8);
+const annCursorStyle = computed(() => {
+  if (
+    annTool.value !== 'brush' &&
+    annTool.value !== 'smear' &&
+    annTool.value !== 'eraser'
+  ) {
+    return {};
+  }
+  const size = Math.max(4, Math.min(48, Math.round(annBrushSize.value)));
+  const diameter = Math.max(10, size + 4);
+  const mark = encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${diameter}" height="${diameter}" viewBox="0 0 ${diameter} ${diameter}"><circle cx="${diameter / 2}" cy="${diameter / 2}" r="${size / 2}" fill="none" stroke="white" stroke-width="1.5"/><circle cx="${diameter / 2}" cy="${diameter / 2}" r="${size / 2}" fill="none" stroke="black" stroke-width=".5"/></svg>`,
+  );
+  return {
+    cursor: `url("data:image/svg+xml,${mark}") ${diameter / 2} ${diameter / 2}, crosshair`,
+  };
+});
 const annSel = ref<Ann | null>(null);
-const annDrafting = ref<{ card: WorkspaceShot; o: Ann } | null>(null);
+const annDrafting = ref<{
+  card: WorkspaceShot;
+  o: Ann;
+  before: Ann[];
+  lastPoint: { x: number; y: number };
+  raf: number;
+} | null>(null);
+const eraserDraft = ref<{
+  card: WorkspaceShot;
+  before: Ann[];
+  changed: boolean;
+} | null>(null);
+const annHistory = ref<
+  Map<string, { undo: Ann[][]; redo: Ann[][] }>
+>(new Map());
+const annPersistQueues = new Map<string, Promise<void>>();
 const playerTrackEl = ref<HTMLElement | null>(null);
 const playProgress = ref(0);
 const playerDepths = ref<Map<string, number>>(new Map());
@@ -268,12 +348,16 @@ defineExpose({ reloadGraph });
 onMounted(() => {
   measureStage();
   applyInitialState();
+  restoreStillViewMode();
   ensureLayout();
   void reloadGraph();
   window.addEventListener('resize', onWindowResize);
   // capture 阶段拦截：放映打开时按键先于 App 全局快捷键（否则 Esc 会连带关掉整面墙）
   window.addEventListener('keydown', onGlobalKey, true);
   window.addEventListener('keyup', onGlobalKeyUp, true);
+  window.addEventListener('pointermove', onWindowAnnPointerMove);
+  window.addEventListener('pointerup', onWindowAnnPointerUp);
+  window.addEventListener('pointercancel', onWindowAnnPointerCancel);
 });
 
 async function reloadGraph(): Promise<void> {
@@ -322,7 +406,7 @@ function onGlobalKey(e: KeyboardEvent): void {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopImmediatePropagation();
-      closePlayer();
+      if (!cancelAnnGesture()) closePlayer();
       return;
     }
     if (e.key === 'ArrowRight') {
@@ -347,8 +431,50 @@ function onGlobalKey(e: KeyboardEvent): void {
       e.stopImmediatePropagation();
       annTool.value = map[k] as AnnType | 'select' | 'eraser';
     }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      historyStep(e.shiftKey ? 'redo' : 'undo');
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      historyStep('redo');
+      return;
+    }
     return;
   }
+  const keyTarget = e.target as HTMLElement | null;
+  if (
+    keyTarget?.tagName === 'INPUT' ||
+    keyTarget?.tagName === 'TEXTAREA' ||
+    keyTarget?.tagName === 'SELECT' ||
+    keyTarget?.isContentEditable
+  ) {
+    return;
+  }
+  if (e.key === 'Backspace' || e.key === 'Delete') {
+    if (selectedIds.value.size === 0) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const ids = [...selectedIds.value];
+    if (props.boardMode) {
+      emit('deleteSelection', ids);
+    } else {
+      for (const id of ids) void removeNodeFromWall(id);
+      selectedIds.value = new Set();
+      emit('selectionChange', []);
+    }
+    return;
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    emit('close');
+    return;
+  }
+  if (stillsOpen.value) return;
   if (e.code === 'Space') spaceDown = true;
   if (e.key === '0' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
@@ -651,6 +777,8 @@ async function openPlayer(startId: string): Promise<void> {
     single: false,
     playing: false,
   };
+  playerReturnToStills.value = false;
+  playerStillTimeMs.value = null;
   annSel.value = null;
   playProgress.value = 0;
   if (props.boardMode) {
@@ -671,6 +799,28 @@ async function openPlayer(startId: string): Promise<void> {
   }
 }
 
+async function openStillInPlayer(still: Still): Promise<void> {
+  if (!still.shotId) return;
+  const shot = props.shots.find((item) => item.id === still.shotId);
+  if (!shot) {
+    edgeHint.value = '该静帧对应的镜头已不存在，无法回到原放映。';
+    window.setTimeout(() => (edgeHint.value = ''), 2600);
+    return;
+  }
+  stillsOpen.value = false;
+  await openPlayer(shot.id);
+  if (!player.value.open) return;
+  playerReturnToStills.value = true;
+  playerStillTimeMs.value = still.timeMs;
+  const index = player.value.scope.findIndex((item) => item.id === shot.id);
+  if (index >= 0) {
+    player.value.scope = player.value.scope.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, thumbnail: stillFullAssetUrl(still) } : item,
+    );
+    player.value.idx = index;
+  }
+}
+
 const playerScopeLabel = computed(() => {
   if (player.value.scope.length === 0) return '';
   const cur = player.value.scope[player.value.idx];
@@ -679,9 +829,13 @@ const playerScopeLabel = computed(() => {
 });
 
 function closePlayer(): void {
+  const returnToStills = playerReturnToStills.value;
   stopPlay();
   player.value.open = false;
   for (const shot of player.value.scope) refreshThumbAnn(shot.id);
+  playerStillTimeMs.value = null;
+  playerReturnToStills.value = false;
+  if (returnToStills) stillsOpen.value = true;
 }
 
 function playerMove(d: number): void {
@@ -730,6 +884,74 @@ function annListOf(shotId: string): Ann[] {
   }
   return list;
 }
+
+function cloneAnnList(list: Ann[]): Ann[] {
+  return list.map((item) => ({
+    ...item,
+    data: {
+      ...item.data,
+      pts: item.data.pts?.map((point) => ({ ...point })),
+    },
+  }));
+}
+
+function annHistoryOf(shotId: string): { undo: Ann[][]; redo: Ann[][] } {
+  let entry = annHistory.value.get(shotId);
+  if (!entry) {
+    entry = { undo: [], redo: [] };
+    annHistory.value.set(shotId, entry);
+  }
+  return entry;
+}
+
+function pushAnnHistory(shotId: string, before: Ann[]): void {
+  const entry = annHistoryOf(shotId);
+  entry.undo.push(cloneAnnList(before));
+  if (entry.undo.length > 60) entry.undo.shift();
+  entry.redo = [];
+}
+
+function annStrokeWidth(object: Ann): number {
+  const size = Math.max(
+    1,
+    Math.min(48, Number(object.size ?? object.data.size) || 1.5),
+  );
+  return Math.max(0.08, size / 12);
+}
+
+function historyStep(direction: 'undo' | 'redo'): void {
+  const shot = player.value.scope[player.value.idx];
+  if (!shot) return;
+  const entry = annHistoryOf(shot.id);
+  const source = direction === 'undo' ? entry.undo : entry.redo;
+  const target = direction === 'undo' ? entry.redo : entry.undo;
+  const next = source.pop();
+  if (!next) return;
+  target.push(cloneAnnList(annListOf(shot.id)));
+  annotations.value.set(shot.id, cloneAnnList(next));
+  annSel.value = null;
+  refreshPlayerAnn(shot);
+  persistAnn(shot.id);
+}
+
+function cancelAnnGesture(): boolean {
+  const drafting = annDrafting.value;
+  if (drafting) {
+    if (drafting.raf) cancelAnimationFrame(drafting.raf);
+    annotations.value.set(drafting.card.id, cloneAnnList(drafting.before));
+    annDrafting.value = null;
+    refreshPlayerAnn(drafting.card);
+    return true;
+  }
+  const erasing = eraserDraft.value;
+  if (erasing) {
+    annotations.value.set(erasing.card.id, cloneAnnList(erasing.before));
+    eraserDraft.value = null;
+    refreshPlayerAnn(erasing.card);
+    return true;
+  }
+  return false;
+}
 function annMarkup(shotId: string, interactive: boolean): string {
   const list = annListOf(shotId);
   const mosaic = list.filter((o) => o.type === 'mosaic');
@@ -753,7 +975,7 @@ function annMarkup(shotId: string, interactive: boolean): string {
       }
       out += wrap(o, cells + '<rect x="' + d.x + '" y="' + d.y + '" width="' + d.w + '" height="' + d.h + '" fill="none" stroke="rgba(255,255,255,.4)" stroke-width=".35" vector-effect="non-scaling-stroke"/>');
     } else if ((o.type === 'brush' || o.type === 'smear') && d.pts) {
-      out += wrap(o, '<polyline points="' + pts2str(d.pts) + '" fill="none" stroke="' + o.color + '" stroke-width="' + (o.type === 'smear' ? 3.4 : 1.5) + '" stroke-linecap="round" stroke-linejoin="round"/>');
+      out += wrap(o, '<polyline points="' + pts2str(d.pts) + '" fill="none" stroke="' + o.color + '" stroke-width="' + annStrokeWidth(o) + '" stroke-linecap="round" stroke-linejoin="round"/>');
     } else if (o.type === 'line' && d.pts && d.pts.length >= 2) {
       out += wrap(o, '<line x1="' + d.pts[0].x + '" y1="' + d.pts[0].y + '" x2="' + d.pts[1].x + '" y2="' + d.pts[1].y + '" stroke="' + o.color + '" stroke-width="1.7"/>');
     } else if (o.type === 'arrow' && d.pts && d.pts.length >= 2) {
@@ -782,14 +1004,44 @@ function refreshThumbAnn(shotId: string): void {
 }
 function persistAnn(shotId: string): void {
   const list = annListOf(shotId);
-  const items = list.map((o) => ({ type: o.type, color: o.color, data: o.data }));
+  const items = list.map((o) => ({
+    type: o.type,
+    color: o.color,
+    data: {
+      ...(o.data.pts
+        ? { pts: o.data.pts.map((point) => ({ x: point.x, y: point.y })) }
+        : {}),
+      ...(o.data.x !== undefined ? { x: o.data.x } : {}),
+      ...(o.data.y !== undefined ? { y: o.data.y } : {}),
+      ...(o.data.w !== undefined ? { w: o.data.w } : {}),
+      ...(o.data.h !== undefined ? { h: o.data.h } : {}),
+      ...(o.data.text !== undefined ? { text: o.data.text } : {}),
+      ...(o.size !== undefined ? { size: o.size } : {}),
+    },
+  }));
   // 批次6 修复：独立分镜本标注走 node API（此前 saveAnnotations('boards') 静默失败）
   const save = props.boardMode
     ? window.api.wall.saveNodeAnnotations({ boardId: activeBoardId.value, nodeId: shotId, items })
     : window.api.wall.saveAnnotations({ projectId: props.projectId, shotId, items });
-  void save.then(function () {
-    refreshThumbAnn(shotId);
-  });
+  const previous = annPersistQueues.get(shotId) ?? Promise.resolve();
+  const queued = previous
+    .catch(() => undefined)
+    .then(async function () {
+      const result = await save;
+      if (!result.ok) {
+        throw new Error(result.error.message);
+      }
+      refreshThumbAnn(shotId);
+    });
+  annPersistQueues.set(shotId, queued);
+  void queued
+    .catch((error) => {
+      edgeHint.value = error instanceof Error ? error.message : String(error);
+      window.setTimeout(() => (edgeHint.value = ''), 2400);
+    })
+    .finally(() => {
+      if (annPersistQueues.get(shotId) === queued) annPersistQueues.delete(shotId);
+    });
 }
 
 function curAnnSvg(): SVGElement | null {
@@ -800,40 +1052,161 @@ function annSlidePos(event: PointerEvent, svg: SVGElement): { x: number; y: numb
   const rect = svg.getBoundingClientRect();
   return { x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 56.25 };
 }
+
+function pointSegmentDistance(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+  const t = Math.max(
+    0,
+    Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq),
+  );
+  return Math.hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy));
+}
+
+function annotationContains(annotation: Ann, point: { x: number; y: number }): boolean {
+  const data = annotation.data;
+  if (
+    (annotation.type === 'brush' || annotation.type === 'smear') &&
+    data.pts &&
+    data.pts.length > 0
+  ) {
+    const tolerance = Math.max(0.5, annStrokeWidth(annotation) / 2 + 0.35);
+    if (data.pts.length === 1) {
+      return Math.hypot(point.x - data.pts[0].x, point.y - data.pts[0].y) <= tolerance;
+    }
+    for (let index = 1; index < data.pts.length; index += 1) {
+      if (pointSegmentDistance(point, data.pts[index - 1], data.pts[index]) <= tolerance) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if ((annotation.type === 'line' || annotation.type === 'arrow') && data.pts?.length) {
+    return pointSegmentDistance(point, data.pts[0], data.pts[data.pts.length - 1]) <= 0.9;
+  }
+  const pts = data.pts;
+  if (pts && pts.length >= 2) {
+    const x0 = Math.min(pts[0].x, pts[1].x) - 0.6;
+    const x1 = Math.max(pts[0].x, pts[1].x) + 0.6;
+    const y0 = Math.min(pts[0].y, pts[1].y) - 0.6;
+    const y1 = Math.max(pts[0].y, pts[1].y) + 0.6;
+    if (annotation.type === 'ellipse') {
+      const cx = (pts[0].x + pts[1].x) / 2;
+      const cy = (pts[0].y + pts[1].y) / 2;
+      const rx = Math.max(0.6, Math.abs(pts[1].x - pts[0].x) / 2);
+      const ry = Math.max(0.6, Math.abs(pts[1].y - pts[0].y) / 2);
+      return ((point.x - cx) / (rx + 0.6)) ** 2 + ((point.y - cy) / (ry + 0.6)) ** 2 <= 1;
+    }
+    return point.x >= x0 && point.x <= x1 && point.y >= y0 && point.y <= y1;
+  }
+  if (annotation.type === 'text' && data.pts?.length) {
+    const anchor = data.pts[0];
+    const textWidth = Math.max(4, String(data.text ?? '').length * 1.8);
+    return (
+      point.x >= anchor.x - 0.8 &&
+      point.x <= anchor.x + textWidth &&
+      point.y >= anchor.y - 3.4 &&
+      point.y <= anchor.y + 0.8
+    );
+  }
+  if (annotation.type === 'mosaic' && data.x !== undefined && data.y !== undefined) {
+    return (
+      point.x >= data.x - 0.6 &&
+      point.x <= data.x + (data.w ?? 0) + 0.6 &&
+      point.y >= data.y - 0.6 &&
+      point.y <= data.y + (data.h ?? 0) + 0.6
+    );
+  }
+  return false;
+}
+
+function annotationAtPoint(shotId: string, point: { x: number; y: number }): Ann | null {
+  const list = annListOf(shotId);
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (annotationContains(list[index], point)) return list[index];
+  }
+  return null;
+}
 function onAnnPointerDown(event: PointerEvent): void {
   const svg = curAnnSvg();
   const shot = player.value.scope[player.value.idx];
   if (!svg || !shot) return;
   const p0 = annSlidePos(event, svg);
   if (annTool.value === 'select' || annTool.value === 'eraser') {
-    const hit = (event.target as Element).closest ? ((event.target as Element).closest('[data-oid]') as SVGElement | null) : null;
-    const oid = hit ? hit.dataset.oid : null;
-    const o = oid ? annListOf(shot.id).find(function (x) { return x.id === oid; }) : null;
+    const o = annotationAtPoint(shot.id, p0);
     if (o) {
       if (annTool.value === 'eraser') {
+        const before = cloneAnnList(annListOf(shot.id));
         annotations.value.set(shot.id, annListOf(shot.id).filter(function (x) { return x !== o; }));
-        persistAnn(shot.id);
+        refreshPlayerAnn(shot);
+        eraserDraft.value = {
+          card: shot,
+          before,
+          changed: true,
+        };
       } else {
         annSel.value = annSel.value && annSel.value.id === o.id ? null : o;
       }
     } else if (annTool.value === 'select' && annSel.value) {
       annSel.value = null;
+    } else if (annTool.value === 'eraser') {
+      eraserDraft.value = { card: shot, before: cloneAnnList(annListOf(shot.id)), changed: false };
+    }
+    if (annTool.value === 'eraser') {
+      try {
+        svg.setPointerCapture(event.pointerId);
+      } catch {
+        // ignore capture restrictions
+      }
     }
     return;
   }
   if (annTool.value === 'text') {
-    annListOf(shot.id).push({ id: 'a' + Date.now() + annSeq++, type: 'text', color: annColor.value, data: { pts: [p0], text: '标注 ' + annSeq } });
+    const before = cloneAnnList(annListOf(shot.id));
+    annListOf(shot.id).push({
+      id: 'a' + Date.now() + annSeq++,
+      type: 'text',
+      color: annColor.value,
+      data: { pts: [p0], text: '标注 ' + annSeq },
+    });
+    pushAnnHistory(shot.id, before);
     persistAnn(shot.id);
     return;
   }
   if (annTool.value === 'mosaic') {
-    annListOf(shot.id).push({ id: 'a' + Date.now() + annSeq++, type: 'mosaic', color: annColor.value, data: { x: p0.x - 8, y: p0.y - 4, w: 16, h: 8 } });
+    const before = cloneAnnList(annListOf(shot.id));
+    annListOf(shot.id).push({
+      id: 'a' + Date.now() + annSeq++,
+      type: 'mosaic',
+      color: annColor.value,
+      data: { x: p0.x - 8, y: p0.y - 4, w: 16, h: 8 },
+    });
+    pushAnnHistory(shot.id, before);
     persistAnn(shot.id);
     return;
   }
-  const o: Ann = { id: 'a' + Date.now() + annSeq++, type: annTool.value as AnnType, color: annColor.value, data: { pts: [p0, p0] } };
+  const o: Ann = {
+    id: 'a' + Date.now() + annSeq++,
+    type: annTool.value as AnnType,
+    color: annColor.value,
+    size: annBrushSize.value,
+    data: { pts: [p0, p0] },
+  };
+  const before = cloneAnnList(annListOf(shot.id));
   annListOf(shot.id).push(o);
-  annDrafting.value = { card: shot, o: o };
+  annDrafting.value = {
+    card: shot,
+    o,
+    before,
+    lastPoint: p0,
+    raf: 0,
+  };
   try {
     svg.setPointerCapture(event.pointerId);
   } catch {
@@ -841,33 +1214,125 @@ function onAnnPointerDown(event: PointerEvent): void {
   }
 }
 function onAnnPointerMove(event: PointerEvent): void {
-  const drafting = annDrafting.value;
-  if (!drafting) return;
   const svg = curAnnSvg();
   if (!svg) return;
   const p = annSlidePos(event, svg);
-  const o = drafting.o;
-  if ((o.type === 'brush' || o.type === 'smear') && o.data.pts) {
-    const pts = o.data.pts;
-    if (pts.length === 2 && pts[0].x === pts[1].x && pts[0].y === pts[1].y) o.data.pts = [pts[0], p];
-    else pts.push(p);
-  } else if (o.data.pts && o.data.pts.length >= 2) {
-    o.data.pts[1] = p;
+  const erasing = eraserDraft.value;
+  if (erasing) {
+    const hit = annotationAtPoint(erasing.card.id, p);
+    if (hit) {
+      const next = annListOf(erasing.card.id).filter((item) => item.id !== hit.id);
+      if (next.length !== annListOf(erasing.card.id).length) {
+        annotations.value.set(erasing.card.id, next);
+        erasing.changed = true;
+        refreshPlayerAnn(erasing.card);
+      }
+    }
+    return;
   }
-  refreshPlayerAnn(drafting.card);
-}
-function onAnnPointerUp(): void {
   const drafting = annDrafting.value;
   if (!drafting) return;
+  drafting.lastPoint = p;
+  if (drafting.raf) return;
   const o = drafting.o;
+  drafting.raf = requestAnimationFrame(() => {
+    const current = annDrafting.value;
+    if (!current || current.o !== o) return;
+    current.raf = 0;
+    const point = current.lastPoint;
+    if ((o.type === 'brush' || o.type === 'smear') && o.data.pts) {
+      const pts = o.data.pts;
+      const tail = pts.at(-1);
+      if (!tail || Math.hypot(point.x - tail.x, point.y - tail.y) >= 0.08) {
+        pts.push(point);
+        if (pts.length > 1800) pts.splice(1, pts.length - 1799);
+      }
+    } else if (o.data.pts && o.data.pts.length >= 2) {
+      o.data.pts[1] = point;
+    }
+    refreshPlayerAnn(current.card);
+  });
+}
+function onAnnPointerUp(event?: PointerEvent): void {
+  const erasing = eraserDraft.value;
+  if (erasing) {
+    eraserDraft.value = null;
+    if (erasing.changed) {
+      pushAnnHistory(erasing.card.id, erasing.before);
+      persistAnn(erasing.card.id);
+    }
+    try {
+      if (event) curAnnSvg()?.releasePointerCapture(event.pointerId);
+    } catch {
+      // ignore capture release restrictions
+    }
+    return;
+  }
+  const drafting = annDrafting.value;
+  if (!drafting) return;
+  if (drafting.raf) cancelAnimationFrame(drafting.raf);
+  const o = drafting.o;
+  if (event) {
+    const svg = curAnnSvg();
+    if (svg) {
+      const point = annSlidePos(event, svg);
+      if ((o.type === 'brush' || o.type === 'smear') && o.data.pts) {
+        const tail = o.data.pts.at(-1);
+        if (!tail || Math.hypot(point.x - tail.x, point.y - tail.y) >= 0.02) {
+          o.data.pts.push(point);
+        }
+      } else if (o.data.pts && o.data.pts.length >= 2) {
+        o.data.pts[1] = point;
+      }
+    }
+  }
   if (o.type !== 'brush' && o.type !== 'smear' && o.data.pts && o.data.pts.length >= 2) {
     if (Math.abs(o.data.pts[0].x - o.data.pts[1].x) < 0.4 && Math.abs(o.data.pts[0].y - o.data.pts[1].y) < 0.4) {
       annotations.value.set(drafting.card.id, annListOf(drafting.card.id).filter(function (x) { return x !== o; }));
     }
   }
   annDrafting.value = null;
+  const list = annListOf(drafting.card.id);
+  if (!list.includes(o)) return;
+  if ((o.type === 'brush' || o.type === 'smear') && (o.data.pts?.length ?? 0) < 2) {
+    annotations.value.set(drafting.card.id, cloneAnnList(drafting.before));
+    refreshPlayerAnn(drafting.card);
+    return;
+  }
+  pushAnnHistory(drafting.card.id, drafting.before);
   persistAnn(drafting.card.id);
+  try {
+    if (event) curAnnSvg()?.releasePointerCapture(event.pointerId);
+  } catch {
+    // ignore capture release restrictions
+  }
 }
+
+function onAnnPointerCancel(): void {
+  cancelAnnGesture();
+}
+
+/**
+ * Pointer capture is the normal path, but electron hosts can deliver the final
+ * mouse button release to the window rather than the captured SVG. Keeping a
+ * window-level fallback ensures a simulated/manual drag still commits exactly
+ * once and that Undo receives the corresponding history entry.
+ */
+function onWindowAnnPointerMove(event: PointerEvent): void {
+  if (!annDrafting.value && !eraserDraft.value) return;
+  onAnnPointerMove(event);
+}
+
+function onWindowAnnPointerUp(event: PointerEvent): void {
+  if (!annDrafting.value && !eraserDraft.value) return;
+  onAnnPointerUp(event);
+}
+
+function onWindowAnnPointerCancel(): void {
+  if (!annDrafting.value && !eraserDraft.value) return;
+  onAnnPointerCancel();
+}
+
 function refreshPlayerAnn(card: WorkspaceShot): void {
   const svg = curAnnSvg();
   if (svg && svg.dataset.card === card.id) svg.innerHTML = annMarkup(card.id, true);
@@ -894,6 +1359,7 @@ function toggleSelect(shotId: string, event: PointerEvent): void {
     next.add(shotId);
   } else {
     next.clear();
+    next.add(shotId);
   }
   selectedIds.value = next;
   emit('selectionChange', [...next]);
@@ -1152,6 +1618,11 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize);
+  window.removeEventListener('keydown', onGlobalKey, true);
+  window.removeEventListener('keyup', onGlobalKeyUp, true);
+  window.removeEventListener('pointermove', onWindowAnnPointerMove);
+  window.removeEventListener('pointerup', onWindowAnnPointerUp);
+  window.removeEventListener('pointercancel', onWindowAnnPointerCancel);
   if (raf.value) cancelAnimationFrame(raf.value);
 });
 
@@ -1269,6 +1740,10 @@ function onStagePointerUp(): void {
 function onCardPointerDown(event: PointerEvent, shot: WorkspaceShot): void {
   if (event.button !== 0 || spaceDown) return;
   event.stopPropagation();
+  if (!event.ctrlKey && !event.metaKey && !event.shiftKey) {
+    selectedIds.value = new Set([shot.id]);
+    emit('selectionChange', [shot.id]);
+  }
   const pos = positions.value.get(shot.id);
   if (!pos) return;
   const startX = event.clientX;
@@ -1374,6 +1849,12 @@ function fmtDuration(ms: number): string {
     @keyup="onKeyUp"
     tabindex="-1"
   >
+    <StillLibraryGrid
+      v-if="stillsOpen && !props.boardMode"
+      :project-id="props.projectId"
+      :visible="stillsOpen"
+      @open="openStillInPlayer"
+    />
     <div
       class="wall-content"
       :style="{ transform: `translate(${panX}px, ${panY}px) scale(${scale})` }"
@@ -1523,6 +2004,16 @@ function fmtDuration(ms: number): string {
       <span class="wall-zval">{{ Math.round(scale * 100) }}%</span>
       <button type="button" class="wall-hud-btn" title="放大画布" aria-label="放大" @click.stop="zoomBy(1.2)">+</button>
       <button type="button" class="wall-hud-btn" title="复位视图（Ctrl+0）" aria-label="复位（Ctrl+0）" @click.stop="resetView">⌂</button>
+      <button
+        v-if="!props.boardMode"
+        type="button"
+        class="wall-hud-btn"
+        :class="{ on: stillsOpen }"
+        title="切换静帧库（Ctrl+0 在列表中复位缩略图）"
+        @click.stop="toggleStillLibrary"
+      >
+        静
+      </button>
       <button type="button" class="wall-hud-btn wall-export" title="按连线顺序导出镜头图片" @click.stop="exportImages">⇩</button>
       <button type="button" class="wall-hud-btn" title="整理节点（连线链成行，未连线按镜号排下方）" @click.stop="organizeNodes">⌗</button>
       <button type="button" class="wall-hud-btn wall-project" title="投影到拉片界面：按连线顺序把节点呈现在时间线/主播放/右侧面板" @click.stop="emit('project')">▣</button>
@@ -1558,6 +2049,10 @@ function fmtDuration(ms: number): string {
           </button>
         </div>
         <div class="wall-ppt-colors">
+          <label v-if="annTool === 'brush' || annTool === 'smear' || annTool === 'eraser'" class="ann-size">
+            <span>笔宽 {{ annBrushSize }}px</span>
+            <input v-model.number="annBrushSize" type="range" min="1" max="48" step="1" />
+          </label>
           <button
             v-for="c in ANNC"
             :key="c"
@@ -1571,6 +2066,8 @@ function fmtDuration(ms: number): string {
           <input v-model="annColor" type="color" aria-label="自定义颜色" />
         </div>
         <div class="wall-ppt-actions">
+          <button type="button" class="wall-ppt-btn" title="撤销（Ctrl+Z）" @click="historyStep('undo')">撤销</button>
+          <button type="button" class="wall-ppt-btn" title="重做（Ctrl+Shift+Z）" @click="historyStep('redo')">重做</button>
           <button type="button" class="wall-ppt-btn" @click="player.single = !player.single">
             {{ player.single ? '预览模式' : '单张模式' }}
           </button>
@@ -1594,12 +2091,14 @@ function fmtDuration(ms: number): string {
               <img :src="shot.thumbnail" :alt="shot.title" draggable="false" />
               <svg
                 class="sbg-annlayer"
+                :style="annCursorStyle"
                 viewBox="0 0 100 56.25"
                 preserveAspectRatio="none"
                 :data-card="shot.id"
                 @pointerdown="onAnnPointerDown"
                 @pointermove="onAnnPointerMove"
-                @pointerup="onAnnPointerUp"
+                @pointerup="onAnnPointerUp($event)"
+                @pointercancel="onAnnPointerCancel"
               >
                 <g v-html="annMarkup(shot.id, true)"></g>
               </svg>
@@ -1624,6 +2123,12 @@ function fmtDuration(ms: number): string {
               <span v-if="shot.shotSize" class="wall-chip">{{ shot.shotSize }}</span>
               <span v-if="shot.cameraMethod" class="wall-chip">{{ shot.cameraMethod }}</span>
               <span class="wall-dur">{{ (shot.durationMs / 1000).toFixed(1) }}s</span>
+              <span
+                v-if="playerStillTimeMs !== null && i === player.idx"
+                class="wall-dur wall-still-time"
+              >
+                {{ (playerStillTimeMs / 1000).toFixed(3) }}s
+              </span>
               <span class="wall-note">{{ shot.remark ?? shot.title }}</span>
             </div>
           </div>
@@ -2121,6 +2626,12 @@ function fmtDuration(ms: number): string {
   line-height: 1;
 }
 
+.wall-hud-btn.on {
+  border-color: rgba(90, 162, 255, 0.7);
+  background: rgba(90, 162, 255, 0.2);
+  color: #b9dcff;
+}
+
 .wall-zval {
   min-width: 38px;
   text-align: center;
@@ -2227,6 +2738,21 @@ function fmtDuration(ms: number): string {
   display: flex;
   align-items: center;
   gap: 5px;
+}
+
+.ann-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 4px;
+  color: #8295ad;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.ann-size input {
+  width: 72px;
+  accent-color: #5aa2ff;
 }
 
 .wall-sw {

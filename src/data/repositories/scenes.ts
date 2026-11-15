@@ -7,6 +7,7 @@ import { nowIso } from './projects';
 interface SceneRow {
   id: string;
   project_id: string;
+  media_id: string;
   scene_index: number;
   label: string | null;
   start_ms: number;
@@ -22,28 +23,42 @@ export class SceneRepository {
     return this.layer.db;
   }
 
-  list(projectId: string): Scene[] {
+  list(projectId: string, mediaId?: string): Scene[] {
     this.assertProject(projectId);
+    const targetMediaId = this.resolveMediaId(projectId, mediaId);
+    if (!targetMediaId) return [];
     const rows = this.db
-      .prepare('SELECT * FROM scenes WHERE project_id = ? ORDER BY start_ms ASC, scene_index ASC')
-      .all(projectId) as SceneRow[];
+      .prepare(
+        `SELECT * FROM scenes
+         WHERE project_id = ? AND media_id = ?
+         ORDER BY start_ms ASC, scene_index ASC`,
+      )
+      .all(projectId, targetMediaId) as SceneRow[];
     return rows.map(mapScene);
   }
 
-  replace(projectId: string, scenes: Scene[]): number {
+  replace(projectId: string, scenes: Scene[], mediaId?: string): number {
     this.assertProject(projectId);
+    const targetMediaId = this.resolveMediaId(projectId, mediaId);
+    if (!targetMediaId) {
+      if (scenes.length === 0) return 0;
+      throw new DataError('PROJECT_MEDIA_REQUIRED', '项目没有可写入场景的视频');
+    }
     const now = nowIso();
     this.layer.transaction(() => {
-      this.db.prepare('DELETE FROM scenes WHERE project_id = ?').run(projectId);
+      this.db
+        .prepare('DELETE FROM scenes WHERE project_id = ? AND media_id = ?')
+        .run(projectId, targetMediaId);
       const insert = this.db.prepare(
         `INSERT INTO scenes (
-          id, project_id, scene_index, label, start_ms, end_ms, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, project_id, media_id, scene_index, label, start_ms, end_ms, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const scene of scenes) {
         insert.run(
           randomUUID(),
           projectId,
+          scene.mediaId || targetMediaId,
           scene.index,
           scene.label,
           scene.startMs,
@@ -62,12 +77,18 @@ export class SceneRepository {
       throw new DataError('PROJECT_NOT_FOUND', `项目不存在：${projectId}`, { projectId });
     }
   }
+
+  private resolveMediaId(projectId: string, requested?: string): string | null {
+    if (requested) return this.layer.projectMedia.get(projectId, requested).id;
+    return this.layer.projectMedia.activeId(projectId);
+  }
 }
 
 function mapScene(row: SceneRow): Scene {
   return {
     id: row.id,
     projectId: row.project_id,
+    mediaId: row.media_id,
     index: row.scene_index,
     label: row.label,
     startMs: row.start_ms,

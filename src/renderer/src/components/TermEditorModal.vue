@@ -42,7 +42,7 @@ function submit(): void {
 </script>
 
 <template>
-  <transition name="modal">
+  <transition name="modal" :duration="{ enter: 220, leave: 220 }">
     <div v-if="open" class="modal-mask" @pointerdown.self="emit('close')">
       <form class="term-modal" @submit.prevent="submit">
         <header class="modal-head">

@@ -201,6 +201,8 @@ export function verifyStoredSettings(
       stored.timeline?.trackHeight === expected.timeline?.trackHeight &&
       stored.timeline?.pxPerSecond === expected.timeline?.pxPerSecond &&
       stored.recognition?.engine === expected.recognition?.engine &&
+      stored.recognition?.labelStrategy === expected.recognition?.labelStrategy &&
+      stored.recognition?.cloudLabelsAck === expected.recognition?.cloudLabelsAck &&
       stored.shortcuts?.split === expected.shortcuts?.split &&
       stored.shortcuts?.merge === expected.shortcuts?.merge &&
       stored.ai?.provider === expected.ai?.provider &&
@@ -282,7 +284,12 @@ function normalizeTimeline(value: TimelineSettings | undefined): TimelineSetting
 }
 
 function normalizeRecognition(value: RecognitionSettings | undefined): RecognitionSettings {
-  return { engine: value?.engine === 'opencv' ? 'opencv' : 'ai' };
+  return {
+    engine: value?.engine === 'opencv' ? 'opencv' : 'ai',
+    // S42/Z03：标签策略只认 local/cloud；隐私确认只接受显式 true
+    labelStrategy: value?.labelStrategy === 'cloud' ? 'cloud' : 'local',
+    cloudLabelsAck: value?.cloudLabelsAck === true,
+  };
 }
 
 function normalizeShortcuts(value: ShortcutSettings | undefined): ShortcutSettings {

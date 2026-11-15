@@ -8,6 +8,7 @@ import { nowIso } from './projects';
 interface StillRow {
   id: string;
   project_id: string;
+  media_id: string;
   shot_id: string | null;
   time_ms: number;
   file_path: string;
@@ -28,16 +29,24 @@ export class StillRepository {
     return this.layer.db;
   }
 
-  list(args: { projectId?: string; shotId?: string }): Still[] {
+  list(args: { projectId?: string; shotId?: string; mediaId?: string }): Still[] {
     let rows: StillRow[];
     if (args.shotId) {
       rows = this.db
         .prepare('SELECT * FROM stills WHERE shot_id = ? ORDER BY time_ms ASC')
         .all(args.shotId) as StillRow[];
     } else {
+      const projectId = args.projectId;
+      if (!projectId) return [];
+      this.assertProject(projectId);
+      const mediaId =
+        args.mediaId ?? this.layer.projectMedia.activeId(projectId);
+      if (!mediaId) return [];
       rows = this.db
-        .prepare('SELECT * FROM stills WHERE project_id = ? ORDER BY time_ms ASC')
-        .all(args.projectId) as StillRow[];
+        .prepare(
+          'SELECT * FROM stills WHERE project_id = ? AND media_id = ? ORDER BY time_ms ASC',
+        )
+        .all(projectId, mediaId) as StillRow[];
     }
     return rows.map(mapStill);
   }
@@ -50,7 +59,17 @@ export class StillRepository {
 
   create(args: StillCreateArgs): Still {
     this.assertProject(args.projectId);
-    if (args.shotId) this.assertShotInProject(args.shotId, args.projectId);
+    const shotMediaId = args.shotId
+      ? this.assertShotInProject(args.shotId, args.projectId)
+      : null;
+    const mediaId = this.resolveMediaId(
+      args.projectId,
+      args.mediaId ?? shotMediaId,
+    );
+    if (!mediaId) throw new DataError('PROJECT_MEDIA_REQUIRED', '静帧缺少所属视频');
+    if (shotMediaId && shotMediaId !== mediaId) {
+      throw new DataError('STILL_MEDIA_MISMATCH', '静帧与镜头不属于同一视频');
+    }
     const id = randomUUID();
     const now = nowIso();
     const filePath = toProjectRelativePath(this.layer.dataRoot, args.projectId, args.filePath);
@@ -62,16 +81,17 @@ export class StillRepository {
       this.db
         .prepare(
           `INSERT INTO stills (
-            id, project_id, shot_id, time_ms, file_path, thumb_path, width, height,
+            id, project_id, media_id, shot_id, time_ms, file_path, thumb_path, width, height,
             caption, role, annotations_json, created_at, updated_at
           ) VALUES (
-            @id, @projectId, @shotId, @timeMs, @filePath, @thumbPath, @width, @height,
+            @id, @projectId, @mediaId, @shotId, @timeMs, @filePath, @thumbPath, @width, @height,
             @caption, @role, @annotationsJson, @createdAt, @updatedAt
           )`,
         )
         .run({
           id,
           projectId: args.projectId,
+          mediaId,
           shotId: args.shotId ?? null,
           timeMs: Math.max(0, Math.round(args.timeMs)),
           filePath,
@@ -94,7 +114,14 @@ export class StillRepository {
     const current = this.get(args.id);
     const patch = args.patch ?? {};
     const shotId = patch.shotId !== undefined ? patch.shotId : current.shotId;
-    if (shotId) this.assertShotInProject(shotId, current.projectId);
+    const shotMediaId = shotId ? this.assertShotInProject(shotId, current.projectId) : null;
+    const mediaId = this.resolveMediaId(
+      current.projectId,
+      patch.mediaId ?? shotMediaId ?? current.mediaId,
+    );
+    if (shotMediaId && shotMediaId !== mediaId) {
+      throw new DataError('STILL_MEDIA_MISMATCH', '静帧与镜头不属于同一视频');
+    }
     const filePath =
       patch.filePath !== undefined
         ? toProjectRelativePath(this.layer.dataRoot, current.projectId, patch.filePath)
@@ -110,13 +137,14 @@ export class StillRepository {
       this.db
         .prepare(
           `UPDATE stills SET
-            shot_id = @shotId, time_ms = @timeMs, file_path = @filePath, thumb_path = @thumbPath,
+            media_id = @mediaId, shot_id = @shotId, time_ms = @timeMs, file_path = @filePath, thumb_path = @thumbPath,
             width = @width, height = @height, caption = @caption, role = @role,
             annotations_json = @annotationsJson, updated_at = @updatedAt
           WHERE id = @id`,
         )
         .run({
           id: current.id,
+          mediaId,
           shotId,
           timeMs: patch.timeMs ?? current.timeMs,
           filePath,
@@ -154,14 +182,20 @@ export class StillRepository {
     }
   }
 
-  private assertShotInProject(shotId: string, projectId: string): void {
-    const row = this.db.prepare('SELECT project_id FROM shots WHERE id = ?').get(shotId) as
-      | { project_id: string }
+  private assertShotInProject(shotId: string, projectId: string): string {
+    const row = this.db.prepare('SELECT project_id, media_id FROM shots WHERE id = ?').get(shotId) as
+      | { project_id: string; media_id: string }
       | undefined;
     if (!row) throw new DataError('SHOT_NOT_FOUND', `镜头不存在：${shotId}`, { shotId });
     if (row.project_id !== projectId) {
       throw new DataError('SHOT_PROJECT_MISMATCH', '镜头不属于该项目', { shotId, projectId });
     }
+    return row.media_id;
+  }
+
+  private resolveMediaId(projectId: string, requested?: string | null): string | null {
+    if (requested) return this.layer.projectMedia.get(projectId, requested).id;
+    return this.layer.projectMedia.activeId(projectId);
   }
 }
 
@@ -169,6 +203,7 @@ function mapStill(row: StillRow): Still {
   return {
     id: row.id,
     projectId: row.project_id,
+    mediaId: row.media_id,
     shotId: row.shot_id,
     timeMs: row.time_ms,
     filePath: row.file_path,

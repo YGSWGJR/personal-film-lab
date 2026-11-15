@@ -15,13 +15,23 @@ interface PackageManifest {
   version: number;
   projectId: string;
   name: string;
+  appVersion: string;
+  schemaVersion: number;
   exportedAt: string;
   includesAssets: boolean;
   includesMedia: boolean;
+  media: Array<{
+    id: string;
+    index: number;
+    filename: string | null;
+    proxyIncluded: boolean;
+  }>;
+  assets: string[];
 }
 
 const PACKAGE_FORMAT = 'lapian-project';
-const PACKAGE_VERSION = 1;
+const PACKAGE_VERSION = 2;
+const SUPPORTED_PACKAGE_VERSIONS = new Set([1, PACKAGE_VERSION]);
 const ASSET_DIRS = ['stills', 'frames', 'exports'];
 const MEDIA_DIRS = ['source', 'proxy'];
 
@@ -53,16 +63,26 @@ export class ProjectPackageService {
       this.buildSnapshot(project.id, snapshotPath);
 
       const zipEntries: Record<string, Uint8Array> = {};
+      const assetPaths: string[] = [];
+      const mediaItems = this.layer.projectMedia.list(project.id);
       const manifest: PackageManifest = {
         format: PACKAGE_FORMAT,
         version: PACKAGE_VERSION,
         projectId: project.id,
         name: project.name,
+        appVersion: process.env['npm_package_version'] ?? '0.4.0',
+        schemaVersion: Number(this.layer.db.pragma('user_version', { simple: true })),
         exportedAt: new Date().toISOString(),
         includesAssets: includeAssets,
         includesMedia: includeMedia,
+        media: mediaItems.map((media) => ({
+          id: media.id,
+          index: media.index,
+          filename: media.filename,
+          proxyIncluded: includeMedia && Boolean(media.proxyPath),
+        })),
+        assets: assetPaths,
       };
-      zipEntries['manifest.json'] = strToU8(JSON.stringify(manifest, null, 2));
       zipEntries['project.db'] = new Uint8Array(readFileSync(snapshotPath));
 
       if (includeAssets) {
@@ -72,10 +92,13 @@ export class ProjectPackageService {
           const absDir = join(projectDir, sub);
           if (!existsSync(absDir)) continue;
           this.walkFiles(absDir, (filePath, relPath) => {
-            zipEntries[`assets/${sub}/${relPath.split(sep).join('/')}`] = new Uint8Array(readFileSync(filePath));
+            const entryPath = `assets/${sub}/${relPath.split(sep).join('/')}`;
+            zipEntries[entryPath] = new Uint8Array(readFileSync(filePath));
+            assetPaths.push(entryPath);
           });
         }
       }
+      zipEntries['manifest.json'] = strToU8(JSON.stringify(manifest, null, 2));
 
       const zipped = zipSync(zipEntries, { level: 6 });
       writeFileSync(targetPath, zipped);
@@ -113,7 +136,7 @@ export class ProjectPackageService {
     } catch (error) {
       throw new DataError('PACKAGE_INVALID', `manifest.json 解析失败：${(error as Error).message}`);
     }
-    if (manifest.format !== PACKAGE_FORMAT || manifest.version !== PACKAGE_VERSION) {
+    if (manifest.format !== PACKAGE_FORMAT || !SUPPORTED_PACKAGE_VERSIONS.has(manifest.version)) {
       throw new DataError('PACKAGE_UNSUPPORTED', `不支持的项目包格式：${manifest.format} v${manifest.version}`);
     }
 
@@ -135,6 +158,35 @@ export class ProjectPackageService {
           | undefined;
         if (!projectRow) throw new DataError('PACKAGE_INVALID', '项目包内项目数据缺失');
 
+        const hasProjectMedia = tableExists(snapshot, 'project_media');
+        const mediaRows = hasProjectMedia
+          ? (snapshot
+              .prepare('SELECT * FROM project_media WHERE project_id = ? ORDER BY media_index ASC')
+              .all(manifest.projectId) as Array<Record<string, unknown>>)
+          : [
+              {
+                id: String(projectRow.active_media_id ?? `legacy-media-${manifest.projectId}`),
+                media_index: 1,
+                source_type: String(projectRow.source_type ?? 'local'),
+                source_path: projectRow.source_path as string | null,
+                source_url: projectRow.source_url as string | null,
+                source_platform: projectRow.source_platform as string | null,
+                media_filename: projectRow.media_filename as string | null,
+                media_container: projectRow.media_container as string | null,
+                media_duration_ms: Number(projectRow.media_duration_ms) || 0,
+                media_width: projectRow.media_width as number | null,
+                media_height: projectRow.media_height as number | null,
+                media_fps: projectRow.media_fps as number | null,
+                media_video_codec: projectRow.media_video_codec as string | null,
+                media_audio_codec: projectRow.media_audio_codec as string | null,
+                media_size_bytes: projectRow.media_size_bytes as number | null,
+                proxy_path: projectRow.proxy_path as string | null,
+                detect_options_json: String(projectRow.detect_options_json ?? '{}'),
+                detect_state_json: '{}',
+                created_at: String(projectRow.created_at ?? new Date().toISOString()),
+                updated_at: String(projectRow.updated_at ?? new Date().toISOString()),
+              },
+            ];
         const shotRows = snapshot
           .prepare('SELECT * FROM shots WHERE project_id = ?')
           .all(manifest.projectId) as Array<Record<string, unknown>>;
@@ -147,6 +199,31 @@ export class ProjectPackageService {
         const sceneRows = snapshot
           .prepare('SELECT * FROM scenes WHERE project_id = ?')
           .all(manifest.projectId) as Array<Record<string, unknown>>;
+        const layoutRows = tableExists(snapshot, 'shot_layout')
+          ? (snapshot
+              .prepare('SELECT * FROM shot_layout WHERE project_id = ?')
+              .all(manifest.projectId) as Array<Record<string, unknown>>)
+          : [];
+        const edgeRows = tableExists(snapshot, 'shot_edges')
+          ? (snapshot
+              .prepare('SELECT * FROM shot_edges WHERE project_id = ?')
+              .all(manifest.projectId) as Array<Record<string, unknown>>)
+          : [];
+        const groupRows = tableExists(snapshot, 'shot_groups')
+          ? (snapshot
+              .prepare('SELECT * FROM shot_groups WHERE project_id = ?')
+              .all(manifest.projectId) as Array<Record<string, unknown>>)
+          : [];
+        const groupMemberRows = tableExists(snapshot, 'shot_group_members')
+          ? (snapshot
+              .prepare('SELECT * FROM shot_group_members WHERE project_id = ?')
+              .all(manifest.projectId) as Array<Record<string, unknown>>)
+          : [];
+        const annotationRows = tableExists(snapshot, 'shot_annotations')
+          ? (snapshot
+              .prepare('SELECT * FROM shot_annotations WHERE project_id = ?')
+              .all(manifest.projectId) as Array<Record<string, unknown>>)
+          : [];
         const shotIds = shotRows.map((row) => String(row.id));
         const tagRows = shotIds.length
           ? (snapshot
@@ -167,21 +244,132 @@ export class ProjectPackageService {
 
         const shotIdMap = new Map<string, string>();
         for (const row of shotRows) shotIdMap.set(String(row.id), randomUUID());
+        const mediaIdMap = new Map<string, string>();
+        for (const row of mediaRows) mediaIdMap.set(String(row.id), randomUUID());
+        const groupIdMap = new Map<string, string>();
+        for (const row of groupRows) groupIdMap.set(String(row.id), randomUUID());
+        const activeMediaSourceId = String(
+          projectRow.active_media_id ?? mediaRows[0]?.id ?? '',
+        );
+        const fallbackMediaId = mediaIdMap.values().next().value;
+        const activeMediaId =
+          mediaIdMap.get(activeMediaSourceId) ?? fallbackMediaId ?? null;
         const tagIdMap = new Map<string, string>();
         for (const row of tagRows) tagIdMap.set(String(row.id), this.resolveImportedTagId(row));
 
         this.layer.transaction(() => {
-          this.insertProject(projectRow, projectId, renamed);
-          for (const row of shotRows) this.insertShot(row, projectId, shotIdMap.get(String(row.id))!);
+          this.insertProject(projectRow, projectId, renamed, activeMediaId);
+          for (const row of mediaRows) {
+            this.insertProjectMedia(
+              row,
+              projectId,
+              mediaIdMap.get(String(row.id))!,
+            );
+          }
+          for (const row of shotRows) {
+            const mediaId = mediaIdMap.get(String(row.media_id)) ?? activeMediaId;
+            if (!mediaId) {
+              throw new DataError('PACKAGE_INVALID', '镜头缺少所属媒体');
+            }
+            this.insertShot(
+              row,
+              projectId,
+              mediaId,
+              shotIdMap.get(String(row.id))!,
+            );
+          }
           for (const row of stillRows) {
             const shotId = row.shot_id ? shotIdMap.get(String(row.shot_id)) ?? null : null;
-            this.insertStill(row, projectId, randomUUID(), shotId);
+            const mediaId = mediaIdMap.get(String(row.media_id)) ?? activeMediaId;
+            if (!mediaId) {
+              throw new DataError('PACKAGE_INVALID', '静帧缺少所属媒体');
+            }
+            this.insertStill(
+              row,
+              projectId,
+              mediaId,
+              randomUUID(),
+              shotId,
+            );
           }
           for (const row of noteRows) {
             const shotId = shotIdMap.get(String(row.shot_id));
             if (shotId) this.insertNote(row, projectId, randomUUID(), shotId);
           }
-          for (const row of sceneRows) this.insertScene(row, projectId);
+          for (const row of sceneRows) {
+            const mediaId = mediaIdMap.get(String(row.media_id)) ?? activeMediaId;
+            if (!mediaId) {
+              throw new DataError('PACKAGE_INVALID', '场景缺少所属媒体');
+            }
+            this.insertScene(
+              row,
+              projectId,
+              mediaId,
+            );
+          }
+          for (const row of groupRows) {
+            this.insertGroup(row, projectId, groupIdMap.get(String(row.id))!);
+          }
+          for (const row of layoutRows) {
+            const mappedShot = shotIdMap.get(String(row.shot_id));
+            if (!mappedShot) continue;
+            this.layer.db
+              .prepare(
+                'INSERT INTO shot_layout (project_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?)',
+              )
+              .run(
+                projectId,
+                mappedShot,
+                Number(row.x) || 0,
+                Number(row.y) || 0,
+                Number(row.updated_at) || Date.now(),
+              );
+          }
+          for (const row of edgeRows) {
+            const from = shotIdMap.get(String(row.from_shot));
+            const to = shotIdMap.get(String(row.to_shot));
+            if (!from || !to) continue;
+            this.layer.db
+              .prepare(
+                'INSERT INTO shot_edges (project_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+              )
+              .run(
+                projectId,
+                from,
+                to,
+                String(row.kind ?? 'solid'),
+                Number(row.created_at) || Date.now(),
+              );
+          }
+          for (const row of groupMemberRows) {
+            const groupId = groupIdMap.get(String(row.group_id));
+            const shotId = shotIdMap.get(String(row.shot_id));
+            if (!groupId || !shotId) continue;
+            this.layer.db
+              .prepare(
+                'INSERT INTO shot_group_members (project_id, group_id, shot_id) VALUES (?, ?, ?)',
+              )
+              .run(projectId, groupId, shotId);
+          }
+          for (const row of annotationRows) {
+            const shotId = shotIdMap.get(String(row.shot_id));
+            if (!shotId) continue;
+            this.layer.db
+              .prepare(
+                `INSERT INTO shot_annotations
+                  (id, project_id, shot_id, type, color, data_json, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(
+                randomUUID(),
+                projectId,
+                shotId,
+                String(row.type),
+                String(row.color),
+                String(row.data_json),
+                Number(row.created_at) || Date.now(),
+              );
+          }
           for (const link of shotTagRows) {
             const shotId = shotIdMap.get(link.shot_id);
             const tagId = tagIdMap.get(link.tag_id);
@@ -226,6 +414,7 @@ export class ProjectPackageService {
           snapshot.prepare(sql).run(...params);
         };
         copy('INSERT INTO projects SELECT * FROM src.projects WHERE id = ?', [projectId]);
+        copy('INSERT INTO project_media SELECT * FROM src.project_media WHERE project_id = ?', [projectId]);
         copy(
           `INSERT OR IGNORE INTO tags (id, category, name, color, builtin, sort_order, created_at)
            SELECT id, category, name, color, builtin, sort_order, created_at FROM src.tags
@@ -237,6 +426,17 @@ export class ProjectPackageService {
         copy('INSERT INTO stills SELECT * FROM src.stills WHERE project_id = ?', [projectId]);
         copy('INSERT INTO notes SELECT * FROM src.notes WHERE project_id = ?', [projectId]);
         copy('INSERT INTO scenes SELECT * FROM src.scenes WHERE project_id = ?', [projectId]);
+        copy('INSERT INTO shot_layout SELECT * FROM src.shot_layout WHERE project_id = ?', [projectId]);
+        copy('INSERT INTO shot_edges SELECT * FROM src.shot_edges WHERE project_id = ?', [projectId]);
+        copy('INSERT INTO shot_groups SELECT * FROM src.shot_groups WHERE project_id = ?', [projectId]);
+        copy(
+          'INSERT INTO shot_group_members SELECT * FROM src.shot_group_members WHERE project_id = ?',
+          [projectId],
+        );
+        copy(
+          'INSERT INTO shot_annotations SELECT * FROM src.shot_annotations WHERE project_id = ?',
+          [projectId],
+        );
         copy(
           `INSERT OR IGNORE INTO shot_tags (shot_id, tag_id)
            SELECT link.shot_id, target_tag.id
@@ -249,6 +449,20 @@ export class ProjectPackageService {
            WHERE source_shot.project_id = ?`,
           [projectId],
         );
+        snapshot
+          .prepare(
+            `UPDATE projects
+             SET source_path = NULL, proxy_path = NULL
+             WHERE id = ?`,
+          )
+          .run(projectId);
+        snapshot
+          .prepare(
+            `UPDATE project_media
+             SET source_path = NULL, proxy_path = NULL
+             WHERE project_id = ?`,
+          )
+          .run(projectId);
       })();
     } finally {
       snapshot.close();
@@ -280,15 +494,20 @@ export class ProjectPackageService {
     return finalId;
   }
 
-  private insertProject(row: Record<string, unknown>, id: string, renamed: boolean): void {
+  private insertProject(
+    row: Record<string, unknown>,
+    id: string,
+    renamed: boolean,
+    activeMediaId: string | null,
+  ): void {
     this.layer.db
       .prepare(
         `INSERT INTO projects (
           id, name, source_type, source_path, source_url, source_platform,
           media_filename, media_container, media_duration_ms, media_width, media_height, media_fps,
           media_video_codec, media_audio_codec, media_size_bytes, proxy_path,
-          detect_options_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          detect_options_json, active_media_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -308,22 +527,68 @@ export class ProjectPackageService {
         (row.media_size_bytes as number | null) ?? null,
         (row.proxy_path as string | null) ?? null,
         String(row.detect_options_json ?? '{}'),
+        activeMediaId,
         String(row.created_at ?? new Date().toISOString()),
         new Date().toISOString(),
       );
   }
 
-  private insertShot(row: Record<string, unknown>, projectId: string, id: string): void {
+  private insertProjectMedia(
+    row: Record<string, unknown>,
+    projectId: string,
+    id: string,
+  ): void {
     this.layer.db
       .prepare(
-        `INSERT INTO shots (
-          id, project_id, shot_index, start_ms, end_ms, duration_ms,
-          shot_size, camera_method, dialogue, remark, origin, locked, manual_fields_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO project_media (
+          id, project_id, media_index, source_type, source_path, source_url, source_platform,
+          media_filename, media_container, media_duration_ms, media_width, media_height, media_fps,
+          media_video_codec, media_audio_codec, media_size_bytes, proxy_path, detect_options_json,
+          detect_state_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         projectId,
+        Number(row.media_index) || 1,
+        String(row.source_type ?? 'local'),
+        (row.source_path as string | null) ?? null,
+        (row.source_url as string | null) ?? null,
+        (row.source_platform as string | null) ?? null,
+        (row.media_filename as string | null) ?? null,
+        (row.media_container as string | null) ?? null,
+        Number(row.media_duration_ms) || 0,
+        (row.media_width as number | null) ?? null,
+        (row.media_height as number | null) ?? null,
+        (row.media_fps as number | null) ?? null,
+        (row.media_video_codec as string | null) ?? null,
+        (row.media_audio_codec as string | null) ?? null,
+        (row.media_size_bytes as number | null) ?? null,
+        (row.proxy_path as string | null) ?? null,
+        String(row.detect_options_json ?? '{}'),
+        String(row.detect_state_json ?? '{}'),
+        String(row.created_at ?? new Date().toISOString()),
+        String(row.updated_at ?? new Date().toISOString()),
+      );
+  }
+
+  private insertShot(
+    row: Record<string, unknown>,
+    projectId: string,
+    mediaId: string,
+    id: string,
+  ): void {
+    this.layer.db
+      .prepare(
+        `INSERT INTO shots (
+          id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
+          shot_size, camera_method, dialogue, remark, origin, locked, manual_fields_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        projectId,
+        mediaId,
         Number(row.shot_index) || 0,
         Number(row.start_ms) || 0,
         Number(row.end_ms) || 0,
@@ -340,16 +605,21 @@ export class ProjectPackageService {
       );
   }
 
-  private insertScene(row: Record<string, unknown>, projectId: string): void {
+  private insertScene(
+    row: Record<string, unknown>,
+    projectId: string,
+    mediaId: string,
+  ): void {
     this.layer.db
       .prepare(
         `INSERT INTO scenes (
-          id, project_id, scene_index, label, start_ms, end_ms, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, project_id, media_id, scene_index, label, start_ms, end_ms, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         randomUUID(),
         projectId,
+        mediaId,
         Number(row.scene_index) || 0,
         (row.label as string | null) ?? null,
         Number(row.start_ms) || 0,
@@ -359,17 +629,24 @@ export class ProjectPackageService {
       );
   }
 
-  private insertStill(row: Record<string, unknown>, projectId: string, id: string, shotId: string | null): void {
+  private insertStill(
+    row: Record<string, unknown>,
+    projectId: string,
+    mediaId: string,
+    id: string,
+    shotId: string | null,
+  ): void {
     this.layer.db
       .prepare(
         `INSERT INTO stills (
-          id, project_id, shot_id, time_ms, file_path, thumb_path, width, height,
+          id, project_id, media_id, shot_id, time_ms, file_path, thumb_path, width, height,
           caption, role, annotations_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         projectId,
+        mediaId,
         shotId,
         Number(row.time_ms) || 0,
         String(row.file_path),
@@ -381,6 +658,23 @@ export class ProjectPackageService {
         String(row.annotations_json ?? '[]'),
         String(row.created_at ?? new Date().toISOString()),
         String(row.updated_at ?? new Date().toISOString()),
+      );
+  }
+
+  private insertGroup(
+    row: Record<string, unknown>,
+    projectId: string,
+    id: string,
+  ): void {
+    this.layer.db
+      .prepare(
+        'INSERT INTO shot_groups (id, project_id, name, created_at) VALUES (?, ?, ?, ?)',
+      )
+      .run(
+        id,
+        projectId,
+        String(row.name ?? '场景'),
+        Number(row.created_at) || Date.now(),
       );
   }
 
@@ -413,4 +707,10 @@ export class ProjectPackageService {
       }
     }
   }
+}
+
+function tableExists(db: Database.Database, table: string): boolean {
+  return Boolean(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
+  );
 }

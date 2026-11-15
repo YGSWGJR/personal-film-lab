@@ -23,6 +23,7 @@ import { nowIso } from './projects';
 interface ShotRow {
   id: string;
   project_id: string;
+  media_id: string;
   shot_index: number;
   start_ms: number;
   end_ms: number;
@@ -51,11 +52,17 @@ export class ShotRepository {
     return this.layer.db;
   }
 
-  list(projectId: string): Shot[] {
+  list(projectId: string, mediaId?: string): Shot[] {
     this.assertProject(projectId);
+    const targetMediaId = this.resolveMediaId(projectId, mediaId);
+    if (!targetMediaId) return [];
     const rows = this.db
-      .prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY start_ms ASC, shot_index ASC')
-      .all(projectId) as ShotRow[];
+      .prepare(
+        `SELECT * FROM shots
+         WHERE project_id = ? AND media_id = ?
+         ORDER BY start_ms ASC, shot_index ASC`,
+      )
+      .all(projectId, targetMediaId) as ShotRow[];
     const tagIds = this.loadTagIds(rows.map((row) => row.id));
     return rows.map((row) => mapShot(row, tagIds.get(row.id) ?? []));
   }
@@ -70,6 +77,8 @@ export class ShotRepository {
   create(args: ShotCreateArgs): Shot {
     this.assertProject(args.projectId);
     this.validateRange(args.startMs, args.endMs);
+    const mediaId = this.resolveMediaId(args.projectId, args.mediaId);
+    if (!mediaId) throw new DataError('PROJECT_MEDIA_REQUIRED', '请先为项目添加视频');
     const id = randomUUID();
     const now = nowIso();
     const durationMs = args.endMs - args.startMs;
@@ -79,21 +88,24 @@ export class ShotRepository {
         const index =
           args.index ??
           ((this.db
-            .prepare('SELECT COALESCE(MAX(shot_index), 0) + 1 AS next FROM shots WHERE project_id = ?')
-            .get(args.projectId) as { next: number }).next);
+            .prepare(
+              'SELECT COALESCE(MAX(shot_index), 0) + 1 AS next FROM shots WHERE project_id = ? AND media_id = ?',
+            )
+            .get(args.projectId, mediaId) as { next: number }).next);
         this.db
           .prepare(
             `INSERT INTO shots (
-              id, project_id, shot_index, start_ms, end_ms, duration_ms,
+              id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
               shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
             ) VALUES (
-              @id, @projectId, @index, @startMs, @endMs, @durationMs,
+              @id, @projectId, @mediaId, @index, @startMs, @endMs, @durationMs,
               @shotSize, @cameraMethod, @dialogue, @remark, 'manual', 0, @createdAt, @updatedAt
             )`,
           )
           .run({
             id,
             projectId: args.projectId,
+            mediaId,
             index,
             startMs: args.startMs,
             endMs: args.endMs,
@@ -177,13 +189,14 @@ export class ShotRepository {
       this.db
         .prepare(
           `INSERT INTO shots (
-            id, project_id, shot_index, start_ms, end_ms, duration_ms,
+            id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
             shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, manual_fields_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, NULL, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, NULL, ?, ?, ?)`,
         )
         .run(
           rightId,
           source.project_id,
+          source.media_id,
           source.shot_index + 1,
           cutMs,
           source.end_ms,
@@ -206,7 +219,7 @@ export class ShotRepository {
       this.db
         .prepare('UPDATE stills SET shot_id = ?, updated_at = ? WHERE shot_id = ? AND time_ms >= ?')
         .run(rightId, now, source.id, cutMs);
-      this.renumber(source.project_id);
+      this.renumber(source.project_id, source.media_id);
       this.layer.projects.touch(source.project_id);
     });
 
@@ -267,7 +280,7 @@ export class ShotRepository {
         .run(left.id, now, right.id);
       this.db.prepare('DELETE FROM shot_tags WHERE shot_id = ?').run(right.id);
       this.db.prepare('DELETE FROM shots WHERE id = ?').run(right.id);
-      this.renumber(left.project_id);
+      this.renumber(left.project_id, left.media_id);
       this.layer.projects.touch(left.project_id);
     });
     return { shot: this.get(left.id) };
@@ -355,27 +368,122 @@ export class ShotRepository {
   /**
    * 应用检测预览：保留 locked 与 origin='manual' 的人工镜头，
    * 替换其余自动镜头，并跳过与受保护区间重叠的候选（S36-2 人工修正优先）。
+   * S42 数据保全：notes / 镜头连线 / 镜头标注 / 分镜墙布局 / 分组成员都
+   * CASCADE 挂在 shots 上，重切前先按宿主镜头时码收集，落库后重关联；
+   * 找不到时码落点的用户内容挂到最近镜头，绝不静默删除。
    */
-  applyDetected(projectId: string, previews: ShotPreview[]): { applied: number; skippedProtected: number } {
+  applyDetected(
+    projectId: string,
+    previews: ShotPreview[],
+  ): { applied: number; skippedProtected: number; preserved?: { notes: number; edges: number; annotations: number; layouts: number; groupMembers: number; droppedEdges: number } } {
     this.assertProject(projectId);
+    const mediaId = this.resolveMediaId(projectId);
+    if (!mediaId) throw new DataError('PROJECT_MEDIA_REQUIRED', '项目没有可切分的视频');
     const now = nowIso();
     let applied = 0;
     let skippedProtected = 0;
+    const preserved = {
+      notes: 0,
+      edges: 0,
+      annotations: 0,
+      layouts: 0,
+      groupMembers: 0,
+      droppedEdges: 0,
+    };
     this.layer.transaction(() => {
       const protectedRows = this.db
         .prepare(
-          "SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND (locked = 1 OR origin = 'manual')",
+          "SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND media_id = ? AND (locked = 1 OR origin = 'manual')",
         )
-        .all(projectId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
+        .all(projectId, mediaId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
+      // ---- S42 数据保全（QA-01 推广）：stills/notes/连线/标注/布局/分组成员都
+      // CASCADE 挂在 shots 上，重切前按宿主镜头时码收集（限当前 media_id），
+      // 落库后重关联；跨视频内容绝不互相串挂。 ----
+      const stillsToReassign = this.db.prepare(
+        `SELECT stills.id, stills.time_ms FROM stills
+         JOIN shots ON shots.id = stills.shot_id
+         WHERE stills.project_id = ? AND (stills.media_id = ? OR stills.media_id IS NULL)
+           AND shots.project_id = ? AND shots.media_id = ?
+           AND shots.locked = 0 AND shots.origin = 'auto'`,
+      ).all(projectId, mediaId, projectId, mediaId) as Array<{ id: string; time_ms: number }>;
+      const setStillShot = this.db.prepare('UPDATE stills SET shot_id = ? WHERE id = ?');
+      for (const still of stillsToReassign) setStillShot.run(null, still.id);
+      const collect = <T>(sql: string, ...params: unknown[]): T[] =>
+        this.db.prepare(sql).all(...params) as T[];
+      const notesToKeep = collect<{
+        id: string; anchor: number; text: string; created_at: string; updated_at: string;
+      }>(
+        `SELECT n.id, s.start_ms AS anchor, n.text, n.created_at, n.updated_at FROM notes n
+         JOIN shots s ON s.id = n.shot_id
+         WHERE n.project_id = ? AND s.project_id = ? AND s.media_id = ?
+           AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+        mediaId,
+      );
+      const edgesToKeep = collect<{
+        fromAnchor: number; toAnchor: number; kind: string; created_at: number;
+      }>(
+        `SELECT fs.start_ms AS fromAnchor, ts.start_ms AS toAnchor, e.kind, e.created_at
+         FROM shot_edges e
+         JOIN shots fs ON fs.id = e.from_shot
+         JOIN shots ts ON ts.id = e.to_shot
+         WHERE e.project_id = ?
+           AND ((fs.media_id = ? AND fs.project_id = ? AND fs.locked = 0 AND fs.origin = 'auto')
+             OR (ts.media_id = ? AND ts.project_id = ? AND ts.locked = 0 AND ts.origin = 'auto'))`,
+        projectId,
+        mediaId,
+        projectId,
+        mediaId,
+        projectId,
+      ).filter((edge) => Number.isFinite(edge.fromAnchor) && Number.isFinite(edge.toAnchor));
+      const annotationsToKeep = collect<{
+        anchor: number; type: string; color: string; data_json: string; created_at: number;
+      }>(
+        `SELECT a.type, a.color, a.data_json, a.created_at, s.start_ms AS anchor
+         FROM shot_annotations a
+         JOIN shots s ON s.id = a.shot_id
+         WHERE a.project_id = ? AND s.project_id = ? AND s.media_id = ?
+           AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+        mediaId,
+      );
+      const layoutsToKeep = collect<{
+        anchor: number; x: number; y: number; updated_at: number;
+      }>(
+        `SELECT l.x, l.y, l.updated_at, s.start_ms AS anchor
+         FROM shot_layout l
+         JOIN shots s ON s.id = l.shot_id
+         WHERE l.project_id = ? AND s.project_id = ? AND s.media_id = ?
+           AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+        mediaId,
+      );
+      const groupMembersToKeep = collect<{
+        group_id: string; anchor: number;
+      }>(
+        `SELECT m.group_id, s.start_ms AS anchor
+         FROM shot_group_members m
+         JOIN shots s ON s.id = m.shot_id
+         WHERE m.project_id = ? AND s.project_id = ? AND s.media_id = ?
+           AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+        mediaId,
+      );
       this.db
-        .prepare("DELETE FROM shots WHERE project_id = ? AND locked = 0 AND origin = 'auto'")
-        .run(projectId);
+        .prepare(
+          "DELETE FROM shots WHERE project_id = ? AND media_id = ? AND locked = 0 AND origin = 'auto'",
+        )
+        .run(projectId, mediaId);
       let nextIndex = Math.max(0, ...protectedRows.map((row) => row.shot_index)) + 1;
       const insert = this.db.prepare(
         `INSERT INTO shots (
-          id, project_id, shot_index, start_ms, end_ms, duration_ms,
+          id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
           shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', 0, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', 0, ?, ?, ?)`,
       );
       for (const preview of previews) {
         const overlapsProtected = protectedRows.some(
@@ -389,6 +497,7 @@ export class ShotRepository {
         insert.run(
           shotId,
           projectId,
+          mediaId,
           nextIndex++,
           preview.startMs,
           preview.endMs,
@@ -404,9 +513,92 @@ export class ShotRepository {
         this.assignDetectedTags(shotId, preview.tags);
         applied += 1;
       }
+      const findShotAt = this.db.prepare(
+        `SELECT id FROM shots
+         WHERE project_id = ? AND media_id = ? AND start_ms <= ? AND end_ms > ?
+         ORDER BY start_ms DESC, shot_index LIMIT 1`,
+      );
+      for (const still of stillsToReassign) {
+        const shot = findShotAt.get(projectId, mediaId, still.time_ms, still.time_ms) as { id: string } | undefined;
+        if (shot) setStillShot.run(shot.id, still.id);
+      }
+      // ---- S42 数据保全：按锚点时码重关联（先精确落点，再最近镜头兜底；限当前 media_id） ----
+      const anchorToShot = (anchor: number): string | null => {
+        const exact = findShotAt.get(projectId, mediaId, anchor, anchor) as { id: string } | undefined;
+        if (exact) return exact.id;
+        const nearest = this.db
+          .prepare(
+            'SELECT id FROM shots WHERE project_id = ? AND media_id = ? ORDER BY ABS(start_ms - ?) LIMIT 1',
+          )
+          .get(projectId, mediaId, anchor) as { id: string } | undefined;
+        return nearest?.id ?? null;
+      };
+      const insertNote = this.db.prepare(
+        'INSERT INTO notes (id, project_id, shot_id, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      );
+      for (const note of notesToKeep) {
+        const host = anchorToShot(note.anchor);
+        if (!host) continue;
+        insertNote.run(note.id, projectId, host, note.text, note.created_at, note.updated_at);
+        preserved.notes += 1;
+      }
+      const insertEdge = this.db.prepare(
+        'INSERT OR IGNORE INTO shot_edges (project_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      for (const edge of edgesToKeep) {
+        const from = anchorToShot(edge.fromAnchor);
+        const to = anchorToShot(edge.toAnchor);
+        if (!from || !to || from === to) {
+          preserved.droppedEdges += 1;
+          continue;
+        }
+        insertEdge.run(projectId, from, to, edge.kind, edge.created_at);
+        preserved.edges += 1;
+      }
+      const insertAnnotation = this.db.prepare(
+        'INSERT INTO shot_annotations (id, project_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      );
+      for (const item of annotationsToKeep) {
+        const host = anchorToShot(item.anchor);
+        if (!host) continue;
+        insertAnnotation.run(
+          randomUUID(),
+          projectId,
+          host,
+          item.type,
+          item.color,
+          item.data_json,
+          item.created_at,
+        );
+        preserved.annotations += 1;
+      }
+      const putLayout = this.db.prepare(
+        'INSERT OR REPLACE INTO shot_layout (project_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      for (const item of layoutsToKeep) {
+        const host = anchorToShot(item.anchor);
+        if (!host) continue;
+        putLayout.run(projectId, host, item.x, item.y, item.updated_at);
+        preserved.layouts += 1;
+      }
+      const putGroupMember = this.db.prepare(
+        'INSERT OR IGNORE INTO shot_group_members (project_id, group_id, shot_id) VALUES (?, ?, ?)',
+      );
+      for (const item of groupMembersToKeep) {
+        const host = anchorToShot(item.anchor);
+        if (!host) continue;
+        putGroupMember.run(projectId, item.group_id, host);
+        preserved.groupMembers += 1;
+      }
+      if (
+        preserved.notes + preserved.edges + preserved.annotations + preserved.layouts + preserved.groupMembers > 0 ||
+        preserved.droppedEdges > 0
+      ) {
+        console.info(`[shots] re-detect preserved user data: ${JSON.stringify(preserved)}`);
+      }
       this.layer.projects.touch(projectId);
     });
-    return { applied, skippedProtected };
+    return { applied, skippedProtected, preserved };
   }
 
   /** S41：字段级人工保护标记（事务内复用）。 */
@@ -625,10 +817,12 @@ export class ShotRepository {
     return left && left.trim() ? left : right;
   }
 
-  private renumber(projectId: string): void {
+  private renumber(projectId: string, mediaId: string): void {
     const rows = this.db
-      .prepare('SELECT id FROM shots WHERE project_id = ? ORDER BY start_ms ASC, id ASC')
-      .all(projectId) as Array<{ id: string }>;
+      .prepare(
+        'SELECT id FROM shots WHERE project_id = ? AND media_id = ? ORDER BY start_ms ASC, id ASC',
+      )
+      .all(projectId, mediaId) as Array<{ id: string }>;
     const update = this.db.prepare('UPDATE shots SET shot_index = ? WHERE id = ?');
     rows.forEach((row, index) => update.run(index + 1, row.id));
   }
@@ -643,6 +837,11 @@ export class ShotRepository {
     if (!this.layer.projects.exists(projectId)) {
       throw new DataError('PROJECT_NOT_FOUND', `项目不存在：${projectId}`, { projectId });
     }
+  }
+
+  private resolveMediaId(projectId: string, requested?: string | null): string | null {
+    if (requested) return this.layer.projectMedia.get(projectId, requested).id;
+    return this.layer.projectMedia.activeId(projectId);
   }
 
   /** S41：事务内标记人工字段（幂等合并，不覆盖已有标记）。 */
@@ -678,6 +877,7 @@ function mapShot(row: ShotRow, tagIds: string[]): Shot {
   return {
     id: row.id,
     projectId: row.project_id,
+    mediaId: row.media_id,
     index: row.shot_index,
     startMs: row.start_ms,
     endMs: row.end_ms,

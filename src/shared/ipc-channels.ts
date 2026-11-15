@@ -69,6 +69,10 @@ export const IPC = {
   /** media 域（E 方向） */
   MEDIA_EVENT_PROGRESS: 'media:event:progress',
 
+  /** S42/Z04：硬件能力扫描（I 方向） */
+  HARDWARE_SCAN: 'hardware:scan',
+  HARDWARE_STATUS: 'hardware:status',
+
   /** data 域：跨数据根扫描与项目导入 */
   DATA_SCAN_CANDIDATES: 'data:scanCandidates',
   DATA_IMPORT_PROJECT: 'data:importProject',
@@ -131,6 +135,10 @@ export const IPC = {
   PROJECT_LIST: 'project:list',
   PROJECT_GET: 'project:get',
   PROJECT_UPDATE: 'project:update',
+  PROJECT_LIST_MEDIA: 'project:listMedia',
+  PROJECT_ADD_MEDIA: 'project:addMedia',
+  PROJECT_UPDATE_MEDIA: 'project:updateMedia',
+  PROJECT_ACTIVATE_MEDIA: 'project:activateMedia',
   PROJECT_DELETE: 'project:delete',
   PROJECT_OPEN: 'project:open',
   PROJECT_SAVE: 'project:save',
