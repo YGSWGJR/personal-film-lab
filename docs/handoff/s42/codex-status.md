@@ -48,4 +48,13 @@
 
 - 本机缺少 Visual Studio C++ Build Tools，Electron 原生依赖的完整重建未执行；当前使用已安装运行时完成类型检查和 Electron smoke。
 - 与 `feat/s42-playback-detect`、`integrate/s42-v050` 的交叉审查尚未开始。
-- 功能分支 commit 已创建；最终推送与远端备注在收尾时完成。
+- 功能分支 commit 已创建；本次回归修复提交后推送 `feat/s42-project-media`。
+
+## 2026-11-15 回归修复
+
+- 轨道高度下限恢复为规范要求的 48px，移除可折叠到 1px 的旧档位。
+- 修复标注 `size` 在 IPC 校验后被剥离的问题；笔宽会随标注持久化。
+- 增加窗口级 pointerup/pointercancel 收尾，模拟拖动或丢失捕获时仍能完成一次标注。
+- 标注保存按镜头串行化，避免快速撤销/重做时异步写入乱序。
+- 橡皮首次命中立即刷新画布，撤销可恢复被擦除对象。
+- 反馈入口显式支持 Enter/Space；修复重复 `@media` 导致分镜墙选择框样式失效的问题。

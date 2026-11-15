@@ -78,3 +78,16 @@ npm run smoke   # SMOKE_DELETE_UI=1
 - 因本机缺少 Visual Studio C++ Build Tools，未执行完整 `npm ci` 原生依赖重建。
 - 未生成 NSIS 安装包。
 - 未执行跨分支交叉审查和最终 v0.5.0 发布评分。
+
+## 2026-11-15 回归修复复测
+
+- `vue-tsc --noEmit -p tsconfig.web.json`：通过。
+- `tsc --noEmit -p tsconfig.node.json`：通过。
+- `electron-vite build`：通过。
+- 定向 Electron smoke：`passed=true`，失败项为空。
+- `SMOKE_S42_PROJECT_UI=1`、`SMOKE_S42_WALL_UI=1`、`SMOKE_WALL_UI=1`、`SMOKE_TIMELINE_ZOOM=1` 全部通过。
+- 轨道高度最低档为 48px；48px 输入和设置读取均被校正到合法档位。
+- 分镜墙标注保存、撤销、重做、橡皮单次撤销和旧标注兼容通过。
+- 反馈入口鼠标、Enter、Space 和 Esc 行为通过。
+- 分镜墙选择框在 1426×864 视口中完整居中显示。
+- v12→v13 数据库迁移 GUI 复核通过，旧项目可打开，自动生成 v12 备份。

@@ -26,8 +26,10 @@
 
 - 项目媒体与项目中心拥有独立 IPC 域，不把任意通道透传给 renderer。
 - 静帧库状态使用 `pfl:wall-stills:<projectId>` 与 `pfl:wall-view:<projectId>` 本地存储，不写入 shared settings。
-- 画笔 `size` 保存在本地 view 的标注 `data.size`，继续由现有 `z.looseObject` 承载，不扩展 shared annotation schema。
+- 画笔 `size` 保存在标注 `data.size`；`wallAnnotationDataSchema` 显式声明并校验 1–48，防止 IPC 校验时被剥离。
 - 一次绘制/擦除手势只推入一条历史；取消手势恢复手势前快照且不写库。
+- 标注写库按镜头串行排队，保证快速撤销/重做时的最终数据库状态与画布一致。
+- 轨道高度规范范围为 48–240px；旧设置中的 1px 会在读取时重新吸附到 48px。
 - 普通点击画布卡会立即选择该卡；此前 plain click 只清空选择、不加入当前卡的问题已修复。
 - 分镜墙自行消费播放/画笔状态下的 Esc；外部节点编辑和文本输入优先让位。
 - 缩放面板使用普通文档流，不再绝对定位覆盖轨道；轨道区域负责内部滚动。
