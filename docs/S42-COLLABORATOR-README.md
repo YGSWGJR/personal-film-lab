@@ -5,6 +5,14 @@
 > 内容：S42 播放/检测/硬件三域（Z01–Z04）+ 两轮模拟点击测试修复
 > 姊妹文档：`docs/LOCAL-SETUP.md`（既定机器布局与团队同步习惯）、`docs/handoff/s42/`（实施与测试记录）
 
+## 🔔 状态公告（2026-11-15：v0.5.0 已整合发布）
+
+- **双端已整合**：`feat/s42-project-media`（Codex）× `feat/s42-playback-detect`（ZCode）→ `integrate/s42-v050` → 已合入 `main`，tag **`v0.5.0`**，GitHub Release 已发（Setup / 卸载工具 / 使用说明 / 安装说明 / SHA256SUMS；**local-ai 未变化，复用 v0.4.0 Release 资产**）。
+- 发布要点与资产清单见 `docs/RELEASE-v0.5.0.md`。
+- 本机部署惯例（用户口径）：**程序装 D 盘，所有项目数据产生在 G 盘**（应用内置重定向 `G:\拉片\软件数据`，与安装位置无关）。
+- 剩余待办：F04 最终构件真实断网复验（需断 Wi-Fi 数分钟）、日常升级安装复核。其余测试门控全部通过，见 `docs/RELEASE-v0.5.0.md` 测试节。
+- 下文部署步骤同样适用于 main / v0.5.0（把 §2 的 `git switch` 换成 `git switch main` 即可）。
+
 ---
 
 ## 1. 前置要求
