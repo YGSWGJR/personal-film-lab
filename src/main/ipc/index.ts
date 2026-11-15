@@ -71,6 +71,10 @@ import type {
   OverlayLayer,
   Project,
   ProjectCreateArgs,
+  ProjectMediaActivateArgs,
+  ProjectMediaAddArgs,
+  ProjectMediaItem,
+  ProjectMediaUpdateArgs,
   ProjectOpenArgs,
   ProjectOpenResult,
   ProjectSaveArgs,
@@ -869,6 +873,30 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((args: ProjectUpdateArgs): Project => requireData().projects.update(args)),
   );
   ipcMain.handle(
+    IPC.PROJECT_LIST_MEDIA,
+    withEnvelope((args: { projectId: string }): ProjectMediaItem[] =>
+      requireData().projects.listMedia(args.projectId),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_ADD_MEDIA,
+    withEnvelope((args: ProjectMediaAddArgs): ProjectMediaItem =>
+      requireData().projects.addMedia(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_UPDATE_MEDIA,
+    withEnvelope((args: ProjectMediaUpdateArgs): ProjectMediaItem =>
+      requireData().projects.updateMedia(args),
+    ),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_ACTIVATE_MEDIA,
+    withEnvelope((args: ProjectMediaActivateArgs): Project =>
+      requireData().projects.activateMedia(args),
+    ),
+  );
+  ipcMain.handle(
     IPC.PROJECT_DELETE,
     withEnvelope((args: { id: string }): { deleted: true } => {
       requireData().projects.delete(args.id);
@@ -893,7 +921,9 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // ---------- data: shot ----------
   ipcMain.handle(
     IPC.SHOT_LIST,
-    withEnvelope((args: { projectId: string }): Shot[] => requireData().shots.list(args.projectId)),
+    withEnvelope((args: { projectId: string; mediaId?: string }): Shot[] =>
+      requireData().shots.list(args.projectId, args.mediaId),
+    ),
   );
   ipcMain.handle(
     IPC.SHOT_GET,
@@ -955,7 +985,9 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // ---------- data: still ----------
   ipcMain.handle(
     IPC.STILL_LIST,
-    withEnvelope((args: { projectId?: string; shotId?: string }): Still[] => requireData().stills.list(args)),
+    withEnvelope((args: { projectId?: string; shotId?: string; mediaId?: string }): Still[] =>
+      requireData().stills.list(args),
+    ),
   );
   ipcMain.handle(
     IPC.STILL_GET,

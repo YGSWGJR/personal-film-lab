@@ -119,6 +119,12 @@ select:focus-visible {
   min-width: 0;
   align-items: center;
   gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .brand-mark {
@@ -384,8 +390,16 @@ select:focus-visible {
   place-items: center;
 }
 
+.workspace-stack {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
 .workbench {
   display: grid;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   grid-template-columns: var(--left-column, 260px) minmax(480px, 1fr) var(--right-column, 300px);

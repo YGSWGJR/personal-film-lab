@@ -46,6 +46,7 @@ const emit = defineEmits<{
   boundaryCommit: [change: BoundaryChange];
   updateTrackHeight: [value: number];
   updatePxPerSecond: [value: number];
+  deleteBackspace: [];
 }>();
 
 const timelineViewportEl = ref<HTMLElement | null>(null);
@@ -213,6 +214,7 @@ const zoomDensityDraft = ref(String(props.pxPerSecond));
 const zoomHeightEditing = ref(false);
 const zoomDensityEditing = ref(false);
 const zoomCtlEl = ref<HTMLElement | null>(null);
+const zoomPanelEl = ref<HTMLElement | null>(null);
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
@@ -248,8 +250,16 @@ function formatDuration(ms: number): string {
 
 function onDocumentPointerDown(event: PointerEvent): void {
   if (!zoomOpen.value) return;
-  const element = zoomCtlEl.value;
-  if (element && !element.contains(event.target as Node)) zoomOpen.value = false;
+  const target = event.target as Node;
+  if (!zoomCtlEl.value?.contains(target) && !zoomPanelEl.value?.contains(target)) {
+    zoomOpen.value = false;
+  }
+}
+
+function onTimelinePointerDownCapture(event: PointerEvent): void {
+  if (!zoomOpen.value) return;
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest('.zoom-ctl, .zoom-panel-row')) zoomOpen.value = false;
 }
 
 function onHeightSliderInput(event: Event): void {
@@ -363,6 +373,21 @@ function timeFromClientX(clientX: number, element: HTMLElement | null): number {
 
 function clampViewStart(value: number): number {
   return Math.max(0, Math.min(maxViewStartMs.value, Math.round(value)));
+}
+
+function onDeleteBackspace(event: KeyboardEvent): void {
+  if (event.key !== 'Backspace' || event.defaultPrevented) return;
+  const target = event.target as HTMLElement | null;
+  if (
+    target?.tagName === 'INPUT' ||
+    target?.tagName === 'TEXTAREA' ||
+    target?.tagName === 'SELECT' ||
+    target?.isContentEditable
+  ) {
+    return;
+  }
+  event.preventDefault();
+  emit('deleteBackspace');
 }
 
 function resetDensity(): void {
@@ -728,6 +753,7 @@ function measureTrackWidth(): void {
 onMounted(async () => {
   await nextTick();
   document.addEventListener('pointerdown', onDocumentPointerDown);
+  window.addEventListener('keydown', onDeleteBackspace, true);
   measureTrackWidth();
   viewStartMs.value = clampViewStart(props.currentTimeMs - visibleDurationMs.value * 0.12);
   resizeObserver = new ResizeObserver(() => {
@@ -742,6 +768,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (drawFrame) cancelAnimationFrame(drawFrame);
   document.removeEventListener('pointerdown', onDocumentPointerDown);
+  window.removeEventListener('keydown', onDeleteBackspace, true);
   resizeObserver?.disconnect();
   resizeObserver = null;
   window.removeEventListener('pointermove', handleBoundaryMove);
@@ -752,14 +779,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="timeline" :style="{ '--track-height': `${trackHeight}px`, '--audio-height': `${audioHeight}px` }">
+  <section
+    class="timeline"
+    :style="{ '--track-height': `${trackHeight}px`, '--audio-height': `${audioHeight}px` }"
+    @pointerdown.capture="onTimelinePointerDownCapture"
+  >
     <div class="timeline-context">
       <div class="timeline-tab">
         <AppIcon name="film" :size="12" />
         <span>Timeline 1</span>
         <em>{{ shots.length }} 镜头</em>
       </div>
-      <span class="source-chip">单视频源 · V2 参考轨</span>
+      <span class="source-chip">{{ mediaLabel }} · V2 参考轨</span>
       <div class="timeline-actions">
         <button
           type="button"
@@ -807,58 +838,63 @@ onBeforeUnmount(() => {
             <AppIcon name="search" :size="11" />
             <span>{{ heightLabel }} · {{ densityLabel }}</span>
           </button>
-          <div v-show="zoomOpen" class="zoom-pop" @pointerdown.stop @wheel.stop>
-            <div class="zoom-row" @wheel.prevent.stop="onHeightWheel">
-              <span>轨道高度</span>
-              <input
-                type="range"
-                min="1"
-                max="240"
-                step="1"
-                :value="trackHeight"
-                @input="onHeightSliderInput"
-                @change="onHeightSliderChange"
-              />
-              <input
-                class="zoom-num"
-                v-model="zoomHeightDraft"
-                type="number"
-                min="1"
-                max="240"
-                @focus="beginHeightInput"
-                @keydown.enter.prevent="commitHeightInput"
-                @blur="commitHeightInput"
-              />
-            </div>
-            <div class="zoom-row" @wheel.prevent.stop="onDensityWheel">
-              <span>时间密度</span>
-              <input
-                type="range"
-                min="24"
-                max="768"
-                step="1"
-                :value="pxPerSecond"
-                @input="onDensitySliderInput"
-                @change="onDensitySliderChange"
-              />
-              <input
-                class="zoom-num"
-                v-model="zoomDensityDraft"
-                type="number"
-                min="24"
-                max="768"
-                @focus="beginDensityInput"
-                @keydown.enter.prevent="commitDensityInput"
-                @blur="commitDensityInput"
-              />
-            </div>
-            <div class="zoom-pop-foot">
-              <button type="button" class="zoom-reset" @click="resetZoomControl">重置 96 / 96</button>
-              <span class="zoom-hint">拖动逐档预览 · 松手定档 · 滚轮微调</span>
-            </div>
-          </div>
         </div>
         <span class="playhead playhead-ruler" :style="{ left: `${playheadPercent}%` }"></span>
+      </div>
+    </div>
+
+    <div v-show="zoomOpen" ref="zoomPanelEl" class="zoom-panel-row" @pointerdown.stop @wheel.stop>
+      <span class="zoom-panel-label">视图缩放</span>
+      <div class="zoom-panel">
+        <div class="zoom-panel-heading">
+          <strong>{{ heightLabel }} · {{ densityLabel }}</strong>
+          <button type="button" class="zoom-reset" @click="resetZoomControl">重置 96 / 96</button>
+        </div>
+        <div class="zoom-row" @wheel.prevent.stop="onHeightWheel">
+          <span>轨道高度</span>
+          <input
+            type="range"
+            min="1"
+            max="240"
+            step="1"
+            :value="trackHeight"
+            @input="onHeightSliderInput"
+            @change="onHeightSliderChange"
+          />
+          <input
+            class="zoom-num"
+            v-model="zoomHeightDraft"
+            type="number"
+            min="1"
+            max="240"
+            @focus="beginHeightInput"
+            @keydown.enter.prevent="commitHeightInput"
+            @blur="commitHeightInput"
+          />
+        </div>
+        <div class="zoom-row" @wheel.prevent.stop="onDensityWheel">
+          <span>时间密度</span>
+          <input
+            type="range"
+            min="24"
+            max="768"
+            step="1"
+            :value="pxPerSecond"
+            @input="onDensitySliderInput"
+            @change="onDensitySliderChange"
+          />
+          <input
+            class="zoom-num"
+            v-model="zoomDensityDraft"
+            type="number"
+            min="24"
+            max="768"
+            @focus="beginDensityInput"
+            @keydown.enter.prevent="commitDensityInput"
+            @blur="commitDensityInput"
+          />
+        </div>
+        <span class="zoom-hint">拖动逐档预览 · 松手定档 · 滚轮微调</span>
       </div>
     </div>
 
@@ -882,7 +918,12 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="tracks" :style="timelineGridStyle" @wheel="onTracksWheel">
+    <div
+      class="tracks"
+      :style="timelineGridStyle"
+      @wheel="onTracksWheel"
+      @pointerdown.capture="zoomOpen = false"
+    >
       <div class="track-row track-row-v2" :class="{ 'track-hidden': !v2Visible }">
         <div class="track-head" :class="{ compact: compactHead }">
           <div class="head-topline">
@@ -1089,9 +1130,8 @@ onBeforeUnmount(() => {
 .timeline {
   position: relative;
   display: flex;
-  /* 0.3.0 修复：矮窗口下允许时间线收缩，保证底部 transport 条始终可见 */
   flex: 0 1 auto;
-  min-height: 150px;
+  min-height: 0;
   overflow: hidden;
   flex-direction: column;
   border: 1px solid var(--border);
@@ -1238,6 +1278,8 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   display: flex;
+  flex: 1 1 auto;
+  min-height: 72px;
   max-height: min(58vh, 620px);
   flex-direction: column;
   overflow-x: hidden;
@@ -1807,20 +1849,43 @@ onBeforeUnmount(() => {
   color: #72b4ff;
 }
 
-.zoom-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 90;
+.zoom-panel-row {
+  display: grid;
+  min-height: 66px;
+  grid-template-columns: clamp(146px, 20vw, 232px) minmax(0, 1fr);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: #0f1822;
+}
+
+.zoom-panel-label {
   display: flex;
-  width: clamp(220px, 26vw, 280px);
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: #141e2a;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  align-items: flex-start;
+  padding: 12px 15px;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  color: #64778d;
+  font-size: 8px;
+  letter-spacing: 0.5px;
+}
+
+.zoom-panel {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: 8px 12px 9px;
+}
+
+.zoom-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.zoom-panel-heading strong {
+  color: #8fa6c0;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
 }
 
 .zoom-row {
@@ -1857,12 +1922,6 @@ onBeforeUnmount(() => {
 
 .zoom-num:focus {
   border-color: var(--border-strong);
-}
-
-.zoom-pop-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .zoom-reset {

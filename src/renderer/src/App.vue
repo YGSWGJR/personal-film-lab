@@ -9,7 +9,10 @@ import AppIcon from './components/AppIcon.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import DetectionModal from './components/DetectionModal.vue';
+import FeedbackDialog from './components/FeedbackDialog.vue';
 import LabelPreviewModal from './components/LabelPreviewModal.vue';
+import ProjectCenterModal from './components/ProjectCenterModal.vue';
+import ProjectMediaTabs from './components/ProjectMediaTabs.vue';
 import StoryboardWall from './components/StoryboardWall.vue';
 import WallNodePanel from './components/WallNodePanel.vue';
 import ExportModal from './components/ExportModal.vue';
@@ -215,6 +218,14 @@ const importWizardSelected = ref<string[]>([]);
 const importWizardBusy = ref(false);
 const importWizardError = ref<string | null>(null);
 const missingSessionProjectId = ref<string | null>(null);
+const projectCenterOpen = ref(false);
+const feedbackOpen = ref(false);
+const projectCenterProjects = ref<Project[]>([]);
+const projectCenterBusy = ref(false);
+const mediaSwitchBusy = ref(false);
+type MediaSessionRecord = NonNullable<WorkspaceState['mediaSessions']>[string];
+const mediaSessions = ref<Record<string, MediaSessionRecord>>({});
+let mediaSwitchQueue: Promise<void> = Promise.resolve();
 const settingsMigrationPreviousRoot = ref<string | null>(null);
 const settingsMigrationNextRoot = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
@@ -384,6 +395,8 @@ const overlayOpen = computed(
     termEditorOpen.value ||
     settingsOpen.value ||
     statsOpen.value ||
+    projectCenterOpen.value ||
+    feedbackOpen.value ||
     importWizardOpen.value ||
     aiMenuOpen.value ||
     aiAuthRequest.value !== null ||
@@ -616,14 +629,41 @@ async function loadProject(
   restoreState: WorkspaceState | null = null,
   deferWaveform = false,
 ): Promise<void> {
-  const projectChanged = activeProject.value?.id !== project.id;
-  activeProject.value = project;
+  let selectedProject = project;
+  if (
+    restoreState?.activeMediaId &&
+    restoreState.activeMediaId !== project.activeMediaId &&
+    project.mediaItems.some((item) => item.id === restoreState.activeMediaId)
+  ) {
+    const activated = unwrap(
+      await window.api.project.activateMedia({
+        projectId: project.id,
+        mediaId: restoreState.activeMediaId,
+      }),
+    );
+    if (activated) selectedProject = activated;
+  }
+  if (restoreState?.mediaSessions) mediaSessions.value = { ...restoreState.mediaSessions };
+  const projectChanged =
+    activeProject.value?.id !== selectedProject.id ||
+    activeProject.value?.activeMediaId !== selectedProject.activeMediaId;
+  activeProject.value = selectedProject;
   demoMode.value = false;
-  if (projectChanged && !deferWaveform) prepareAudioWaveform(project);
+  if (projectChanged && !deferWaveform) prepareAudioWaveform(selectedProject);
+  const restoredDetection =
+    selectedProject.activeMediaId && restoreState?.mediaSessions
+      ? restoreState.mediaSessions[selectedProject.activeMediaId]?.detectionState
+      : undefined;
+  detectionResult.value = (restoredDetection?.detectionResult as DetectResult | null) ?? null;
+  boundaryNotice.value =
+    (restoredDetection?.boundaryNotice as BoundaryAppliedResult | null) ?? null;
+  labelPreview.value =
+    (restoredDetection?.labelPreview as LabelPreviewResult | null) ?? null;
+  detectionJobId.value = restoredDetection?.detectionJobId ?? null;
   const [shotResult, stillResult, noteResult] = await Promise.all([
-    window.api.shot.list({ projectId: project.id }),
-    window.api.still.list({ projectId: project.id }),
-    window.api.note.list({ projectId: project.id }),
+    window.api.shot.list({ projectId: selectedProject.id }),
+    window.api.still.list({ projectId: selectedProject.id }),
+    window.api.note.list({ projectId: selectedProject.id }),
   ]);
   const loadedShots = unwrap(shotResult);
   const loadedStills = unwrap(stillResult);
@@ -643,7 +683,7 @@ async function loadProject(
   previewTimeMs.value = restoreState?.timeMs ?? mapped[0]?.startMs ?? 0;
   await Promise.all([loadTerms(true, true), loadTags()]);
 
-  const playbackCandidates = [project.media.proxyPath, project.source.path]
+  const playbackCandidates = [selectedProject.media.proxyPath, selectedProject.source.path]
     .filter((path): path is string => Boolean(path))
     .filter((path, index, paths) => paths.findIndex((item) => samePath(item, path)) === index);
   let playbackReady = false;
@@ -734,10 +774,55 @@ async function createProjectForMedia(media: MediaInfo): Promise<Project | null> 
   return project;
 }
 
+async function appendMediaToProject(projectId: string): Promise<void> {
+  if (projectCenterBusy.value || busy.value) return;
+  projectCenterBusy.value = true;
+  busy.value = true;
+  try {
+    const media = unwrap(await window.api.player.openDialog());
+    if (!media) return;
+    if (activeProject.value?.id === projectId) rememberCurrentMediaSession();
+    const probe = unwrap(await window.api.media.probe({ path: media.path }));
+    const item = unwrap(
+      await window.api.project.addMedia({
+        projectId,
+        source: { type: 'local', path: media.path },
+        media: {
+          filename: probe?.filename ?? cleanProjectName(media.path),
+          container: probe?.container ?? null,
+          durationMs: probe?.durationMs ?? media.durationMs,
+          width: probe?.width ?? media.width,
+          height: probe?.height ?? media.height,
+          fps: probe?.fps ?? media.fps,
+          videoCodec: probe?.videoCodec ?? null,
+          audioCodec: probe?.audioCodec ?? null,
+          sizeBytes: probe?.sizeBytes ?? null,
+          proxyPath: null,
+        },
+        activate: true,
+      }),
+    );
+    if (!item) return;
+    const project = unwrap(await window.api.project.get({ id: projectId }));
+    if (!project) return;
+    projectCenterProjects.value = unwrap(await window.api.project.list()) ?? projectCenterProjects.value;
+    projectCenterOpen.value = false;
+    await loadProject(project, null, true);
+    showToast(`${item.filename ?? `视频 ${item.index}`} 已追加到项目。`, 'success');
+    setTimeout(
+      () => void startBackgroundProxy(projectId, item.id, media.path),
+      0,
+    );
+  } finally {
+    busy.value = false;
+    projectCenterBusy.value = false;
+  }
+}
+
 async function openVideo(): Promise<void> {
   if (busy.value) return;
   busy.value = true;
-  let backgroundProxy: { projectId: string; sourcePath: string } | null = null;
+  let backgroundProxy: { projectId: string; mediaId: string; sourcePath: string } | null = null;
   try {
     const media = unwrap(await window.api.player.openDialog());
     if (!media) return;
@@ -745,18 +830,177 @@ async function openVideo(): Promise<void> {
     const project = await createProjectForMedia(media);
     if (project) {
       await loadProject(project, null, true);
-      backgroundProxy = { projectId: project.id, sourcePath: media.path };
+      const mediaId = project.activeMediaId;
+      if (mediaId) backgroundProxy = { projectId: project.id, mediaId, sourcePath: media.path };
       showToast('影片已导入，可立即播放；代理正在后台生成。', 'success');
     }
   } finally {
     busy.value = false;
   }
   if (backgroundProxy) {
-    setTimeout(() => void startBackgroundProxy(backgroundProxy.projectId, backgroundProxy.sourcePath), 0);
+    setTimeout(
+      () =>
+        void startBackgroundProxy(
+          backgroundProxy.projectId,
+          backgroundProxy.mediaId,
+          backgroundProxy.sourcePath,
+        ),
+      0,
+    );
   }
 }
 
-async function startBackgroundProxy(projectId: string, sourcePath: string): Promise<void> {
+async function openProjectCenter(): Promise<void> {
+  projectCenterBusy.value = true;
+  try {
+    const projects = unwrap(await window.api.project.list());
+    projectCenterProjects.value = projects ?? [];
+    projectCenterOpen.value = true;
+  } finally {
+    projectCenterBusy.value = false;
+  }
+}
+
+async function createEmptyProject(): Promise<void> {
+  if (projectCenterBusy.value) return;
+  projectCenterBusy.value = true;
+  try {
+    const stamp = new Date().toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const project = unwrap(
+      await window.api.project.create({ name: `未命名项目 ${stamp}` }),
+    );
+    if (!project) return;
+    projectCenterProjects.value = unwrap(await window.api.project.list()) ?? [project];
+    projectCenterOpen.value = false;
+    await loadProject(project);
+    showToast('空项目已创建，可以稍后保存或追加视频。', 'success');
+  } finally {
+    projectCenterBusy.value = false;
+  }
+}
+
+async function importNewProjectFromCenter(): Promise<void> {
+  if (projectCenterBusy.value || busy.value) return;
+  projectCenterOpen.value = false;
+  await openVideo();
+  projectCenterProjects.value = unwrap(await window.api.project.list()) ?? projectCenterProjects.value;
+}
+
+async function openProjectFromCenter(projectId: string): Promise<void> {
+  if (projectCenterBusy.value) return;
+  projectCenterBusy.value = true;
+  try {
+    const project = unwrap(await window.api.project.get({ id: projectId }));
+    if (!project) return;
+    projectCenterOpen.value = false;
+    await loadProject(project);
+  } finally {
+    projectCenterBusy.value = false;
+  }
+}
+
+async function relinkProjectMedia(projectId: string, mediaId: string): Promise<void> {
+  if (projectCenterBusy.value) return;
+  projectCenterBusy.value = true;
+  try {
+    const media = unwrap(await window.api.player.openDialog());
+    if (!media) return;
+    const probe = unwrap(await window.api.media.probe({ path: media.path }));
+    unwrap(
+      await window.api.project.updateMedia({
+        projectId,
+        mediaId,
+        patch: {
+          source: { type: 'local', path: media.path },
+          media: {
+            filename: probe?.filename ?? cleanProjectName(media.path),
+            container: probe?.container ?? null,
+            durationMs: probe?.durationMs ?? media.durationMs,
+            width: probe?.width ?? media.width,
+            height: probe?.height ?? media.height,
+            fps: probe?.fps ?? media.fps,
+            videoCodec: probe?.videoCodec ?? null,
+            audioCodec: probe?.audioCodec ?? null,
+            sizeBytes: probe?.sizeBytes ?? null,
+            proxyPath: null,
+          },
+        },
+      }),
+    );
+    const project = unwrap(await window.api.project.get({ id: projectId }));
+    if (project) {
+      projectCenterProjects.value = unwrap(await window.api.project.list()) ?? projectCenterProjects.value;
+      if (activeProject.value?.id === projectId) {
+        await loadProject(project);
+      }
+    }
+    showToast('媒体路径已重新定位，不会自动指向其他视频。', 'success');
+  } finally {
+    projectCenterBusy.value = false;
+  }
+}
+
+function rememberCurrentMediaSession(): void {
+  const mediaId = activeProject.value?.activeMediaId;
+  if (!mediaId || demoMode.value) return;
+  mediaSessions.value = {
+    ...mediaSessions.value,
+    [mediaId]: {
+      timeMs: Math.max(0, Math.round(displayTimeMs.value)),
+      selectedShotId: selectedId.value,
+      shotScrollTop: shotScrollTop.value,
+      detectionState: {
+        detectionResult: detectionResult.value,
+        boundaryNotice: boundaryNotice.value,
+        labelPreview: labelPreview.value,
+        detectionJobId: detectionJobId.value,
+      },
+    },
+  };
+}
+
+function switchProjectMedia(mediaId: string): Promise<void> {
+  mediaSwitchQueue = mediaSwitchQueue.catch(() => undefined).then(async () => {
+    const project = activeProject.value;
+    if (!project || project.activeMediaId === mediaId || demoMode.value) return;
+    mediaSwitchBusy.value = true;
+    try {
+      rememberCurrentMediaSession();
+      const previousSession = mediaSessions.value[mediaId];
+      const activated = unwrap(
+        await window.api.project.activateMedia({ projectId: project.id, mediaId }),
+      );
+      if (!activated) return;
+      const restore: WorkspaceState = {
+        projectId: activated.id,
+        activeMediaId: mediaId,
+        timeMs: previousSession?.timeMs ?? 0,
+        selectedShotId: previousSession?.selectedShotId ?? null,
+        leftCollapsed: leftCollapsed.value,
+        rightCollapsed: rightCollapsed.value,
+        volume: player.volume,
+        shotScrollTop: previousSession?.shotScrollTop ?? 0,
+        mediaSessions: { ...mediaSessions.value },
+      };
+      await loadProject(activated, restore);
+      await window.api.session.save(workspaceStateSnapshot());
+    } finally {
+      mediaSwitchBusy.value = false;
+    }
+  });
+  return mediaSwitchQueue;
+}
+
+async function startBackgroundProxy(
+  projectId: string,
+  mediaId: string,
+  sourcePath: string,
+): Promise<void> {
   const tier = settings.value?.proxyTier ?? '540p';
   transcoding.value = true;
   transcodeProgress.value = {
@@ -775,14 +1019,20 @@ async function startBackgroundProxy(projectId: string, sourcePath: string): Prom
     );
     if (!proxy) return;
     const updated = unwrap(
-      await window.api.project.update({
-        id: projectId,
+      await window.api.project.updateMedia({
+        projectId,
+        mediaId,
         patch: { media: { proxyPath: proxy.outputPath } },
       }),
     );
     if (updated) {
-      if (activeProject.value?.id === projectId) activeProject.value = updated;
-      prepareAudioWaveform(updated);
+      const project = unwrap(await window.api.project.get({ id: projectId }));
+      if (project) {
+        if (activeProject.value?.id === projectId) {
+          activeProject.value = project;
+          prepareAudioWaveform(project);
+        }
+      }
       showToast(`${tier} 代理已生成，下次打开项目将使用代理。`, 'success');
     }
   } catch (error) {
@@ -1372,6 +1622,34 @@ async function deleteShot(shot: WorkspaceShot): Promise<void> {
   } finally {
     busy.value = false;
   }
+}
+
+function deleteSelectedByBackspace(): void {
+  if (overlayOpen.value || contextMenu.visible || busy.value) return;
+  const shot = selectedShot.value;
+  if (!shot || demoMode.value) return;
+  void deleteShot(shot);
+}
+
+function onDocumentEscape(event: KeyboardEvent): void {
+  const target = event.target as HTMLElement | null;
+  if (
+    event.key !== 'Escape' ||
+    !wallOpen.value ||
+    Array.from(document.querySelectorAll('.node-edit-card h3')).some(
+      (heading) => heading.textContent?.trim() === '编辑分镜节点',
+    ) ||
+    document.querySelector('.wall-ppt') ||
+    target?.tagName === 'INPUT' ||
+    target?.tagName === 'TEXTAREA' ||
+    target?.tagName === 'SELECT' ||
+    target?.isContentEditable
+  ) {
+    return;
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  closeWall();
 }
 
 async function deleteStill(still: Still): Promise<void> {
@@ -2388,14 +2666,20 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
 }
 
 function workspaceStateSnapshot(): WorkspaceState {
+  rememberCurrentMediaSession();
+  const activeMediaId = demoMode.value ? null : activeProject.value?.activeMediaId ?? null;
   return {
     projectId: demoMode.value ? null : activeProject.value?.id ?? null,
+    activeMediaId,
     timeMs: Math.max(0, Math.round(displayTimeMs.value)),
     selectedShotId: selectedId.value,
     leftCollapsed: leftCollapsed.value,
     rightCollapsed: rightCollapsed.value,
     volume: player.volume,
     shotScrollTop: shotScrollTop.value,
+    mediaSessions: JSON.parse(
+      JSON.stringify(mediaSessions.value),
+    ) as WorkspaceState['mediaSessions'],
   };
 }
 
@@ -2546,6 +2830,10 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     await openWall();
     return { ok: true };
   },
+  openProjectWall: async () => {
+    await openProjectWall();
+    return { ok: true };
+  },
   reloadEdges: async () => {
     await (wallRef.value as unknown as { reloadGraph: () => Promise<void> } | null)?.reloadGraph();
   },
@@ -2557,6 +2845,15 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     await loadBoardNodes();
     toggleProjection();
     if (projectedMode.value && boardShots.value.length > 0) {
+      selectedId.value = boardShots.value[0].id;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    return projectedMode.value ? 'on' : 'off';
+  },
+  setProjection: async (enabled: boolean): Promise<string> => {
+    await loadBoardNodes();
+    if (projectionOn.value !== enabled) toggleProjection();
+    if (enabled && projectedMode.value && boardShots.value.length > 0) {
       selectedId.value = boardShots.value[0].id;
     }
     await new Promise((r) => setTimeout(r, 300));
@@ -2589,6 +2886,7 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
     cards: document.querySelectorAll('.wall-card').length,
     scale: document.querySelector('.wall-zval')?.textContent ?? '',
     playerOpen: Boolean(document.querySelector('.wall-ppt')),
+    stillsOpen: Boolean(document.querySelector('.still-library')),
     slides: document.querySelectorAll('.wall-ppt-slide').length,
     tools: document.querySelectorAll('.wall-ppt-tool').length,
   }),
@@ -2659,6 +2957,7 @@ window.__CAPTURE_WORKSPACE_STATE__ = workspaceStateSnapshot;
 watch(
   [
     () => activeProject.value?.id,
+    () => activeProject.value?.activeMediaId,
     selectedId,
     leftCollapsed,
     rightCollapsed,
@@ -3671,11 +3970,38 @@ function onBoardNodeText(nodeId: string, text: string): void {
 /** S44：节点编辑卡保存 */
 async function deleteBoardNode(nodeId: string): Promise<void> {
   if (!wallBoardId.value) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '删除分镜节点',
+      '确定删除选中的分镜节点吗？该节点及其连线会被永久删除。',
+    );
+    if (!confirmed) return;
+  }
   const result = await window.api.wall.deleteNode({ nodeId });
   if (!result.ok) {
     showToast(result.error.message, 'error', result.error.code);
     return;
   }
+  await loadBoardNodes();
+}
+
+async function deleteBoardNodes(nodeIds: string[]): Promise<void> {
+  if (!wallBoardId.value || nodeIds.length === 0) return;
+  if (needDeleteConfirm.value) {
+    const confirmed = await confirmUserDelete(
+      '删除分镜节点',
+      `确定删除选中的 ${nodeIds.length} 个分镜节点吗？相关连线会被永久删除。`,
+    );
+    if (!confirmed) return;
+  }
+  for (const nodeId of nodeIds) {
+    const result = await window.api.wall.deleteNode({ nodeId });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      break;
+    }
+  }
+  wallSelectedIds.value = [];
   await loadBoardNodes();
 }
 
@@ -3833,6 +4159,14 @@ function closeTopOverlay(): boolean {
     exportOpen.value = false;
     return true;
   }
+  if (projectCenterOpen.value) {
+    projectCenterOpen.value = false;
+    return true;
+  }
+  if (feedbackOpen.value) {
+    feedbackOpen.value = false;
+    return true;
+  }
   if (detectionOpen.value) {
     closeDetection();
     return true;
@@ -3864,6 +4198,30 @@ function handleKeydown(event: KeyboardEvent): void {
     tagName === 'SELECT' ||
     target?.isContentEditable
   ) {
+    return;
+  }
+
+  if (
+    event.key === 'Escape' &&
+    wallOpen.value &&
+    Array.from(document.querySelectorAll('.node-edit-card h3')).some(
+      (heading) => heading.textContent?.trim() === '编辑分镜节点',
+    )
+  ) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    wallNodeEdit.value = null;
+    return;
+  }
+
+  if (event.key === 'Escape' && wallOpen.value) {
+    // 放映层由 StoryboardWall 先行处理（取消画笔 / 退出放映）；
+    // 非放映态由 App 统一关闭墙面，兼容 document/body 上的真实键盘事件。
+    if (!document.querySelector('.wall-ppt')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeWall();
+    }
     return;
   }
 
@@ -4186,6 +4544,7 @@ onMounted(async () => {
   await nextTick();
   restoringSession = false;
   window.addEventListener('keydown', handleKeydown);
+  document.addEventListener('keydown', onDocumentEscape, true);
   window.addEventListener('beforeunload', handleBeforeUnload);
 });
 
@@ -4197,6 +4556,7 @@ onBeforeUnmount(() => {
   for (const unsubscribe of unsubscribers) unsubscribe();
   unsubscribers.length = 0;
   window.removeEventListener('keydown', handleKeydown);
+  document.removeEventListener('keydown', onDocumentEscape, true);
   window.removeEventListener('beforeunload', handleBeforeUnload);
   if (toastTimer) clearTimeout(toastTimer);
   if (noteTimer) clearTimeout(noteTimer);
@@ -4216,16 +4576,23 @@ onBeforeUnmount(() => {
 <template>
   <div class="app-shell">
     <header class="topbar">
-      <div class="brand">
+      <button
+        class="brand"
+        type="button"
+        title="反馈与问题报告"
+        aria-label="打开反馈与问题报告"
+        @click="feedbackOpen = true"
+      >
         <div class="brand-mark" aria-hidden="true">
           <span></span><span></span><span></span>
         </div>
         <div class="brand-copy">
           <strong>个人拉片工作台</strong>
         </div>
-      </div>
+      </button>
 
       <nav class="main-nav" aria-label="主导航">
+        <button class="nav-item" type="button" @click="openProjectCenter">项目中心</button>
         <button class="nav-item primary" type="button" :disabled="busy" @click="openVideo">
           <AppIcon name="folder" :size="16" />
           导入影片
@@ -4359,7 +4726,17 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div class="workbench" :style="{ gridTemplateColumns: workbenchColumns }">
+    <div class="workspace-stack">
+      <ProjectMediaTabs
+        v-if="activeProject && !demoMode"
+        :project="activeProject"
+        :busy="mediaSwitchBusy"
+        @select="switchProjectMedia"
+        @add="appendMediaToProject(activeProject.id)"
+        @center="openProjectCenter"
+      />
+
+      <div class="workbench" :style="{ gridTemplateColumns: workbenchColumns }">
       <ShotListPanel
         :shots="workbenchShots"
         :selected-id="selectedId"
@@ -4415,6 +4792,7 @@ onBeforeUnmount(() => {
         @toggle-mute="handleToggleMute"
         @update-track-height="onTrackHeightChange"
         @update-px-per-second="onPxPerSecondChange"
+      @delete-selected="deleteSelectedByBackspace"
       />
 
       <ShotDetailPanel
@@ -4443,7 +4821,28 @@ onBeforeUnmount(() => {
         @capture="captureStill"
         @context-menu="openStillContextMenu"
       />
+      </div>
     </div>
+
+    <ProjectCenterModal
+      :open="projectCenterOpen"
+      :projects="projectCenterProjects"
+      :current-project="activeProject"
+      :busy="projectCenterBusy"
+      @close="projectCenterOpen = false"
+      @open-project="openProjectFromCenter"
+      @create-empty="createEmptyProject"
+      @import-new="importNewProjectFromCenter"
+      @append-media="appendMediaToProject"
+      @relink-media="relinkProjectMedia"
+    />
+
+    <FeedbackDialog
+      :open="feedbackOpen"
+      :version="info?.version ?? '0.4.0'"
+      :platform="`${info?.platform ?? 'win32'} ${player.width}×${player.height}`"
+      @close="feedbackOpen = false"
+    />
 
     <footer class="statusbar">
       <div class="status-group">
@@ -4485,6 +4884,7 @@ onBeforeUnmount(() => {
       @open-board-dir="openBoardSaveDir"
       @create-composite="onCreateComposite"
       @dissolve-composite="onDissolveComposite"
+      @delete-selection="deleteBoardNodes"
       @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">

@@ -60,6 +60,10 @@ import {
   noteUpsertArgsSchema,
   playerFrameStepArgsSchema,
   projectCreateArgsSchema,
+  projectMediaActivateArgsSchema,
+  projectMediaAddArgsSchema,
+  projectMediaListArgsSchema,
+  projectMediaUpdateArgsSchema,
   projectOpenArgsSchema,
   projectSaveArgsSchema,
   projectSaveAsArgsSchema,
@@ -201,6 +205,10 @@ import type {
   TranscodeQueueItem,
   WindowApi,
   ProjectCreateArgs,
+  ProjectMediaActivateArgs,
+  ProjectMediaAddArgs,
+  ProjectMediaItem,
+  ProjectMediaUpdateArgs,
   ProjectUpdateArgs,
   ProjectSaveArgs,
   ProjectOpenResult,
@@ -343,12 +351,19 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.PROJECT_LIST]: emptyArgsSchema,
   [IPC.PROJECT_GET]: idArgsSchema,
   [IPC.PROJECT_UPDATE]: projectUpdateArgsSchema,
+  [IPC.PROJECT_LIST_MEDIA]: projectMediaListArgsSchema,
+  [IPC.PROJECT_ADD_MEDIA]: projectMediaAddArgsSchema,
+  [IPC.PROJECT_UPDATE_MEDIA]: projectMediaUpdateArgsSchema,
+  [IPC.PROJECT_ACTIVATE_MEDIA]: projectMediaActivateArgsSchema,
   [IPC.PROJECT_DELETE]: idArgsSchema,
   [IPC.PROJECT_SAVE]: projectSaveArgsSchema,
   [IPC.PROJECT_SAVE_AS]: projectSaveAsArgsSchema,
   [IPC.PROJECT_OPEN]: projectOpenArgsSchema,
 
-  [IPC.SHOT_LIST]: z.object({ projectId: z.string().min(1) }),
+  [IPC.SHOT_LIST]: z.object({
+    projectId: z.string().min(1),
+    mediaId: z.string().min(1).optional(),
+  }),
   [IPC.SHOT_GET]: idArgsSchema,
   [IPC.SHOT_CREATE]: shotCreateArgsSchema,
   [IPC.SHOT_UPDATE]: shotUpdateArgsSchema,
@@ -596,6 +611,14 @@ const projectApi = {
   list: () => invoke<Project[]>(IPC.PROJECT_LIST),
   get: (args: { id: string }) => invoke<Project>(IPC.PROJECT_GET, [args]),
   update: (args: ProjectUpdateArgs) => invoke<Project>(IPC.PROJECT_UPDATE, [args]),
+  listMedia: (args: { projectId: string }) =>
+    invoke<ProjectMediaItem[]>(IPC.PROJECT_LIST_MEDIA, [args]),
+  addMedia: (args: ProjectMediaAddArgs) =>
+    invoke<ProjectMediaItem>(IPC.PROJECT_ADD_MEDIA, [args]),
+  updateMedia: (args: ProjectMediaUpdateArgs) =>
+    invoke<ProjectMediaItem>(IPC.PROJECT_UPDATE_MEDIA, [args]),
+  activateMedia: (args: ProjectMediaActivateArgs) =>
+    invoke<Project>(IPC.PROJECT_ACTIVATE_MEDIA, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.PROJECT_DELETE, [args]),
   save: (args: ProjectSaveArgs) => invoke<ProjectSaveArgs extends never ? never : { path: string; sizeBytes: number; projectId: string }>(IPC.PROJECT_SAVE, [args]),
   saveAs: (args: { id: string; targetPath: string }) =>
@@ -604,7 +627,7 @@ const projectApi = {
 };
 
 const shotApi = {
-  list: (args: { projectId: string }) => invoke<Shot[]>(IPC.SHOT_LIST, [args]),
+  list: (args: { projectId: string; mediaId?: string }) => invoke<Shot[]>(IPC.SHOT_LIST, [args]),
   get: (args: { id: string }) => invoke<Shot>(IPC.SHOT_GET, [args]),
   create: (args: ShotCreateArgs) => invoke<Shot>(IPC.SHOT_CREATE, [args]),
   update: (args: ShotUpdateArgs) => invoke<Shot>(IPC.SHOT_UPDATE, [args]),
@@ -617,7 +640,8 @@ const shotApi = {
 };
 
 const stillApi = {
-  list: (args: { projectId?: string; shotId?: string }) => invoke<Still[]>(IPC.STILL_LIST, [args]),
+  list: (args: { projectId?: string; shotId?: string; mediaId?: string }) =>
+    invoke<Still[]>(IPC.STILL_LIST, [args]),
   get: (args: { id: string }) => invoke<Still>(IPC.STILL_GET, [args]),
   create: (args: StillCreateArgs) => invoke<Still>(IPC.STILL_CREATE, [args]),
   capture: (args: StillCaptureArgs) => invoke<Still>(IPC.STILL_CAPTURE, [args]),

@@ -10,7 +10,7 @@ import type {
 } from '../../shared/types';
 import { resolveCandidateDataRoots } from '../paths';
 
-const PROJECT_TABLES = ['shots', 'stills', 'scenes', 'notes'] as const;
+const PROJECT_TABLES = ['project_media', 'shots', 'stills', 'scenes', 'notes'] as const;
 
 export function scanCandidateRoots(layer: DataLayer, extraRoots: string[] = []): CandidateSource[] {
   const targetVersion = Number(layer.db.pragma('user_version', { simple: true }));

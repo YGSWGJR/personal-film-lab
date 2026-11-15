@@ -365,12 +365,27 @@ export interface WallApi {
 
 export interface WorkspaceState {
   projectId: string | null;
+  activeMediaId?: string | null;
   timeMs: number;
   selectedShotId: string | null;
   leftCollapsed: boolean;
   rightCollapsed: boolean;
   volume: number;
   shotScrollTop?: number;
+  mediaSessions?: Record<
+    string,
+    {
+      timeMs: number;
+      selectedShotId: string | null;
+      shotScrollTop?: number;
+      detectionState?: {
+        detectionResult?: unknown;
+        boundaryNotice?: unknown;
+        labelPreview?: unknown;
+        detectionJobId?: string | null;
+      };
+    }
+  >;
 }
 
 export interface SessionApi {
@@ -719,6 +734,16 @@ export interface ProjectMedia {
   proxyPath: string | null;
 }
 
+export interface ProjectMediaItem extends ProjectMedia {
+  id: string;
+  projectId: string;
+  index: number;
+  source: ProjectSource;
+  detectOptions: DetectOptions;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DetectWeights {
   s?: number;
   c?: number;
@@ -759,7 +784,10 @@ export interface Project {
   id: string;
   name: string;
   source: ProjectSource;
+  /** 兼容字段：始终投影为当前激活媒体的元信息。 */
   media: ProjectMedia;
+  activeMediaId: string | null;
+  mediaItems: ProjectMediaItem[];
   detectOptions: DetectOptions;
   createdAt: string;
   updatedAt: string;
@@ -770,6 +798,29 @@ export interface ProjectCreateArgs {
   source?: Partial<ProjectSource>;
   media?: Partial<ProjectMedia>;
   detectOptions?: Partial<DetectOptions>;
+}
+
+export interface ProjectMediaAddArgs {
+  projectId: string;
+  source?: Partial<ProjectSource>;
+  media?: Partial<ProjectMedia>;
+  detectOptions?: Partial<DetectOptions>;
+  activate?: boolean;
+}
+
+export interface ProjectMediaUpdateArgs {
+  projectId: string;
+  mediaId: string;
+  patch: {
+    source?: Partial<ProjectSource>;
+    media?: Partial<ProjectMedia>;
+    detectOptions?: Partial<DetectOptions>;
+  };
+}
+
+export interface ProjectMediaActivateArgs {
+  projectId: string;
+  mediaId: string;
 }
 
 export interface ProjectUpdateArgs {
@@ -810,6 +861,7 @@ export interface ProjectOpenResult {
 export interface Shot {
   id: string;
   projectId: string;
+  mediaId?: string;
   index: number;
   startMs: number;
   endMs: number;
@@ -831,6 +883,7 @@ export interface Shot {
 export interface Scene {
   id: string;
   projectId: string;
+  mediaId?: string;
   index: number;
   label: string | null;
   startMs: number;
@@ -1364,6 +1417,7 @@ export interface AiJobSnapshot {
 
 export interface ShotCreateArgs {
   projectId: string;
+  mediaId?: string | null;
   startMs: number;
   endMs: number;
   index?: number;
@@ -1434,6 +1488,7 @@ export interface Annotation {
 export interface Still {
   id: string;
   projectId: string;
+  mediaId?: string;
   shotId: string | null;
   timeMs: number;
   filePath: string;
@@ -1449,6 +1504,7 @@ export interface Still {
 
 export interface StillCreateArgs {
   projectId: string;
+  mediaId?: string | null;
   shotId?: string | null;
   timeMs: number;
   filePath: string;
@@ -1462,6 +1518,7 @@ export interface StillCreateArgs {
 
 export interface StillCaptureArgs {
   projectId: string;
+  mediaId?: string | null;
   timeMs: number;
   shotId?: string | null;
   caption?: string | null;
@@ -1480,6 +1537,7 @@ export interface StillSetAnnotationArgs {
 export interface StillUpdateArgs {
   id: string;
   patch: {
+    mediaId?: string;
     shotId?: string | null;
     timeMs?: number;
     filePath?: string;
@@ -1660,6 +1718,10 @@ export interface ProjectApi {
   list(): Promise<IpcResult<Project[]>>;
   get(args: { id: string }): Promise<IpcResult<Project>>;
   update(args: ProjectUpdateArgs): Promise<IpcResult<Project>>;
+  listMedia(args: { projectId: string }): Promise<IpcResult<ProjectMediaItem[]>>;
+  addMedia(args: ProjectMediaAddArgs): Promise<IpcResult<ProjectMediaItem>>;
+  updateMedia(args: ProjectMediaUpdateArgs): Promise<IpcResult<ProjectMediaItem>>;
+  activateMedia(args: ProjectMediaActivateArgs): Promise<IpcResult<Project>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
   save(args: ProjectSaveArgs): Promise<IpcResult<ProjectSaveResult>>;
   saveAs(args: { id: string; targetPath: string }): Promise<IpcResult<ProjectSaveResult>>;
@@ -1667,7 +1729,7 @@ export interface ProjectApi {
 }
 
 export interface ShotApi {
-  list(args: { projectId: string }): Promise<IpcResult<Shot[]>>;
+  list(args: { projectId: string; mediaId?: string }): Promise<IpcResult<Shot[]>>;
   get(args: { id: string }): Promise<IpcResult<Shot>>;
   create(args: ShotCreateArgs): Promise<IpcResult<Shot>>;
   update(args: ShotUpdateArgs): Promise<IpcResult<Shot>>;
@@ -1679,7 +1741,7 @@ export interface ShotApi {
 }
 
 export interface StillApi {
-  list(args: { projectId?: string; shotId?: string }): Promise<IpcResult<Still[]>>;
+  list(args: { projectId?: string; shotId?: string; mediaId?: string }): Promise<IpcResult<Still[]>>;
   get(args: { id: string }): Promise<IpcResult<Still>>;
   create(args: StillCreateArgs): Promise<IpcResult<Still>>;
   capture(args: StillCaptureArgs): Promise<IpcResult<Still>>;

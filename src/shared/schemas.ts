@@ -136,12 +136,31 @@ export const dataImportProjectArgsSchema = z.object({
 
 export const workspaceStateSchema = z.object({
   projectId: z.string().min(1).nullable(),
+  activeMediaId: z.string().min(1).nullable().optional(),
   timeMs: z.number().finite().min(0),
   selectedShotId: z.string().min(1).nullable(),
   leftCollapsed: z.boolean(),
   rightCollapsed: z.boolean(),
   volume: z.number().finite().min(0).max(1),
   shotScrollTop: z.number().finite().min(0).optional(),
+  mediaSessions: z
+    .record(
+      z.string().min(1),
+      z.object({
+        timeMs: z.number().finite().min(0),
+        selectedShotId: z.string().min(1).nullable(),
+        shotScrollTop: z.number().finite().min(0).optional(),
+        detectionState: z
+          .object({
+            detectionResult: z.unknown().optional(),
+            boundaryNotice: z.unknown().optional(),
+            labelPreview: z.unknown().optional(),
+            detectionJobId: z.string().min(1).nullable().optional(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
 });
 
 /** player:open：mediaPath 与 projectId 至少给一个（项目能力阶段 2 之后再接） */
@@ -515,78 +534,77 @@ export const shotDetectionResultSchema = z.object({
 
 const nullableText = (max = 20000) => z.string().max(max).nullable().optional();
 
+const projectSourcePatchSchema = z.object({
+  type: z.enum(['local', 'url']).optional(),
+  path: z.string().nullable().optional(),
+  url: z.string().nullable().optional(),
+  platform: z.string().nullable().optional(),
+});
+
+const projectMediaPatchSchema = z.object({
+  filename: z.string().nullable().optional(),
+  container: z.string().nullable().optional(),
+  durationMs: z.number().finite().min(0).optional(),
+  width: z.number().int().min(0).nullable().optional(),
+  height: z.number().int().min(0).nullable().optional(),
+  fps: z.number().finite().min(0).nullable().optional(),
+  videoCodec: z.string().nullable().optional(),
+  audioCodec: z.string().nullable().optional(),
+  sizeBytes: z.number().int().min(0).nullable().optional(),
+  proxyPath: z.string().nullable().optional(),
+});
+
+const projectDetectPatchSchema = z.object({
+  sensitivity: z.number().min(0).max(1).optional(),
+  minShotSeconds: z.number().min(0).optional(),
+  filterTransitions: z.boolean().optional(),
+  weights: z.object({ s: z.number(), c: z.number(), h: z.number() }).optional(),
+  frameInterval: z.number().int().min(1).optional(),
+});
+
 export const projectCreateArgsSchema = z.object({
   name: z.string().min(1).max(200),
-  source: z
-    .object({
-      type: z.enum(['local', 'url']).optional(),
-      path: z.string().nullable().optional(),
-      url: z.string().nullable().optional(),
-      platform: z.string().nullable().optional(),
-    })
-    .optional(),
-  media: z
-    .object({
-      filename: z.string().nullable().optional(),
-      container: z.string().nullable().optional(),
-      durationMs: z.number().finite().min(0).optional(),
-      width: z.number().int().min(0).nullable().optional(),
-      height: z.number().int().min(0).nullable().optional(),
-      fps: z.number().finite().min(0).nullable().optional(),
-      videoCodec: z.string().nullable().optional(),
-      audioCodec: z.string().nullable().optional(),
-      sizeBytes: z.number().int().min(0).nullable().optional(),
-      proxyPath: z.string().nullable().optional(),
-    })
-    .optional(),
-  detectOptions: z
-    .object({
-      sensitivity: z.number().min(0).max(1).optional(),
-      minShotSeconds: z.number().min(0).optional(),
-      filterTransitions: z.boolean().optional(),
-      weights: z.object({ s: z.number(), c: z.number(), h: z.number() }).optional(),
-      frameInterval: z.number().int().min(1).optional(),
-    })
-    .optional(),
+  source: projectSourcePatchSchema.optional(),
+  media: projectMediaPatchSchema.optional(),
+  detectOptions: projectDetectPatchSchema.optional(),
 });
 
 export const idArgsSchema = z.object({ id: z.string().min(1) });
+
+export const projectMediaAddArgsSchema = z.object({
+  projectId: z.string().min(1),
+  source: projectSourcePatchSchema.optional(),
+  media: projectMediaPatchSchema.optional(),
+  detectOptions: projectDetectPatchSchema.optional(),
+  activate: z.boolean().optional(),
+});
+
+export const projectMediaUpdateArgsSchema = z.object({
+  projectId: z.string().min(1),
+  mediaId: z.string().min(1),
+  patch: z.object({
+    source: projectSourcePatchSchema.optional(),
+    media: projectMediaPatchSchema.optional(),
+    detectOptions: projectDetectPatchSchema.optional(),
+  }),
+});
+
+export const projectMediaActivateArgsSchema = z.object({
+  projectId: z.string().min(1),
+  mediaId: z.string().min(1),
+});
+
+export const projectMediaListArgsSchema = z.object({
+  projectId: z.string().min(1),
+});
 
 export const projectUpdateArgsSchema = z.object({
   id: z.string().min(1),
   patch: z.object({
     name: z.string().min(1).max(200).optional(),
-    source: z
-      .object({
-        type: z.enum(['local', 'url']).optional(),
-        path: z.string().nullable().optional(),
-        url: z.string().nullable().optional(),
-        platform: z.string().nullable().optional(),
-      })
-      .optional(),
-    media: z
-      .object({
-        filename: z.string().nullable().optional(),
-        container: z.string().nullable().optional(),
-        durationMs: z.number().finite().min(0).optional(),
-        width: z.number().int().min(0).nullable().optional(),
-        height: z.number().int().min(0).nullable().optional(),
-        fps: z.number().finite().min(0).nullable().optional(),
-        videoCodec: z.string().nullable().optional(),
-        audioCodec: z.string().nullable().optional(),
-        sizeBytes: z.number().int().min(0).nullable().optional(),
-        proxyPath: z.string().nullable().optional(),
-      })
-      .optional(),
-    detectOptions: z
-      .object({
-        sensitivity: z.number().min(0).max(1).optional(),
-        minShotSeconds: z.number().min(0).optional(),
-        filterTransitions: z.boolean().optional(),
-        weights: z.object({ s: z.number(), c: z.number(), h: z.number() }).optional(),
-        frameInterval: z.number().int().min(1).optional(),
-      })
-      .optional(),
+    source: projectSourcePatchSchema.optional(),
+    media: projectMediaPatchSchema.optional(),
+    detectOptions: projectDetectPatchSchema.optional(),
   }),
 });
 
@@ -606,6 +624,7 @@ export const projectOpenArgsSchema = z.object({ path: z.string().min(1) });
 
 export const shotCreateArgsSchema = z.object({
   projectId: z.string().min(1),
+  mediaId: z.string().min(1).optional(),
   startMs: z.number().int().min(0),
   endMs: z.number().int().min(0),
   index: z.number().int().min(0).optional(),
@@ -649,6 +668,7 @@ export const shotTrimArgsSchema = z.object({
 
 export const stillCreateArgsSchema = z.object({
   projectId: z.string().min(1),
+  mediaId: z.string().min(1).nullable().optional(),
   shotId: z.string().min(1).nullable().optional(),
   timeMs: z.number().int().min(0),
   filePath: z.string().min(1),
@@ -667,6 +687,7 @@ export const shotSetThumbnailArgsSchema = z.object({
 
 export const stillCaptureArgsSchema = z.object({
   projectId: z.string().min(1),
+  mediaId: z.string().min(1).nullable().optional(),
   timeMs: z.number().int().min(0),
   shotId: z.string().min(1).nullable().optional(),
   caption: nullableText(2000),
@@ -685,6 +706,7 @@ export const stillSetAnnotationArgsSchema = z.object({
 export const stillUpdateArgsSchema = z.object({
   id: z.string().min(1),
   patch: z.object({
+    mediaId: z.string().min(1).optional(),
     shotId: z.string().min(1).nullable().optional(),
     timeMs: z.number().int().min(0).optional(),
     filePath: z.string().min(1).optional(),
@@ -701,6 +723,7 @@ export const stillListArgsSchema = z
   .object({
     projectId: z.string().min(1).optional(),
     shotId: z.string().min(1).optional(),
+    mediaId: z.string().min(1).optional(),
   })
   .refine((value) => Boolean(value.projectId || value.shotId), {
     message: 'projectId 和 shotId 至少提供一个',

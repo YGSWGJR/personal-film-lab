@@ -53,6 +53,7 @@ const emit = defineEmits<{
   toggleMute: [];
   updateTrackHeight: [value: number];
   updatePxPerSecond: [value: number];
+  deleteSelected: [];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
@@ -285,6 +286,7 @@ onBeforeUnmount(() => {
       @boundary-commit="emit('boundaryCommit', $event)"
       @update-track-height="emit('updateTrackHeight', $event)"
       @update-px-per-second="emit('updatePxPerSecond', $event)"
+      @delete-backspace="emit('deleteSelected')"
     />
 
     <div v-show="controlsVisible" class="transport">

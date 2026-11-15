@@ -1,10 +1,11 @@
-import { mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { DataError } from './errors';
 import { MIGRATIONS } from './migrations';
 import { NoteRepository } from './repositories/notes';
 import { ProjectRepository } from './repositories/projects';
+import { ProjectMediaRepository } from './repositories/project-media';
 import { SceneRepository } from './repositories/scenes';
 import { ShotRepository } from './repositories/shots';
 import { StillRepository } from './repositories/stills';
@@ -24,6 +25,7 @@ export class DataLayer {
   readonly db: Database.Database;
   readonly dataRoot: string;
   readonly projects: ProjectRepository;
+  readonly projectMedia: ProjectMediaRepository;
   readonly scenes: SceneRepository;
   readonly shots: ShotRepository;
   readonly stills: StillRepository;
@@ -45,6 +47,7 @@ export class DataLayer {
     this.runMigrations();
 
     this.projects = new ProjectRepository(this);
+    this.projectMedia = new ProjectMediaRepository(this);
     this.scenes = new SceneRepository(this);
     this.shots = new ShotRepository(this);
     this.stills = new StillRepository(this);
@@ -73,6 +76,28 @@ export class DataLayer {
 
   private runMigrations(): void {
     const current = Number(this.db.pragma('user_version', { simple: true }));
+    const latest = MIGRATIONS.at(-1)?.version ?? current;
+    if (current > 0 && current < latest) {
+      try {
+        this.db.pragma('wal_checkpoint(FULL)');
+        const backupDir = join(this.dataRoot, 'backups');
+        mkdirSync(backupDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
+        const databasePath = join(this.dataRoot, 'lapian.db');
+        if (existsSync(databasePath)) {
+          copyFileSync(
+            databasePath,
+            join(backupDir, `lapian-v${current}-${stamp}.db`),
+          );
+        }
+      } catch (error) {
+        throw new DataError(
+          'MIGRATION_BACKUP_FAILED',
+          `迁移前备份失败：${(error as Error).message}`,
+          { version: current },
+        );
+      }
+    }
     for (const migration of MIGRATIONS) {
       if (migration.version <= current) continue;
       try {

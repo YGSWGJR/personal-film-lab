@@ -23,6 +23,7 @@ import { nowIso } from './projects';
 interface ShotRow {
   id: string;
   project_id: string;
+  media_id: string;
   shot_index: number;
   start_ms: number;
   end_ms: number;
@@ -51,11 +52,17 @@ export class ShotRepository {
     return this.layer.db;
   }
 
-  list(projectId: string): Shot[] {
+  list(projectId: string, mediaId?: string): Shot[] {
     this.assertProject(projectId);
+    const targetMediaId = this.resolveMediaId(projectId, mediaId);
+    if (!targetMediaId) return [];
     const rows = this.db
-      .prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY start_ms ASC, shot_index ASC')
-      .all(projectId) as ShotRow[];
+      .prepare(
+        `SELECT * FROM shots
+         WHERE project_id = ? AND media_id = ?
+         ORDER BY start_ms ASC, shot_index ASC`,
+      )
+      .all(projectId, targetMediaId) as ShotRow[];
     const tagIds = this.loadTagIds(rows.map((row) => row.id));
     return rows.map((row) => mapShot(row, tagIds.get(row.id) ?? []));
   }
@@ -70,6 +77,8 @@ export class ShotRepository {
   create(args: ShotCreateArgs): Shot {
     this.assertProject(args.projectId);
     this.validateRange(args.startMs, args.endMs);
+    const mediaId = this.resolveMediaId(args.projectId, args.mediaId);
+    if (!mediaId) throw new DataError('PROJECT_MEDIA_REQUIRED', '请先为项目添加视频');
     const id = randomUUID();
     const now = nowIso();
     const durationMs = args.endMs - args.startMs;
@@ -79,21 +88,24 @@ export class ShotRepository {
         const index =
           args.index ??
           ((this.db
-            .prepare('SELECT COALESCE(MAX(shot_index), 0) + 1 AS next FROM shots WHERE project_id = ?')
-            .get(args.projectId) as { next: number }).next);
+            .prepare(
+              'SELECT COALESCE(MAX(shot_index), 0) + 1 AS next FROM shots WHERE project_id = ? AND media_id = ?',
+            )
+            .get(args.projectId, mediaId) as { next: number }).next);
         this.db
           .prepare(
             `INSERT INTO shots (
-              id, project_id, shot_index, start_ms, end_ms, duration_ms,
+              id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
               shot_size, camera_method, dialogue, remark, origin, locked, created_at, updated_at
             ) VALUES (
-              @id, @projectId, @index, @startMs, @endMs, @durationMs,
+              @id, @projectId, @mediaId, @index, @startMs, @endMs, @durationMs,
               @shotSize, @cameraMethod, @dialogue, @remark, 'manual', 0, @createdAt, @updatedAt
             )`,
           )
           .run({
             id,
             projectId: args.projectId,
+            mediaId,
             index,
             startMs: args.startMs,
             endMs: args.endMs,
@@ -177,13 +189,14 @@ export class ShotRepository {
       this.db
         .prepare(
           `INSERT INTO shots (
-            id, project_id, shot_index, start_ms, end_ms, duration_ms,
+            id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
             shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, manual_fields_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, NULL, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, NULL, ?, ?, ?)`,
         )
         .run(
           rightId,
           source.project_id,
+          source.media_id,
           source.shot_index + 1,
           cutMs,
           source.end_ms,
@@ -206,7 +219,7 @@ export class ShotRepository {
       this.db
         .prepare('UPDATE stills SET shot_id = ?, updated_at = ? WHERE shot_id = ? AND time_ms >= ?')
         .run(rightId, now, source.id, cutMs);
-      this.renumber(source.project_id);
+      this.renumber(source.project_id, source.media_id);
       this.layer.projects.touch(source.project_id);
     });
 
@@ -267,7 +280,7 @@ export class ShotRepository {
         .run(left.id, now, right.id);
       this.db.prepare('DELETE FROM shot_tags WHERE shot_id = ?').run(right.id);
       this.db.prepare('DELETE FROM shots WHERE id = ?').run(right.id);
-      this.renumber(left.project_id);
+      this.renumber(left.project_id, left.media_id);
       this.layer.projects.touch(left.project_id);
     });
     return { shot: this.get(left.id) };
@@ -358,24 +371,28 @@ export class ShotRepository {
    */
   applyDetected(projectId: string, previews: ShotPreview[]): { applied: number; skippedProtected: number } {
     this.assertProject(projectId);
+    const mediaId = this.resolveMediaId(projectId);
+    if (!mediaId) throw new DataError('PROJECT_MEDIA_REQUIRED', '项目没有可切分的视频');
     const now = nowIso();
     let applied = 0;
     let skippedProtected = 0;
     this.layer.transaction(() => {
       const protectedRows = this.db
         .prepare(
-          "SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND (locked = 1 OR origin = 'manual')",
+          "SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND media_id = ? AND (locked = 1 OR origin = 'manual')",
         )
-        .all(projectId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
+        .all(projectId, mediaId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
       this.db
-        .prepare("DELETE FROM shots WHERE project_id = ? AND locked = 0 AND origin = 'auto'")
-        .run(projectId);
+        .prepare(
+          "DELETE FROM shots WHERE project_id = ? AND media_id = ? AND locked = 0 AND origin = 'auto'",
+        )
+        .run(projectId, mediaId);
       let nextIndex = Math.max(0, ...protectedRows.map((row) => row.shot_index)) + 1;
       const insert = this.db.prepare(
         `INSERT INTO shots (
-          id, project_id, shot_index, start_ms, end_ms, duration_ms,
+          id, project_id, media_id, shot_index, start_ms, end_ms, duration_ms,
           shot_size, camera_method, dialogue, remark, origin, locked, thumbnail, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', 0, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', 0, ?, ?, ?)`,
       );
       for (const preview of previews) {
         const overlapsProtected = protectedRows.some(
@@ -389,6 +406,7 @@ export class ShotRepository {
         insert.run(
           shotId,
           projectId,
+          mediaId,
           nextIndex++,
           preview.startMs,
           preview.endMs,
@@ -625,10 +643,12 @@ export class ShotRepository {
     return left && left.trim() ? left : right;
   }
 
-  private renumber(projectId: string): void {
+  private renumber(projectId: string, mediaId: string): void {
     const rows = this.db
-      .prepare('SELECT id FROM shots WHERE project_id = ? ORDER BY start_ms ASC, id ASC')
-      .all(projectId) as Array<{ id: string }>;
+      .prepare(
+        'SELECT id FROM shots WHERE project_id = ? AND media_id = ? ORDER BY start_ms ASC, id ASC',
+      )
+      .all(projectId, mediaId) as Array<{ id: string }>;
     const update = this.db.prepare('UPDATE shots SET shot_index = ? WHERE id = ?');
     rows.forEach((row, index) => update.run(index + 1, row.id));
   }
@@ -643,6 +663,11 @@ export class ShotRepository {
     if (!this.layer.projects.exists(projectId)) {
       throw new DataError('PROJECT_NOT_FOUND', `项目不存在：${projectId}`, { projectId });
     }
+  }
+
+  private resolveMediaId(projectId: string, requested?: string | null): string | null {
+    if (requested) return this.layer.projectMedia.get(projectId, requested).id;
+    return this.layer.projectMedia.activeId(projectId);
   }
 
   /** S41：事务内标记人工字段（幂等合并，不覆盖已有标记）。 */
@@ -678,6 +703,7 @@ function mapShot(row: ShotRow, tagIds: string[]): Shot {
   return {
     id: row.id,
     projectId: row.project_id,
+    mediaId: row.media_id,
     index: row.shot_index,
     startMs: row.start_ms,
     endMs: row.end_ms,

@@ -10,6 +10,7 @@ import shotAnnotationsSql from './009_shot_annotations.sql?raw';
 import wallBoardsSql from './010_wall_boards.sql?raw';
 import wallNodeTextSql from './011_wall_node_text.sql?raw';
 import wallCompositeSql from './012_wall_composite.sql?raw';
+import projectMediaSql from './013_project_media.sql?raw';
 
 export interface Migration {
   version: number;
@@ -30,4 +31,5 @@ export const MIGRATIONS: Migration[] = [
   { version: 10, sql: wallBoardsSql },
   { version: 11, sql: wallNodeTextSql },
   { version: 12, sql: wallCompositeSql },
+  { version: 13, sql: projectMediaSql },
 ];
