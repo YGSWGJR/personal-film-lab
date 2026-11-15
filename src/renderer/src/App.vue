@@ -431,7 +431,12 @@ const gpuStatusText = computed(() => {
 function hidePlayerForOverlay(): void {
   if (overlayPlayerHidden) return;
   overlayPlayerHidden = true;
-  pendingPlayerLayer.value = player.layer;
+  // S42 整合修复：快速开合弹层时，上一次恢复 IPC 可能尚未把 player.layer
+  // 刷新回 normal——此刻 player.layer 读到的是 stale 的 'hidden'。若直接把它
+  // 记为恢复目标，关弹层后画面会永久停留隐藏。已有 pending 时保持不动，
+  // 否则才记录当前层级（并保证恢复目标绝不会是 hidden）。
+  pendingPlayerLayer.value =
+    player.layer === 'hidden' ? (pendingPlayerLayer.value ?? 'normal') : player.layer;
   void applyPlayerLayer('hidden');
 }
 
@@ -2592,7 +2597,7 @@ async function loadSettings(): Promise<void> {
 watch(feedbackOpen, async (open) => {
   await nextTick();
   if (open) {
-    document.querySelector<HTMLElement>('.feedback-issues')?.focus();
+    document.querySelector<HTMLElement>('.feedback-dialog a.primary')?.focus();
   } else {
     feedbackTrigger.value?.focus({ preventScroll: true });
   }
@@ -5283,45 +5288,6 @@ onBeforeUnmount(() => {
       @cancel="resolveConfirm(false)"
     />
 
-    <!-- S42/B05：问题反馈弹层（点击品牌区「反馈」打开；无真实邮箱不显示邮箱行） -->
-    <transition name="modal" :duration="{ enter: 220, leave: 220 }">
-      <div
-        v-if="feedbackOpen"
-        class="feedback-mask"
-        @pointerdown.self="feedbackOpen = false"
-      >
-        <section class="feedback-modal" role="dialog" aria-modal="true" aria-label="问题反馈">
-          <header class="feedback-head">
-            <div>
-              <p>FEEDBACK</p>
-              <h2>问题反馈</h2>
-              <span>遇到 BUG 或有功能建议，欢迎到 GitHub Issues 告诉我们。</span>
-            </div>
-            <button type="button" aria-label="关闭" @click="feedbackOpen = false">×</button>
-          </header>
-          <div class="feedback-body">
-            <p class="feedback-tip">
-              提交前请先搜索既有 Issue；附上<b>版本号、复现步骤与截图</b>能更快定位问题。
-            </p>
-            <div class="feedback-actions">
-              <a
-                class="feedback-issues"
-                href="https://github.com/YGSWGJR/personal-film-lab/issues"
-                target="_blank"
-                rel="noreferrer"
-                @click="feedbackOpen = false"
-              >
-                打开 GitHub Issues
-              </a>
-            </div>
-            <p class="feedback-version">
-              个人拉片工作台 v{{ info?.version ?? '?' }} · {{ info?.platform ?? '' }}
-            </p>
-          </div>
-        </section>
-      </div>
-    </transition>
-
     <SettingsModal
       :open="settingsOpen"
       :settings="settings"
@@ -5636,107 +5602,7 @@ onBeforeUnmount(() => {
   transform: translateY(8px) scale(0.985);
 }
 
-/* S42/B05：品牌区反馈入口（人类点击习惯：显式按钮、hover 反馈、键盘可达） */
-.brand-feedback {
-  height: 22px;
-  margin-left: 8px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 10px;
-  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
-}
 
-.brand-feedback:hover,
-.brand-feedback:focus-visible {
-  border-color: var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text);
-  outline: none;
-}
-
-/* S42/B05：反馈弹层 */
-.feedback-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 92;
-  display: grid;
-  padding: 16px;
-  background: rgba(2, 6, 23, 0.64);
-  place-items: center;
-}
-
-.feedback-modal {
-  display: flex;
-  width: 480px;
-  max-width: 100%;
-  max-height: calc(100vh - 32px);
-  flex-direction: column;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.5);
-}
-
-.feedback-head {
-  display: flex;
-  flex: 0 0 auto;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.feedback-head p,
-.feedback-head h2 {
-  margin: 0 0 4px;
-}
-
-.feedback-head p,
-.feedback-head span {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.feedback-head h2 {
-  font-size: 14px;
-}
-
-.feedback-head > button {
-  flex: 0 0 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 20px;
-}
-
-.feedback-head > button:hover {
-  background: var(--bg-hover);
-}
-
-.feedback-mask.modal-enter-active,
-.feedback-mask.modal-leave-active {
-  transition: opacity 220ms ease;
-}
-
-.feedback-mask.modal-enter-from,
-.feedback-mask.modal-leave-to {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.feedback-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 18px 16px 16px;
-}
 
 .feedback-tip {
   margin: 0;

@@ -31,10 +31,8 @@ function handleKeydown(event: KeyboardEvent): void {
     return;
   }
   if (event.key === 'Enter') {
-    // S42 复测·人类点击习惯：焦点在弹窗内按钮上时，Enter 归浏览器默认激活
-    //（例如焦点在「取消」上，Enter 就是取消，而不是窗口级的确认）。
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && active.closest('.confirm-dialog')) return;
+    // 窗口级契约保持 Enter=确认（既有文档与用例依赖）；焦点默认落在「取消」上，
+    // 用户按 Space 仍是激活聚焦按钮（取消），两个习惯并存。
     event.preventDefault();
     event.stopPropagation();
     emit('confirm');

@@ -402,7 +402,7 @@ export class ShotRepository {
       const stillsToReassign = this.db.prepare(
         `SELECT stills.id, stills.time_ms FROM stills
          JOIN shots ON shots.id = stills.shot_id
-         WHERE stills.project_id = ? AND stills.media_id = ?
+         WHERE stills.project_id = ? AND (stills.media_id = ? OR stills.media_id IS NULL)
            AND shots.project_id = ? AND shots.media_id = ?
            AND shots.locked = 0 AND shots.origin = 'auto'`,
       ).all(projectId, mediaId, projectId, mediaId) as Array<{ id: string; time_ms: number }>;

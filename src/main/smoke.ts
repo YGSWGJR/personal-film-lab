@@ -64,6 +64,23 @@ const HOLD_MS = Number(process.env['SMOKE_HOLD_MS'] ?? '0');
  */
 export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise<void> {
   const checks: Record<string, boolean> = {};
+  // S42：启动扫描可能弹出「发现项目」向导——overlayOpen 常真会吞掉层控 watch
+  // 与 Backspace 等用例，所有门控开始前先全局清场。
+  try {
+    await win.webContents.executeJavaScript(`
+      (async () => {
+        for (let esc = 0; esc < 4; esc += 1) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        return Boolean(document.querySelector('.import-modal-mask'));
+      })()
+    `).then((residue) => {
+      checks.startupOverlaysCleared = residue === false;
+    });
+  } catch {
+    // 渲染层未就绪时让后续首屏检查兜底
+  }
   let state: RendererState | null = null;
   let playerChecks: Record<string, unknown> = {};
   let mediaChecks: Record<string, unknown> = {};
@@ -7037,6 +7054,13 @@ async function runOverlayStressChecks(win: BrowserWindow, deps: SmokeDeps): Prom
     const init = (await win.webContents.executeJavaScript(`
       (async () => {
         const out = {};
+        // 清场：启动扫描可能弹出「发现项目」向导（overlayOpen 常真会吞掉后续
+        // 层控 watch），先把可见弹层全部 Esc 关掉再开始
+        for (let esc = 0; esc < 4; esc += 1) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        out.startupWizardResidue = Boolean(document.querySelector('.import-modal-mask'));
         const hook = window.__S43_WALL_TEST__;
         if (!hook) { out.exception = 'S43 hook missing'; return out; }
         out.projectOpened = (await hook.openProject(${projectId})).ok === true;
@@ -7104,11 +7128,17 @@ async function runOverlayStressChecks(win: BrowserWindow, deps: SmokeDeps): Prom
       (async () => {
         const out = {};
         const hook = window.__S43_WALL_TEST__;
-        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        // Esc 清层：第一层可能关 picker（wallPickerOpen 也在 overlayOpen 内），循环关到无弹层
+        for (let esc = 0; esc < 3; esc += 1) {
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 300));
+          if (!hook.state().wallOpen && !document.querySelector('.wall-picker-mask')) break;
+        }
         const deadline = Date.now() + 5000;
         while (hook.state().wallOpen && Date.now() < deadline) await new Promise((r) => setTimeout(r, 60));
         out.wallClosed = hook.state().wallOpen === false;
-        out.overlayOpen = hook.state().overlayOpen === true;
+        out.pickerResidue = Boolean(document.querySelector('.wall-picker-mask'));
+        out.maskResidue = Boolean(document.querySelector('.modal-mask, .node-edit-mask'));
         // 关墙后 layer 恢复是异步 IPC：等待其落地再读状态
         await new Promise((r) => setTimeout(r, 600));
         const state = await window.api.player.getState();
@@ -7121,6 +7151,9 @@ async function runOverlayStressChecks(win: BrowserWindow, deps: SmokeDeps): Prom
     out.wallClosed = final.wallClosed === true;
     out.finalLayerNormal = final.layer === 'normal';
     out.finalSlotPresent = final.slotPresent === true;
+    out.finalLayerValue = final.layer;
+    out.pickerResidue = final.pickerResidue === true;
+    out.maskResidue = final.maskResidue === true;
     // 恢复窗口尺寸
     win.setBounds({ width: 1600, height: 900, x: win.getBounds().x, y: win.getBounds().y });
   } catch (error) {
@@ -7181,12 +7214,17 @@ async function runRedetectPreserveChecks(deps: SmokeDeps): Promise<Record<string
     ]);
     data.wall.saveLayout(project.id, [{ shotId: s2.id, x: 120, y: 80 }]);
     data.wall.createGroup(project.id, '保全组', [s1.id, s2.id]);
+    // 静帧夹具：迁移 13 后真实静帧都带 media_id，这里显式取项目活动媒体
+    const activeMedia = data.db
+      .prepare('SELECT active_media_id AS id FROM projects WHERE id = ?')
+      .get(project.id) as { id: string } | undefined;
+    out.activeMediaId = activeMedia?.id ?? null;
     data.db
       .prepare(
-        `INSERT INTO stills (id, project_id, shot_id, time_ms, file_path, role, annotations_json, created_at, updated_at)
-         VALUES ('still-preserve', ?, ?, 2500, 'preserve/p.png', 'main', '[]', ?, ?)`,
+        `INSERT INTO stills (id, project_id, media_id, shot_id, time_ms, file_path, role, annotations_json, created_at, updated_at)
+         VALUES ('still-preserve', ?, ?, ?, 2500, 'preserve/p.png', 'main', '[]', ?, ?)`,
       )
-      .run(project.id, s2.id, Date.now(), Date.now());
+      .run(project.id, activeMedia?.id ?? null, s2.id, Date.now(), Date.now());
 
     // 重切前快照（调试：收集 SQL 应命中这些行）
     out.beforeNotes = data.db
