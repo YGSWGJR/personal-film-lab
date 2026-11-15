@@ -42,7 +42,7 @@ import type { LocalVisionResult, LocalVisionService } from '../ai/local-vision-s
 import { OpenAiCompatProvider, createProviderFromSettings } from '../ai/provider';
 import type { ShotDetectionProvider } from '../ai/provider';
 import type { CloudVisionLabelInput } from '../ai/cloud-vision-labels';
-import { net } from 'electron';
+import { hasInternetConnection } from '../hardware/internet-connection';
 import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
 import type { MediaService } from '../media/media-service';
 import { resolveDetectFramesDir, resolveThumbCacheDir } from '../paths';
@@ -763,7 +763,7 @@ export class DetectService {
    * 绝不静默上云：
    * 1. 本地 AI 未被显式关闭；
    * 2. 用户已在设置中确认"代表帧会上传"的隐私提示；
-   * 3. 设备在线（net.isOnline()），断网直接失败且不发出任何请求；
+   * 3. 设备在线，断网直接失败且不发出任何请求；
    * 4. 已配置真实的 OpenAI 兼容供应商（mock 不能冒充云端服务）。
    */
   private async analyzeLabelsViaCloud(
@@ -780,12 +780,13 @@ export class DetectService {
         '云端标签识别会把镜头代表帧上传到配置的供应商；请先在设置中阅读并确认隐私提示',
       );
     }
-    if (!net.isOnline()) {
+    if (!await hasInternetConnection(job.controller.signal)) {
       throw new DetectError(
         'CLOUD_OFFLINE',
         '当前设备处于离线状态，云端标签识别不可用；本次不会上传任何数据',
       );
     }
+    this.assertActive(job);
     const provider = createProviderFromSettings(settings?.ai);
     if (!(provider instanceof OpenAiCompatProvider)) {
       throw new DetectError(

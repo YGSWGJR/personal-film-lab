@@ -1,7 +1,6 @@
 import { statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import os from 'node:os';
-import { net } from 'electron';
 import type {
   HardwareCapabilityReport,
   HardwareCapabilityState,
@@ -19,6 +18,7 @@ import {
   resolveTransnetModelPath,
 } from '../detect/detect-service';
 import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
+import { hasInternetConnection } from './internet-connection';
 
 /**
  * S42/Z04：硬件能力扫描服务。
@@ -26,7 +26,7 @@ import { resolveFfmpegBinaries } from '../media/ffmpeg-binaries';
  * 变化后的刷新，无需重启应用。五类状态（满足 / 显存不足 / 模型缺失 / 运行时缺失 / 断网）
  * 都给出结构化原因与修复指引；本地与云端两条标签能力线分开报告，二者都不可用时 UI 明确阻塞，
  * 不静默上云。GPU 复用 MediaService 的 nvidia-smi 链路，Python 复用 DetectService 的
- * 环境探测，onnxruntime 对内置运行时用文件系统校验——本服务自身不新增子进程调用。
+ * 环境探测，网络状态读取 Windows Network List Manager。
  */
 
 /** 本地 Qwen3-VL（W4A8 8B）可运行的最低空闲显存（MiB） */
@@ -71,7 +71,7 @@ export class HardwareCapabilityService {
     const python = probePythonInfo();
     const transnetModel = inspectModelFile(resolveTransnetModelPath());
     const qwen = this.inspectQwen();
-    const network = { online: net.isOnline(), checkedAt: new Date().toISOString() };
+    const network = { online: await hasInternetConnection(), checkedAt: new Date().toISOString() };
     let ffmpegOk = false;
     let ffmpegError: string | null = null;
     try {
