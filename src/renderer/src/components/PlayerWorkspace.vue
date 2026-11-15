@@ -331,8 +331,8 @@ onBeforeUnmount(() => {
         <button class="transport-button" type="button" title="上一帧 (←)" @click="emit('step', -1)">
           <AppIcon name="step-back" :size="15" />
         </button>
-        <button class="transport-play" type="button" :title="player.paused ? '播放 (空格)' : '暂停 (空格)'" @click="emit('toggle')">
-          <AppIcon :name="player.paused ? 'play' : 'pause'" :size="16" />
+        <button class="transport-play" type="button" :title="player.ended ? '重新播放 (空格)' : player.paused ? '播放 (空格)' : '暂停 (空格)'" @click="emit('toggle')">
+          <AppIcon :name="player.paused || player.ended ? 'play' : 'pause'" :size="16" />
         </button>
         <button class="transport-button" type="button" title="下一帧 (→)" @click="emit('step', 1)">
           <AppIcon name="step-forward" :size="15" />
