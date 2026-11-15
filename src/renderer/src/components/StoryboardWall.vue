@@ -224,6 +224,7 @@ const eraserDraft = ref<{
 const annHistory = ref<
   Map<string, { undo: Ann[][]; redo: Ann[][] }>
 >(new Map());
+const annPersistQueues = new Map<string, Promise<void>>();
 const playerTrackEl = ref<HTMLElement | null>(null);
 const playProgress = ref(0);
 const playerDepths = ref<Map<string, number>>(new Map());
@@ -354,6 +355,9 @@ onMounted(() => {
   // capture 阶段拦截：放映打开时按键先于 App 全局快捷键（否则 Esc 会连带关掉整面墙）
   window.addEventListener('keydown', onGlobalKey, true);
   window.addEventListener('keyup', onGlobalKeyUp, true);
+  window.addEventListener('pointermove', onWindowAnnPointerMove);
+  window.addEventListener('pointerup', onWindowAnnPointerUp);
+  window.addEventListener('pointercancel', onWindowAnnPointerCancel);
 });
 
 async function reloadGraph(): Promise<void> {
@@ -1019,18 +1023,24 @@ function persistAnn(shotId: string): void {
   const save = props.boardMode
     ? window.api.wall.saveNodeAnnotations({ boardId: activeBoardId.value, nodeId: shotId, items })
     : window.api.wall.saveAnnotations({ projectId: props.projectId, shotId, items });
-  void save
-    .then(function (result) {
+  const previous = annPersistQueues.get(shotId) ?? Promise.resolve();
+  const queued = previous
+    .catch(() => undefined)
+    .then(async function () {
+      const result = await save;
       if (!result.ok) {
-        edgeHint.value = result.error.message;
-        window.setTimeout(() => (edgeHint.value = ''), 2400);
-        return;
+        throw new Error(result.error.message);
       }
       refreshThumbAnn(shotId);
-    })
+    });
+  annPersistQueues.set(shotId, queued);
+  void queued
     .catch((error) => {
       edgeHint.value = error instanceof Error ? error.message : String(error);
       window.setTimeout(() => (edgeHint.value = ''), 2400);
+    })
+    .finally(() => {
+      if (annPersistQueues.get(shotId) === queued) annPersistQueues.delete(shotId);
     });
 }
 
@@ -1134,6 +1144,7 @@ function onAnnPointerDown(event: PointerEvent): void {
       if (annTool.value === 'eraser') {
         const before = cloneAnnList(annListOf(shot.id));
         annotations.value.set(shot.id, annListOf(shot.id).filter(function (x) { return x !== o; }));
+        refreshPlayerAnn(shot);
         eraserDraft.value = {
           card: shot,
           before,
@@ -1300,6 +1311,28 @@ function onAnnPointerUp(event?: PointerEvent): void {
 function onAnnPointerCancel(): void {
   cancelAnnGesture();
 }
+
+/**
+ * Pointer capture is the normal path, but electron hosts can deliver the final
+ * mouse button release to the window rather than the captured SVG. Keeping a
+ * window-level fallback ensures a simulated/manual drag still commits exactly
+ * once and that Undo receives the corresponding history entry.
+ */
+function onWindowAnnPointerMove(event: PointerEvent): void {
+  if (!annDrafting.value && !eraserDraft.value) return;
+  onAnnPointerMove(event);
+}
+
+function onWindowAnnPointerUp(event: PointerEvent): void {
+  if (!annDrafting.value && !eraserDraft.value) return;
+  onAnnPointerUp(event);
+}
+
+function onWindowAnnPointerCancel(): void {
+  if (!annDrafting.value && !eraserDraft.value) return;
+  onAnnPointerCancel();
+}
+
 function refreshPlayerAnn(card: WorkspaceShot): void {
   const svg = curAnnSvg();
   if (svg && svg.dataset.card === card.id) svg.innerHTML = annMarkup(card.id, true);
@@ -1585,6 +1618,11 @@ function openMenuAt(x: number, y: number, shotId: string | null): void {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize);
+  window.removeEventListener('keydown', onGlobalKey, true);
+  window.removeEventListener('keyup', onGlobalKeyUp, true);
+  window.removeEventListener('pointermove', onWindowAnnPointerMove);
+  window.removeEventListener('pointerup', onWindowAnnPointerUp);
+  window.removeEventListener('pointercancel', onWindowAnnPointerCancel);
   if (raf.value) cancelAnimationFrame(raf.value);
 });
 

@@ -39,7 +39,7 @@ export const settingsSchema = z.object({
   confirmUserContent: z.boolean().optional(),
   timeline: z
     .object({
-      trackHeight: z.number().finite().min(1),
+      trackHeight: z.number().finite().min(48).max(240),
       pxPerSecond: z.number().finite().min(1),
     })
     .optional(),
@@ -369,6 +369,7 @@ const wallAnnotationDataSchema = z.looseObject({
   w: z.number().finite().optional(),
   h: z.number().finite().optional(),
   text: z.string().max(500).optional(),
+  size: z.number().finite().min(1).max(48).optional(),
 });
 
 export const wallAnnotationListArgsSchema = z.object({

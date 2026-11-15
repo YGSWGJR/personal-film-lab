@@ -77,7 +77,12 @@ import type {
   TimelineSettings,
   WorkspaceState,
 } from '../../shared/types';
-import { PLAYBACK_SPEEDS, PX_PER_SEC_LEVELS } from '../../shared/types';
+import {
+  PLAYBACK_SPEEDS,
+  PX_PER_SEC_LEVELS,
+  TRACK_HEIGHT_LEVELS,
+  snapToLevel,
+} from '../../shared/types';
 import { formatTimeMs, frameToMs } from '../../shared/time';
 
 const info = ref<AppInfo | null>(null);
@@ -1200,8 +1205,9 @@ async function persistTimelineSettings(): Promise<void> {
 }
 
 function onTrackHeightChange(value: number): void {
-  if (value !== timelineSettings.value.trackHeight) {
-    applyTimelineSettings({ ...timelineSettings.value, trackHeight: value });
+  const next = snapToLevel(value, TRACK_HEIGHT_LEVELS);
+  if (next !== timelineSettings.value.trackHeight) {
+    applyTimelineSettings({ ...timelineSettings.value, trackHeight: next });
   }
 }
 
@@ -4582,6 +4588,8 @@ onBeforeUnmount(() => {
         title="反馈与问题报告"
         aria-label="打开反馈与问题报告"
         @click="feedbackOpen = true"
+        @keydown.enter.prevent="feedbackOpen = true"
+        @keydown.space.prevent="feedbackOpen = true"
       >
         <div class="brand-mark" aria-hidden="true">
           <span></span><span></span><span></span>
@@ -4900,35 +4908,41 @@ onBeforeUnmount(() => {
       @dissolve="onPanelDissolve"
     />
 
-    <div v-if="wallPickerOpen" class="node-edit-mask" @pointerdown.self="wallPickerOpen = false">
-      <div class="node-edit-card">
-        <header>
-          <h3>分镜墙</h3>
-          <button type="button" aria-label="关闭" @click="wallPickerOpen = false">×</button>
-        </header>
-        <button type="button" class="picker-option" @click="openProjectWall">
-          <b>本项目分镜本</b>
-          <small>把当前项目已切分的镜头铺到画布上编排</small>
-        </button>
-        <button type="button" class="picker-option" @click="pickIndependentBoard(null)">
-          <b>新建分镜本</b>
-          <small>不依赖拉片素材：导入照片或黑底+文本框开始创作</small>
-        </button>
-        <template v-if="wallPickerBoards.length > 0">
-          <p class="picker-title">最近分镜本</p>
-          <button
-            v-for="board in wallPickerBoards"
-            :key="board.id"
-            type="button"
-            class="picker-option"
-            @click="pickIndependentBoard(board.id)"
-          >
-            <b>{{ board.name }}</b>
-            <small>{{ board.nodeCount }} 节点 · {{ new Date(board.updatedAt).toLocaleString('zh-CN') }}</small>
+    <Teleport to="body">
+      <div
+        v-if="wallPickerOpen"
+        class="node-edit-mask wall-picker-mask"
+        @pointerdown.self="wallPickerOpen = false"
+      >
+        <div class="node-edit-card wall-picker-card">
+          <header>
+            <h3>分镜墙</h3>
+            <button type="button" aria-label="关闭" @click="wallPickerOpen = false">×</button>
+          </header>
+          <button type="button" class="picker-option" @click="openProjectWall">
+            <b>本项目分镜本</b>
+            <small>把当前项目已切分的镜头铺到画布上编排</small>
           </button>
-        </template>
+          <button type="button" class="picker-option" @click="pickIndependentBoard(null)">
+            <b>新建分镜本</b>
+            <small>不依赖拉片素材：导入照片或黑底+文本框开始创作</small>
+          </button>
+          <template v-if="wallPickerBoards.length > 0">
+            <p class="picker-title">最近分镜本</p>
+            <button
+              v-for="board in wallPickerBoards"
+              :key="board.id"
+              type="button"
+              class="picker-option"
+              @click="pickIndependentBoard(board.id)"
+            >
+              <b>{{ board.name }}</b>
+              <small>{{ board.nodeCount }} 节点 · {{ new Date(board.updatedAt).toLocaleString('zh-CN') }}</small>
+            </button>
+          </template>
+        </div>
       </div>
-    </div>
+    </Teleport>
 
     <div
       v-if="wallNodeEdit"

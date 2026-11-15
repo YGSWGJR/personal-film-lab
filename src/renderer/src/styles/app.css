@@ -613,7 +613,6 @@ select:focus-visible {
 }
 
 @media (max-height: 720px) {
-@media (max-height: 720px) {
   .app-shell {
     grid-template-rows: 40px minmax(0, 1fr) 24px;
   }
@@ -647,8 +646,11 @@ select:focus-visible {
   position: fixed;
   inset: 0;
   z-index: 140;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 24px;
   background: rgba(2, 6, 23, 0.68);
 }
 
@@ -656,7 +658,8 @@ select:focus-visible {
   display: flex;
   width: 420px;
   max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 48px);
+  max-height: 100%;
+  box-sizing: border-box;
   overflow: hidden auto;
   flex-direction: column;
   gap: 12px;
@@ -733,6 +736,20 @@ select:focus-visible {
 
 .picker-option:hover {
   border-color: var(--blue-hi);
+}
+
+.wall-picker-mask {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 24px;
+}
+
+.wall-picker-card {
+  width: 460px;
+  max-height: calc(100dvh - 48px);
+  margin: auto;
 }
 
 .picker-option b {

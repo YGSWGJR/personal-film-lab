@@ -854,7 +854,7 @@ onBeforeUnmount(() => {
           <span>轨道高度</span>
           <input
             type="range"
-            min="1"
+            min="48"
             max="240"
             step="1"
             :value="trackHeight"
@@ -865,7 +865,7 @@ onBeforeUnmount(() => {
             class="zoom-num"
             v-model="zoomHeightDraft"
             type="number"
-            min="1"
+            min="48"
             max="240"
             @focus="beginHeightInput"
             @keydown.enter.prevent="commitHeightInput"

@@ -85,8 +85,8 @@ export interface LocalAiStatus {
   error: string | null;
 }
 
-/** S36-3a：轨道高度档位（px）；S37 起支持折叠到 1px。 */
-export const TRACK_HEIGHT_LEVELS: readonly number[] = [1, 48, 96, 144, 192, 240];
+/** S36-3a：轨道高度档位（px），最低保持 48px，保证轨道内容可操作。 */
+export const TRACK_HEIGHT_LEVELS: readonly number[] = [48, 96, 144, 192, 240];
 
 /** S36-3b：横向时间密度 6 档（px/s）。 */
 export const PX_PER_SEC_LEVELS: readonly number[] = [24, 48, 96, 192, 384, 768];

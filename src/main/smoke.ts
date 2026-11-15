@@ -4683,7 +4683,7 @@ function timelineZoomChecksAssertions(result: Record<string, any>): Record<strin
     zoomPanelFlow: result.panelFlow === true,
     zoomHeightSlider: result.heightSlider === true,
     zoomMinHeight: result.minHeight === true,
-    zoomMinCollapsed: Number(result.minHeightRowPx ?? 99) <= 2,
+    zoomMinInteractive: Number(result.minHeightRowPx ?? 0) >= 40,
     zoomDensitySlider: result.densitySlider === true,
     zoomDirectInput: result.directInput === true,
     zoomWheel: result.wheel === true,
@@ -4960,8 +4960,8 @@ async function runTimelineZoomChecks(win: BrowserWindow): Promise<Record<string,
         heightNumber.focus();
         setValue(heightNumber, 1);
         heightNumber.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        await waitFor(async () => (await readTimeline())?.trackHeight === 1, 4000);
-        out.minHeight = (await readTimeline())?.trackHeight === 1;
+        await waitFor(async () => (await readTimeline())?.trackHeight === 48, 4000);
+        out.minHeight = (await readTimeline())?.trackHeight === 48;
         out.minHeightRowPx = Math.round(
           document.querySelector('.track-row-v1')?.getBoundingClientRect().height ?? 99,
         );
@@ -5652,6 +5652,9 @@ function wallUiChecksAssertions(result: Record<string, any>): Record<string, boo
     wallUiEdgeDelClick: result.edgeDelClick === true,
     wallUiPlayer: result.player === true,
     wallUiTools: result.tools === true,
+    wallUiAnnotationSave: result.annotationSaved === true,
+    wallUiAnnotationUndo: result.annotationUndo === true,
+    wallUiAnnotationRedo: result.annotationRedo === true,
     wallUiEsc: result.escClosed === true,
     boardUiOpen: result.boardOpen === true,
     boardUiCard: result.boardCard === true,
@@ -5833,6 +5836,15 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       const pick = () => document.querySelector('.picker-option');
       while (!pick() && Date.now() < pickDeadline) await new Promise((r) => setTimeout(r, 100));
       out.pickerShown = Boolean(pick());
+      const pickerCard = document.querySelector('.wall-picker-card');
+      const pickerMask = document.querySelector('.wall-picker-mask');
+      out.pickerGeometry = {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        bodyHeight: document.body.getBoundingClientRect().height,
+        mask: pickerMask?.getBoundingClientRect().toJSON() ?? null,
+        card: pickerCard?.getBoundingClientRect().toJSON() ?? null,
+      };
       // 第一个选项 = 本项目分镜本
       pick()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       const d1 = Date.now() + 15000;
@@ -5901,6 +5913,72 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
       const p2 = hook.state();
       out.playerChain = p2.playerOpen === true && p2.slides === 2;
       out.tools = p2.tools === 10;
+
+      // Pointer release may target the window even when pointer capture is active.
+      // This exercises the production fallback and verifies annotation persistence/history.
+      const layer = document.querySelector('.wall-ppt-slide.cur .sbg-annlayer');
+      if (layer) {
+        const rect = layer.getBoundingClientRect();
+        const eventAt = (type, x, y) => new PointerEvent(type, {
+          bubbles: true,
+          pointerId: 71,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: type === 'pointermove' ? -1 : 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: x,
+          clientY: y,
+        });
+        const x1 = rect.left + rect.width * 0.35;
+        const y1 = rect.top + rect.height * 0.35;
+        const x2 = rect.left + rect.width * 0.65;
+        const y2 = rect.top + rect.height * 0.65;
+        const currentShotId = shots4[1].id;
+        const readCurrent = async () => {
+          const result = await window.api.wall.listAnnotations({
+            projectId: ${JSON.stringify(project.id)},
+            shotIds: [currentShotId],
+          });
+          return result.ok ? (result.data[currentShotId] ?? []) : null;
+        };
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }));
+        layer.dispatchEvent(eventAt('pointerdown', x1, y1));
+        layer.dispatchEvent(eventAt('pointermove', x2, y2));
+        window.dispatchEvent(eventAt('pointerup', x2, y2));
+        let current = null;
+        const saveDeadline = Date.now() + 5000;
+        while (Date.now() < saveDeadline) {
+          current = await readCurrent();
+          if (current?.some((item) => item.type === 'brush' && item.data?.size === 8)) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        out.annotationSaved = current?.some(
+          (item) => item.type === 'brush' && item.data?.size === 8,
+        ) === true;
+
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }),
+        );
+        const undoDeadline = Date.now() + 5000;
+        while (Date.now() < undoDeadline) {
+          current = await readCurrent();
+          if (current && current.length === 0) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        out.annotationUndo = current?.length === 0;
+
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true, bubbles: true }),
+        );
+        const redoDeadline = Date.now() + 5000;
+        while (Date.now() < redoDeadline) {
+          current = await readCurrent();
+          if (current?.length === 1) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        out.annotationRedo = current?.length === 1;
+
+      }
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
     `],
