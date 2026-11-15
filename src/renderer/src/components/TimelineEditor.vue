@@ -213,6 +213,13 @@ const zoomDensityDraft = ref(String(props.pxPerSecond));
 const zoomHeightEditing = ref(false);
 const zoomDensityEditing = ref(false);
 const zoomCtlEl = ref<HTMLElement | null>(null);
+const zoomPanelEl = ref<HTMLElement | null>(null);
+const heightSliderPosition = computed(() =>
+  TRACK_HEIGHT_LEVELS.indexOf(snapToLevel(props.trackHeight, TRACK_HEIGHT_LEVELS)),
+);
+const densitySliderPosition = computed(() =>
+  PX_PER_SEC_LEVELS.indexOf(snapToLevel(props.pxPerSecond, PX_PER_SEC_LEVELS)),
+);
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
@@ -248,38 +255,26 @@ function formatDuration(ms: number): string {
 
 function onDocumentPointerDown(event: PointerEvent): void {
   if (!zoomOpen.value) return;
-  const element = zoomCtlEl.value;
-  if (element && !element.contains(event.target as Node)) zoomOpen.value = false;
+  const target = event.target as Node | null;
+  if (!zoomCtlEl.value?.contains(target) && !zoomPanelEl.value?.contains(target)) {
+    zoomOpen.value = false;
+  }
 }
 
 function onHeightSliderInput(event: Event): void {
   zoomDragging.value = true;
-  const value = Number((event.target as HTMLInputElement).value);
-  const snapped = snapToLevel(value, TRACK_HEIGHT_LEVELS);
-  emit('updateTrackHeight', snapped);
-  zoomHeightDraft.value = String(snapped);
+  const level = TRACK_HEIGHT_LEVELS[Number((event.target as HTMLInputElement).value)];
+  if (level !== undefined) emit('updateTrackHeight', level);
 }
 
-function onHeightSliderChange(event: Event): void {
-  const value = Number((event.target as HTMLInputElement).value);
-  const snapped = snapToLevel(value, TRACK_HEIGHT_LEVELS);
-  emit('updateTrackHeight', snapped);
-  zoomHeightDraft.value = String(snapped);
+function finishZoomSlider(): void {
   zoomDragging.value = false;
 }
 
 function onDensitySliderInput(event: Event): void {
   zoomDragging.value = true;
-  const value = Number((event.target as HTMLInputElement).value);
-  setPxPerSecond(value);
-  zoomDensityDraft.value = String(snapToLevel(value, PX_PER_SEC_LEVELS));
-}
-
-function onDensitySliderChange(event: Event): void {
-  const value = Number((event.target as HTMLInputElement).value);
-  setPxPerSecond(value);
-  zoomDensityDraft.value = String(snapToLevel(value, PX_PER_SEC_LEVELS));
-  zoomDragging.value = false;
+  const level = PX_PER_SEC_LEVELS[Number((event.target as HTMLInputElement).value)];
+  if (level !== undefined) setPxPerSecond(level);
 }
 
 function beginHeightInput(): void {
@@ -514,6 +509,8 @@ function onTracksWheel(event: WheelEvent): void {
     return;
   }
   if (event.deltaY === 0) return;
+  const tracks = event.currentTarget as HTMLElement;
+  if (tracks.scrollHeight > tracks.clientHeight) return;
   event.preventDefault();
   scheduleWheelZoom(event);
 }
@@ -752,7 +749,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="timeline" :style="{ '--track-height': `${trackHeight}px`, '--audio-height': `${audioHeight}px` }">
+  <section class="timeline" :class="{ 'zoom-open': zoomOpen }" :style="{ '--track-height': `${trackHeight}px`, '--audio-height': `${audioHeight}px` }">
     <div class="timeline-context">
       <div class="timeline-tab">
         <AppIcon name="film" :size="12" />
@@ -801,62 +798,13 @@ onBeforeUnmount(() => {
             type="button"
             class="zoom-btn"
             :class="{ active: zoomOpen, dragging: zoomDragging }"
+            :aria-expanded="zoomOpen"
             :title="`轨道高度 ${heightLabel} · 时间密度 ${densityLabel}（点击展开滑块）`"
             @click="zoomOpen = !zoomOpen"
           >
             <AppIcon name="search" :size="11" />
             <span>{{ heightLabel }} · {{ densityLabel }}</span>
           </button>
-          <div v-show="zoomOpen" class="zoom-pop" @pointerdown.stop @wheel.stop>
-            <div class="zoom-row" @wheel.prevent.stop="onHeightWheel">
-              <span>轨道高度</span>
-              <input
-                type="range"
-                min="1"
-                max="240"
-                step="1"
-                :value="trackHeight"
-                @input="onHeightSliderInput"
-                @change="onHeightSliderChange"
-              />
-              <input
-                class="zoom-num"
-                v-model="zoomHeightDraft"
-                type="number"
-                min="1"
-                max="240"
-                @focus="beginHeightInput"
-                @keydown.enter.prevent="commitHeightInput"
-                @blur="commitHeightInput"
-              />
-            </div>
-            <div class="zoom-row" @wheel.prevent.stop="onDensityWheel">
-              <span>时间密度</span>
-              <input
-                type="range"
-                min="24"
-                max="768"
-                step="1"
-                :value="pxPerSecond"
-                @input="onDensitySliderInput"
-                @change="onDensitySliderChange"
-              />
-              <input
-                class="zoom-num"
-                v-model="zoomDensityDraft"
-                type="number"
-                min="24"
-                max="768"
-                @focus="beginDensityInput"
-                @keydown.enter.prevent="commitDensityInput"
-                @blur="commitDensityInput"
-              />
-            </div>
-            <div class="zoom-pop-foot">
-              <button type="button" class="zoom-reset" @click="resetZoomControl">重置 96 / 96</button>
-              <span class="zoom-hint">拖动逐档预览 · 松手定档 · 滚轮微调</span>
-            </div>
-          </div>
         </div>
         <span class="playhead playhead-ruler" :style="{ left: `${playheadPercent}%` }"></span>
       </div>
@@ -879,6 +827,63 @@ onBeforeUnmount(() => {
         <span class="navigator-range-label">
           {{ navigatorDisabled ? '全片' : `${formatShortClock(viewStartMs)} – ${formatShortClock(viewEndMs)}` }}
         </span>
+      </div>
+    </div>
+
+    <div v-show="zoomOpen" ref="zoomPanelEl" class="zoom-pop" @pointerdown.stop @wheel.stop>
+      <div class="zoom-row" @wheel.prevent.stop="onHeightWheel">
+        <span>轨道高度</span>
+        <input
+          type="range"
+          min="0"
+          :max="TRACK_HEIGHT_LEVELS.length - 1"
+          step="1"
+          :value="heightSliderPosition"
+          aria-label="轨道高度"
+          :aria-valuetext="heightLabel"
+          @input="onHeightSliderInput"
+          @change="finishZoomSlider"
+        />
+        <input
+          class="zoom-num"
+          v-model="zoomHeightDraft"
+          aria-label="输入轨道高度"
+          type="number"
+          min="1"
+          max="240"
+          @focus="beginHeightInput"
+          @keydown.enter.prevent="commitHeightInput"
+          @blur="commitHeightInput"
+        />
+      </div>
+      <div class="zoom-row" @wheel.prevent.stop="onDensityWheel">
+        <span>时间密度</span>
+        <input
+          type="range"
+          min="0"
+          :max="PX_PER_SEC_LEVELS.length - 1"
+          step="1"
+          :value="densitySliderPosition"
+          aria-label="时间密度"
+          :aria-valuetext="densityLabel"
+          @input="onDensitySliderInput"
+          @change="finishZoomSlider"
+        />
+        <input
+          class="zoom-num"
+          v-model="zoomDensityDraft"
+          aria-label="输入时间密度"
+          type="number"
+          min="24"
+          max="768"
+          @focus="beginDensityInput"
+          @keydown.enter.prevent="commitDensityInput"
+          @blur="commitDensityInput"
+        />
+      </div>
+      <div class="zoom-pop-foot">
+        <button type="button" class="zoom-reset" @click="resetZoomControl">重置 96 / 96</button>
+        <span class="zoom-hint">拖动逐档预览 · 松手定档 · 滚轮微调</span>
       </div>
     </div>
 
@@ -1100,9 +1105,14 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
+.timeline.zoom-open {
+  min-height: 240px;
+}
+
 .timeline-context {
   display: flex;
   height: 26px;
+  flex: 0 0 auto;
   align-items: stretch;
   gap: 10px;
   padding: 0 8px;
@@ -1188,6 +1198,7 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 12;
   height: 28px;
+  flex: 0 0 auto;
   border-bottom: 1px solid rgba(148, 163, 184, 0.16);
   background: #101821;
 }
@@ -1238,14 +1249,17 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   display: flex;
+  min-height: 0;
   max-height: min(58vh, 620px);
   flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   scrollbar-gutter: stable;
 }
 
 .track-row {
+  flex: 0 0 auto;
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
 }
 
@@ -1808,11 +1822,10 @@ onBeforeUnmount(() => {
 }
 
 .zoom-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 90;
   display: flex;
+  flex: 0 0 auto;
+  align-self: flex-end;
+  margin: 4px 7px;
   width: clamp(220px, 26vw, 280px);
   flex-direction: column;
   gap: 8px;
@@ -1884,6 +1897,7 @@ onBeforeUnmount(() => {
 .navigator-row {
   display: grid;
   height: 24px;
+  flex: 0 0 auto;
   grid-template-columns: clamp(146px, 20vw, 232px) minmax(0, 1fr);
   border-bottom: 1px solid rgba(148, 163, 184, 0.14);
   background: #0e1620;
