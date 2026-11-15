@@ -111,12 +111,13 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let hardwareChecks: Record<string, unknown> = {};
   let playbackStressChecks: Record<string, unknown> = {};
   let overlayStressChecks: Record<string, unknown> = {};
+  let redetectPreserveChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
 
   function finish(code: number): void {
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, hardwareChecks, playbackStressChecks, overlayStressChecks, state }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, state }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -506,6 +507,12 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, overlayStressChecksAssertions(overlayStressChecks));
     }
 
+    // S42：重切数据保全（笔记/连线/标注/布局/分组/静帧六类实体不丢失）
+    if (process.env['SMOKE_REDETECT_PRESERVE'] === '1') {
+      redetectPreserveChecks = await runRedetectPreserveChecks(deps);
+      Object.assign(checks, redetectPreserveChecksAssertions(redetectPreserveChecks));
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -519,7 +526,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, hardwareChecks, playbackStressChecks, overlayStressChecks, state }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, state }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
@@ -6264,5 +6271,168 @@ function overlayStressChecksAssertions(result: Record<string, any>): Record<stri
     overlayStressFinalClosed: result.wallClosed === true,
     overlayStressFinalLayer: result.finalLayerNormal === true,
     overlayStressSlotPresent: result.finalSlotPresent === true,
+  };
+}
+
+/**
+ * S42：重切数据保全门控（QA-01 推广）。
+ * 重切删除 auto 镜头时，笔记/连线/标注/布局/分组成员/静帧全部 CASCADE——
+ * 修复后在同事务内按时码重关联。本用例在数据层验证六类实体均不丢失。
+ */
+async function runRedetectPreserveChecks(deps: SmokeDeps): Promise<Record<string, any>> {
+  const data = deps.getData?.() ?? null;
+  if (!data) return { skipped: true, reason: 'data unavailable' };
+  const project = data.projects.create({
+    name: `S42 Preserve ${Date.now()}`,
+    media: { filename: 'preserve.mp4', durationMs: 8000, fps: 25, width: 640, height: 360 },
+  });
+  const out: Record<string, any> = {};
+  try {
+    // 第一轮切分：生成 4 个 auto 镜头（模拟真实流程：切分 → 用户加工 → 重切）
+    const init = data.shots.applyDetected(project.id, [
+      { id: 'init-1', index: 1, startMs: 0, endMs: 2000, durationMs: 2000 },
+      { id: 'init-2', index: 2, startMs: 2000, endMs: 4000, durationMs: 2000 },
+      { id: 'init-3', index: 3, startMs: 4000, endMs: 6000, durationMs: 2000 },
+      { id: 'init-4', index: 4, startMs: 6000, endMs: 8000, durationMs: 2000 },
+    ]);
+    out.initApplied = init.applied === 4;
+    const initial = data.shots.list(project.id);
+    const s1 = initial.find((s) => s.startMs === 0);
+    const s2 = initial.find((s) => s.startMs === 2000);
+    const s3 = initial.find((s) => s.startMs === 4000);
+    const s4 = initial.find((s) => s.startMs === 6000);
+    if (!s1 || !s2 || !s3 || !s4) {
+      out.exception = 'initial auto shots missing';
+      return out;
+    }
+    out.initIds = initial.map((s) => `${s.startMs}:${s.id.slice(0, 6)}:${s.origin}`);
+    // 用户内容：笔记（挂 s2）、连线 s2→s3、标注（宿主 s2）、布局（s2）、分组（s1+s2）、静帧（挂 s2）
+    data.notes.upsert({ projectId: project.id, shotId: s2.id, text: 'S42 保全用例笔记' });
+    data.wall.addEdge(project.id, s3.id, s4.id, 'solid');
+    data.wall.saveAnnotations(project.id, s2.id, [
+      { type: 'brush', color: '#ff0000', data: { points: [[10, 20], [30, 40]] } },
+    ]);
+    data.wall.saveLayout(project.id, [{ shotId: s2.id, x: 120, y: 80 }]);
+    data.wall.createGroup(project.id, '保全组', [s1.id, s2.id]);
+    data.db
+      .prepare(
+        `INSERT INTO stills (id, project_id, shot_id, time_ms, file_path, role, annotations_json, created_at, updated_at)
+         VALUES ('still-preserve', ?, ?, 2500, 'preserve/p.png', 'main', '[]', ?, ?)`,
+      )
+      .run(project.id, s2.id, Date.now(), Date.now());
+
+    // 重切前快照（调试：收集 SQL 应命中这些行）
+    out.beforeNotes = data.db
+      .prepare(
+        `SELECT n.id, n.shot_id, s.origin FROM notes n JOIN shots s ON s.id = n.shot_id WHERE n.project_id = ?`,
+      )
+      .all(project.id);
+    out.preCollect = {
+      notes: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM notes n JOIN shots s ON s.id = n.shot_id
+           WHERE n.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+      edges: data.db
+        .prepare('SELECT COUNT(*) AS c FROM shot_edges WHERE project_id = ?')
+        .get(project.id),
+      annotations: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM shot_annotations a JOIN shots s ON s.id = a.shot_id
+           WHERE a.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+      layouts: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM shot_layout l JOIN shots s ON s.id = l.shot_id
+           WHERE l.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+      groupMembers: data.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM shot_group_members m JOIN shots s ON s.id = m.shot_id
+           WHERE m.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        )
+        .get(project.id, project.id),
+    };
+    // 重切：三个新镜头 0-3000 / 3000-6000 / 6000-8000（全部旧 auto 镜头被替换）
+    const result = data.shots.applyDetected(project.id, [
+      { id: 'p1', index: 1, startMs: 0, endMs: 3000, durationMs: 3000 },
+      { id: 'p2', index: 2, startMs: 3000, endMs: 6000, durationMs: 3000 },
+      { id: 'p3', index: 3, startMs: 6000, endMs: 8000, durationMs: 2000 },
+    ]);
+    out.preserved = result.preserved;
+    const shots = data.shots.list(project.id);
+    out.newShotCount = shots.length === 3;
+    const newA = shots.find((s) => s.startMs === 0);
+    const newB = shots.find((s) => s.startMs === 3000);
+    const newC = shots.find((s) => s.startMs === 6000);
+    out.newShotsOk = Boolean(newA && newB && newC);
+    // 笔记：原 id 保留、重挂到覆盖 2500ms 的新镜头
+    const notes = data.notes.list({ projectId: project.id });
+    out.noteKept =
+      notes.length === 1 && notes[0].text.includes('保全用例');
+    // 笔记锚点 = 宿主 s2.startMs=2000 → 精确落点为新镜头 A（0-3000）
+    out.noteRehosted = notes.length === 1 && notes[0].shotId === newA?.id;
+    // 连线：两端按锚点重连（s3@4000→B、s4@6000→C；s3→s4 不与组 [s1,s2] 跨组）
+    const edges = data.wall.listEdges(project.id);
+    out.edgeRelinked =
+      edges.length === 1 &&
+      edges[0].fromShotId !== s3.id &&
+      edges[0].toShotId !== s4.id &&
+      edges[0].fromShotId === newB?.id &&
+      edges[0].toShotId === newC?.id;
+    // 标注：宿主 s2 锚点 2000 → 新镜头 A（0-3000）
+    const anns = data.wall.listAnnotations(project.id, shots.map((s) => s.id));
+    const annTotal = Object.values(anns).reduce((sum, list) => sum + (list as unknown[]).length, 0);
+    out.annotationKept = annTotal === 1;
+    // 布局：x=120 保留、挂新镜头
+    const layout = data.wall.getLayout(project.id);
+    out.layoutKept = layout.length === 1 && layout[0].x === 120 && layout[0].shotId !== s2.id;
+    // 分组：组保留；成员锚点（0）落新镜头 A，重挂后成员仍 1 条
+    const groups = data.wall.listGroups(project.id);
+    out.groupKept =
+      groups.length === 1 &&
+      groups[0].shotIds.length === 1 &&
+      groups[0].shotIds[0] === newA?.id;
+    // 静帧：QA-01 回归——重挂到新镜头且文件引用不变
+    const stillRow = data.db
+      .prepare('SELECT shot_id, time_ms, file_path FROM stills WHERE id = ?')
+      .get('still-preserve') as { shot_id: string; time_ms: number; file_path: string } | undefined;
+    out.stillKept =
+      Boolean(stillRow) && stillRow?.shot_id !== s2.id && stillRow?.time_ms === 2500 && stillRow.file_path === 'preserve/p.png';
+    // 完整性
+    const integrity = data.db.pragma('integrity_check', { simple: true });
+    out.integrityOk = integrity === 'ok';
+    const fkErrors = data.db.pragma('foreign_key_check', { simple: true });
+    out.fkOk = !fkErrors;
+  } catch (error) {
+    out.exception = String(error instanceof Error ? error.stack ?? error.message : error).slice(0, 500);
+  } finally {
+    try {
+      data.projects.delete(project.id);
+    } catch {
+      // 清理失败不影响断言
+    }
+  }
+  return out;
+}
+
+function redetectPreserveChecksAssertions(result: Record<string, any>): Record<string, boolean> {
+  if (result.skipped) return { redetectPreserveSkipped: true };
+  if (result.exception) return { redetectPreserveException: false };
+  return {
+    redetectApplied: result.newShotCount === true,
+    redetectNewShots: result.newShotsOk === true,
+    redetectNoteKept: result.noteKept === true,
+    redetectNoteRehosted: result.noteRehosted === true,
+    redetectEdgeRelinked: result.edgeRelinked === true,
+    redetectAnnotationKept: result.annotationKept === true,
+    redetectLayoutKept: result.layoutKept === true,
+    redetectGroupKept: result.groupKept === true,
+    redetectStillKept: result.stillKept === true,
+    redetectIntegrity: result.integrityOk === true,
+    redetectFk: result.fkOk === true,
   };
 }

@@ -355,12 +355,26 @@ export class ShotRepository {
   /**
    * 应用检测预览：保留 locked 与 origin='manual' 的人工镜头，
    * 替换其余自动镜头，并跳过与受保护区间重叠的候选（S36-2 人工修正优先）。
+   * S42 数据保全：notes / 镜头连线 / 镜头标注 / 分镜墙布局 / 分组成员都
+   * CASCADE 挂在 shots 上，重切前先按宿主镜头时码收集，落库后重关联；
+   * 找不到时码落点的用户内容挂到最近镜头，绝不静默删除。
    */
-  applyDetected(projectId: string, previews: ShotPreview[]): { applied: number; skippedProtected: number } {
+  applyDetected(
+    projectId: string,
+    previews: ShotPreview[],
+  ): { applied: number; skippedProtected: number; preserved?: { notes: number; edges: number; annotations: number; layouts: number; groupMembers: number; droppedEdges: number } } {
     this.assertProject(projectId);
     const now = nowIso();
     let applied = 0;
     let skippedProtected = 0;
+    const preserved = {
+      notes: 0,
+      edges: 0,
+      annotations: 0,
+      layouts: 0,
+      groupMembers: 0,
+      droppedEdges: 0,
+    };
     this.layer.transaction(() => {
       const protectedRows = this.db
         .prepare(
@@ -375,6 +389,65 @@ export class ShotRepository {
       ).all(projectId, projectId) as Array<{ id: string; time_ms: number }>;
       const setStillShot = this.db.prepare('UPDATE stills SET shot_id = ? WHERE id = ?');
       for (const still of stillsToReassign) setStillShot.run(null, still.id);
+      // ---- S42 数据保全：收集挂在 auto 镜头上的全部用户内容（宿主时码为锚） ----
+      const collect = <T>(sql: string, ...params: unknown[]): T[] =>
+        this.db.prepare(sql).all(...params) as T[];
+      const notesToKeep = collect<{
+        id: string; anchor: number; text: string; created_at: string; updated_at: string;
+      }>(
+        `SELECT n.id, s.start_ms AS anchor, n.text, n.created_at, n.updated_at FROM notes n
+         JOIN shots s ON s.id = n.shot_id
+         WHERE n.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+      );
+      const edgesToKeep = collect<{
+        fromAnchor: number; toAnchor: number; kind: string; created_at: number;
+      }>(
+        `SELECT fs.start_ms AS fromAnchor, ts.start_ms AS toAnchor, e.kind, e.created_at
+         FROM shot_edges e
+         JOIN shots fs ON fs.id = e.from_shot
+         JOIN shots ts ON ts.id = e.to_shot
+         WHERE e.project_id = ?
+           AND ((fs.project_id = ? AND fs.locked = 0 AND fs.origin = 'auto')
+             OR (ts.project_id = ? AND ts.locked = 0 AND ts.origin = 'auto'))`,
+        projectId,
+        projectId,
+        projectId,
+      ).filter((edge) => Number.isFinite(edge.fromAnchor) && Number.isFinite(edge.toAnchor));
+      const annotationsToKeep = collect<{
+        anchor: number; type: string; color: string; data_json: string; created_at: number;
+      }>(
+        `SELECT a.type, a.color, a.data_json, a.created_at, s.start_ms AS anchor
+         FROM shot_annotations a
+         JOIN shots s ON s.id = a.shot_id
+         WHERE a.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+      );
+      const layoutsToKeep = collect<{
+        anchor: number; x: number; y: number; updated_at: number;
+      }>(
+        `SELECT l.x, l.y, l.updated_at, s.start_ms AS anchor
+         FROM shot_layout l
+         JOIN shots s ON s.id = l.shot_id
+         WHERE l.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+      );
+      const groupMembersToKeep = collect<{
+        group_id: string; anchor: number;
+      }>(
+        `SELECT m.group_id, s.start_ms AS anchor
+         FROM shot_group_members m
+         JOIN shots s ON s.id = m.shot_id
+         WHERE m.project_id = ? AND s.project_id = ? AND s.locked = 0 AND s.origin = 'auto'`,
+        projectId,
+        projectId,
+      );
+      console.info(
+        `[shots][dbg] collected notes=${notesToKeep.length} edges=${edgesToKeep.length} annotations=${annotationsToKeep.length} layouts=${layoutsToKeep.length} members=${groupMembersToKeep.length}`,
+      );
       this.db
         .prepare("DELETE FROM shots WHERE project_id = ? AND locked = 0 AND origin = 'auto'")
         .run(projectId);
@@ -421,9 +494,83 @@ export class ShotRepository {
         const shot = findShotAt.get(projectId, still.time_ms, still.time_ms) as { id: string } | undefined;
         if (shot) setStillShot.run(shot.id, still.id);
       }
+      // ---- S42 数据保全：按锚点时码重关联（先精确落点，再最近镜头兜底） ----
+      const anchorToShot = (anchor: number): string | null => {
+        const exact = findShotAt.get(projectId, anchor, anchor) as { id: string } | undefined;
+        if (exact) return exact.id;
+        const nearest = this.db
+          .prepare(
+            'SELECT id FROM shots WHERE project_id = ? ORDER BY ABS(start_ms - ?) LIMIT 1',
+          )
+          .get(projectId, anchor) as { id: string } | undefined;
+        return nearest?.id ?? null;
+      };
+      const insertNote = this.db.prepare(
+        'INSERT INTO notes (id, project_id, shot_id, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      );
+      for (const note of notesToKeep) {
+        const host = anchorToShot(note.anchor);
+        if (!host) continue;
+        insertNote.run(note.id, projectId, host, note.text, note.created_at, note.updated_at);
+        preserved.notes += 1;
+      }
+      const insertEdge = this.db.prepare(
+        'INSERT OR IGNORE INTO shot_edges (project_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      for (const edge of edgesToKeep) {
+        const from = anchorToShot(edge.fromAnchor);
+        const to = anchorToShot(edge.toAnchor);
+        if (!from || !to || from === to) {
+          preserved.droppedEdges += 1;
+          continue;
+        }
+        insertEdge.run(projectId, from, to, edge.kind, edge.created_at);
+        preserved.edges += 1;
+      }
+      const insertAnnotation = this.db.prepare(
+        'INSERT INTO shot_annotations (id, project_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      );
+      for (const item of annotationsToKeep) {
+        const host = anchorToShot(item.anchor);
+        if (!host) continue;
+        insertAnnotation.run(
+          randomUUID(),
+          projectId,
+          host,
+          item.type,
+          item.color,
+          item.data_json,
+          item.created_at,
+        );
+        preserved.annotations += 1;
+      }
+      const putLayout = this.db.prepare(
+        'INSERT OR REPLACE INTO shot_layout (project_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      for (const item of layoutsToKeep) {
+        const host = anchorToShot(item.anchor);
+        if (!host) continue;
+        putLayout.run(projectId, host, item.x, item.y, item.updated_at);
+        preserved.layouts += 1;
+      }
+      const putGroupMember = this.db.prepare(
+        'INSERT OR IGNORE INTO shot_group_members (project_id, group_id, shot_id) VALUES (?, ?, ?)',
+      );
+      for (const item of groupMembersToKeep) {
+        const host = anchorToShot(item.anchor);
+        if (!host) continue;
+        putGroupMember.run(projectId, item.group_id, host);
+        preserved.groupMembers += 1;
+      }
+      if (
+        preserved.notes + preserved.edges + preserved.annotations + preserved.layouts + preserved.groupMembers > 0 ||
+        preserved.droppedEdges > 0
+      ) {
+        console.info(`[shots] re-detect preserved user data: ${JSON.stringify(preserved)}`);
+      }
       this.layer.projects.touch(projectId);
     });
-    return { applied, skippedProtected };
+    return { applied, skippedProtected, preserved };
   }
 
   /** S41：字段级人工保护标记（事务内复用）。 */
