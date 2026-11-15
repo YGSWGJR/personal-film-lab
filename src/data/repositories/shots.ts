@@ -367,6 +367,14 @@ export class ShotRepository {
           "SELECT start_ms, end_ms, shot_index FROM shots WHERE project_id = ? AND (locked = 1 OR origin = 'manual')",
         )
         .all(projectId) as Array<{ start_ms: number; end_ms: number; shot_index: number }>;
+      const stillsToReassign = this.db.prepare(
+        `SELECT stills.id, stills.time_ms FROM stills
+         JOIN shots ON shots.id = stills.shot_id
+         WHERE stills.project_id = ? AND shots.project_id = ?
+           AND shots.locked = 0 AND shots.origin = 'auto'`,
+      ).all(projectId, projectId) as Array<{ id: string; time_ms: number }>;
+      const setStillShot = this.db.prepare('UPDATE stills SET shot_id = ? WHERE id = ?');
+      for (const still of stillsToReassign) setStillShot.run(null, still.id);
       this.db
         .prepare("DELETE FROM shots WHERE project_id = ? AND locked = 0 AND origin = 'auto'")
         .run(projectId);
@@ -403,6 +411,15 @@ export class ShotRepository {
         );
         this.assignDetectedTags(shotId, preview.tags);
         applied += 1;
+      }
+      const findShotAt = this.db.prepare(
+        `SELECT id FROM shots
+         WHERE project_id = ? AND start_ms <= ? AND end_ms > ?
+         ORDER BY start_ms DESC, shot_index LIMIT 1`,
+      );
+      for (const still of stillsToReassign) {
+        const shot = findShotAt.get(projectId, still.time_ms, still.time_ms) as { id: string } | undefined;
+        if (shot) setStillShot.run(shot.id, still.id);
       }
       this.layer.projects.touch(projectId);
     });
