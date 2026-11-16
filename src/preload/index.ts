@@ -285,6 +285,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.SESSION_SAVE]: workspaceStateSchema,
   [IPC.SESSION_CLEAR]: emptyArgsSchema,
   [IPC.PLAYER_OPEN]: playerOpenArgsSchema,
+  [IPC.PLAYER_PICK_MEDIA]: emptyArgsSchema,
   [IPC.PLAYER_OPEN_DIALOG]: emptyArgsSchema,
   [IPC.PLAYER_CLOSE]: emptyArgsSchema,
   [IPC.PLAYER_PLAY]: emptyArgsSchema,

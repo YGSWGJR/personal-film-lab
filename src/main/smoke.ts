@@ -35,6 +35,7 @@ import { SessionService } from './session/session-service';
 import { migrateLegacyAiSettings } from './settings/settings-service';
 import { runMediaScopeGate, type MediaScopeGate } from './s45-media-smoke';
 import { runProjectSessionGate, type ProjectSessionGate } from './s45-project-smoke';
+import { runMediaPickerSmoke } from './s45-import-smoke';
 
 interface SmokeDeps {
   getPlayer(): PlayerService | null;
@@ -142,6 +143,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let stillWallChecks: Record<string, unknown> = {};
   const mediaScopeChecks: Partial<Record<MediaScopeGate, Record<string, unknown>>> = {};
   const projectSessionChecks: Partial<Record<ProjectSessionGate, Record<string, unknown>>> = {};
+  let mediaPickerChecks: Record<string, unknown> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
   let finished = false;
 
@@ -150,7 +152,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
     finished = true;
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks, mediaScopeChecks, projectSessionChecks }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks, mediaScopeChecks, projectSessionChecks, mediaPickerChecks }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
@@ -590,6 +592,11 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       checks[flag] = result.passed === true;
     }
 
+    if (process.env['SMOKE_MEDIA_PICKER'] === '1') {
+      mediaPickerChecks = await runMediaPickerSmoke(win);
+      checks['SMOKE_MEDIA_PICKER'] = mediaPickerChecks['passed'] === true;
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -603,7 +610,7 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks, mediaScopeChecks, projectSessionChecks }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks, mediaScopeChecks, projectSessionChecks, mediaPickerChecks }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
