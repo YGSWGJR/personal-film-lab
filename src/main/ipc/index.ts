@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { dirname, join } from 'node:path';
 import { app, dialog, ipcMain, shell, type BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc-channels';
+import { TaskScheduler } from '../project/task-scheduler';
 import { withEnvelope } from '../../shared/ipc-result';
 import type {
   AiCopyPromptArgs,
@@ -171,6 +172,7 @@ export interface IpcDeps {
  * 所有 handler 经 withEnvelope 统一返回 IpcResult 信封；错误码由领域 Error 透传。
  */
 export function registerIpcHandlers(deps: IpcDeps): void {
+  const taskScheduler = new TaskScheduler(deps.getDetect, deps.getMedia);
   const requirePlayer = (): PlayerService => {
     const player = deps.getPlayer();
     if (!player) throw new PlayerError('PLAYER_UNAVAILABLE', '播放器尚未初始化');
@@ -374,6 +376,7 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       requirePlayer().open(args),
     ),
   );
+  ipcMain.handle(IPC.PLAYER_PICK_MEDIA, withEnvelope(() => requirePlayer().pickMedia()));
   ipcMain.handle(
     IPC.PLAYER_OPEN_DIALOG,
     withEnvelope((): Promise<MediaInfo | null> => requirePlayer().openDialog()),
@@ -429,6 +432,12 @@ export function registerIpcHandlers(deps: IpcDeps): void {
     withEnvelope((bounds: RenderBounds): void => requirePlayer().setBounds(bounds)),
   );
   ipcMain.handle(
+    IPC.PLAYER_SET_PROJECT_TRANSITION,
+    withEnvelope((args: { active: boolean }): Promise<PlayerState> =>
+      requirePlayer().setProjectTransition(args.active),
+    ),
+  );
+  ipcMain.handle(
     IPC.PLAYER_SET_LAYER,
     withEnvelope((args: { level: OverlayLayer }): PlayerState =>
       requirePlayer().setLayer(args.level),
@@ -471,6 +480,13 @@ export function registerIpcHandlers(deps: IpcDeps): void {
       return { concurrency: args.concurrency };
     }),
   );
+
+  ipcMain.handle(IPC.PROJECT_TASK_LIST, withEnvelope((args: { projectId: string }) =>
+    taskScheduler.list(args.projectId)));
+  ipcMain.handle(IPC.PROJECT_TASK_RELEASE, withEnvelope((args: { projectId: string }) =>
+    taskScheduler.release(args.projectId)));
+  ipcMain.handle(IPC.PROJECT_TASK_PAUSE, withEnvelope((args: { projectId: string; paused: boolean }) =>
+    taskScheduler.setPaused(args.projectId, args.paused)));
 
   // ---------- hardware（S42/Z04：硬件能力扫描） ----------
   ipcMain.handle(

@@ -169,7 +169,7 @@ const timelineContextSchema = z.object({
   redo: z.array(timelineBoundaryEditSchema).max(50),
 });
 
-export const workspaceStateSchema = z.object({
+const projectWorkspaceStateSchema = z.object({
   projectId: z.string().min(1).nullable(),
   activeMediaId: z.string().min(1).nullable().optional(),
   timeMs: z.number().finite().min(0),
@@ -178,6 +178,12 @@ export const workspaceStateSchema = z.object({
   rightCollapsed: z.boolean(),
   volume: z.number().finite().min(0).max(1),
   shotScrollTop: z.number().finite().min(0).optional(),
+  wallSession: z.object({
+    views: z.record(z.string(), z.object({ scale: z.number().finite(), panX: z.number().finite(), panY: z.number().finite() })),
+    selections: z.record(z.string(), z.array(z.string().min(1))),
+    presentations: z.record(z.string(), z.string().min(1)),
+    open: z.enum(['storyboard', 'stills']).nullable(),
+  }).optional(),
   mediaSessions: z
     .record(
       z.string().min(1),
@@ -198,6 +204,12 @@ export const workspaceStateSchema = z.object({
     )
     .optional(),
 });
+
+export const workspaceStateSchema = projectWorkspaceStateSchema.extend({
+  openProjects: z.array(projectWorkspaceStateSchema).max(200).optional(),
+});
+
+export const playerProjectTransitionArgsSchema = z.object({ active: z.boolean() });
 
 /** player:open：mediaPath 与 projectId 至少给一个（项目能力阶段 2 之后再接） */
 export const playerOpenArgsSchema = z
@@ -275,7 +287,11 @@ export const mediaExtractFramesArgsSchema = z.object({
 });
 
 /** media:transcodeProxy */
+export const projectTaskArgsSchema = z.object({ projectId: z.string().min(1).max(200) });
+export const projectTaskPauseArgsSchema = projectTaskArgsSchema.extend({ paused: z.boolean() });
+
 export const mediaTranscodeProxyArgsSchema = z.object({
+  projectId: z.string().min(1).max(200).optional(),
   sourcePath: z.string().min(1),
   outputPath: z.string().min(1).optional(),
   maxHeight: z.number().int().min(120).max(4320).optional(),

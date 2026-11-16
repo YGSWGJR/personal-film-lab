@@ -34,6 +34,7 @@ export class PlayerService {
   private bounds: RenderBounds | null = null;
   private media: MediaInfo | null = null;
   private layer: OverlayLayer = 'normal';
+  private switchingProject = false;
   private timeTimer: NodeJS.Timeout | null = null;
   private lastDecodeErrorAt = 0;
   private destruction: Promise<void> | null = null;
@@ -126,6 +127,17 @@ export class PlayerService {
     return this.getState();
   }
 
+  async setProjectTransition(active: boolean): Promise<PlayerState> {
+    this.switchingProject = active;
+    this.enqueueOverlayOp('project-transition', () => {
+      this.applyOverlayState();
+      this.debugLog('project-transition', { active });
+    });
+    await this.overlayQueue;
+    if (active && this.media && this.client && !this.client.isPaused()) await this.pause();
+    return this.getState();
+  }
+
   /**
    * S42/Z02：串行化执行 overlay 状态迁移。所有 hide/show/setZ/setBounds 都经过
    * 同一条 Promise 链，保证时序可预测、可由 DSH_PLAYER_DEBUG 日志复盘。
@@ -160,7 +172,11 @@ export class PlayerService {
    * 整个迁移在同一宏任务内完成，不会残留旧框。
    */
   private applyOverlayState(): void {
-    if (!this.overlay || !this.bounds) return;
+    if (!this.overlay) return;
+    if (this.switchingProject || !this.bounds) {
+      this.overlay.hide();
+      return;
+    }
     const physical = toPhysicalRect(this.win, this.bounds);
     if (!this.media || physical.width < 2 || physical.height < 2) {
       this.overlay.hide();
@@ -230,10 +246,10 @@ export class PlayerService {
     }
 
     this.ensurePlayer();
-    this.overlay?.show();
+    if (!this.switchingProject) this.overlay?.show();
 
     try {
-      await this.client!.loadFile(mediaPath, 15000, args.startTimeMs);
+      await this.client!.loadFile(mediaPath, 15000, args.startTimeMs, this.switchingProject);
     } catch (error) {
       this.media = null;
       this.stopTimeEvents();
@@ -252,24 +268,30 @@ export class PlayerService {
 
     // S42/Z02：载入完成后立即按当前 bounds+layer 同步子窗口（同一宏任务内原子生效）
     this.applyOverlayState();
+    this.debugLog('file-opened', { sourcePath: mediaPath, projectTransition: this.switchingProject });
     this.startTimeEvents();
     this.emit(IPC.PLAYER_EVENT_LOADED, this.media);
     this.emitState();
     return this.media;
   }
 
-  async openDialog(): Promise<MediaInfo | null> {
+  async pickMedia(): Promise<string | null> {
     const result = await dialog.showOpenDialog(this.win, {
       title: '打开影片',
       properties: ['openFile'],
       filters: VIDEO_FILTERS,
     });
-    if (result.canceled || result.filePaths.length === 0) return null;
-    return this.open({ mediaPath: result.filePaths[0] });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  }
+
+  async openDialog(): Promise<MediaInfo | null> {
+    const mediaPath = await this.pickMedia();
+    return mediaPath ? this.open({ mediaPath }) : null;
   }
 
   async play(): Promise<PlayerState> {
     const client = this.requirePlayer();
+    if (this.switchingProject) return this.getState();
     this.debugLog('play-request', {});
     await client.play();
     this.debugLog('play-applied', { paused: client.isPaused() });
@@ -288,6 +310,7 @@ export class PlayerService {
 
   async toggle(): Promise<PlayerState> {
     const client = this.requirePlayer();
+    if (this.switchingProject) return this.getState();
     const before = client.isPaused();
     this.debugLog('toggle-request', { pausedBefore: before });
     await client.toggle();

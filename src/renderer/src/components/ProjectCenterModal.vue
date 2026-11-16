@@ -6,12 +6,14 @@ const props = defineProps<{
   open: boolean;
   projects: Project[];
   currentProject: Project | null;
+  openProjectIds?: string[];
   busy?: boolean;
 }>();
 
 const emit = defineEmits<{
   close: [];
   openProject: [projectId: string];
+  closeProject: [projectId: string];
   createEmpty: [];
   importNew: [];
   appendMedia: [projectId: string];
@@ -104,6 +106,12 @@ function countShots(project: Project): string {
                 >
                   打开项目
                 </button>
+                <button
+                  v-if="openProjectIds?.includes(selectedProject.id)"
+                  type="button"
+                  :disabled="busy"
+                  @click="emit('closeProject', selectedProject.id)"
+                >关闭项目</button>
               </div>
 
               <div class="section-title media-title">

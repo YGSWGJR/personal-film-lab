@@ -90,6 +90,7 @@ function durationText(ms: number): string {
           v-for="(shot, offset) in visibleShots"
           :key="shot.id"
           class="shot-row"
+          :data-shot-id="shot.id"
           :class="{
             selected: shot.id === selectedId,
             'partner-selected': shot.id === mergePartnerId,

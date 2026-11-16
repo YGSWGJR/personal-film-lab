@@ -139,13 +139,13 @@ export class MpvClient {
     return this.loadedPath;
   }
 
-  async loadFile(filePath: string, timeoutMs = 15000, startTimeMs = 0): Promise<void> {
+  async loadFile(filePath: string, timeoutMs = 15000, startTimeMs = 0, projectTransition = false): Promise<void> {
     this.fileLoaded = false;
     this.loadedPath = null;
 
     const load = `loadfile "${escapeMpvPath(filePath)}"`;
     const start = Number.isFinite(startTimeMs) && startTimeMs > 0
-      ? ` replace -1 start=${(startTimeMs / 1000).toFixed(3)}`
+      ? ` replace -1 start=${(startTimeMs / 1000).toFixed(3)}${projectTransition ? ',hr-seek-framedrop=yes' : ''}`
       : '';
     let rc = this.lib.fns.commandString(this.ctx, load + start);
     if (rc < 0 && start) rc = this.lib.fns.commandString(this.ctx, load);
@@ -186,6 +186,7 @@ export class MpvClient {
     }
 
     this.loadedPath = filePath;
+    if (projectTransition) this.lib.fns.setPropertyString(this.ctx, 'hr-seek-framedrop', 'no');
     this.lib.fns.setPropertyString(this.ctx, 'speed', '1.0');
     this.fileLoaded = true;
   }

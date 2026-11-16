@@ -34,6 +34,8 @@ const props = withDefaults(
     compositeChildren?: Record<string, WorkspaceShot[]>;
     /** 批次3：外部请求选中的节点（导入照片后自动选中并打开标注面板） */
     focusNodeId?: string | null;
+    initialSelection?: string[];
+    initialPresentation?: string | null;
   }>(),
   { boardMode: false, boardId: null, compositeChildren: undefined, focusNodeId: null },
 );
@@ -54,6 +56,7 @@ const emit = defineEmits<{
   dissolveComposite: [compositeId: string];
   deleteSelection: [ids: string[]];
   project: [];
+  presentationChange: [id: string | null];
 }>();
 
 /** 批次6：board 模式的真实分镜本 id（props.projectId 是 'boards' 字面量，仅作开关判断） */
@@ -198,7 +201,7 @@ const panY = ref(0);
 const positions = ref<Map<string, { x: number; y: number }>>(new Map());
 const edges = ref<WallEdge[]>([]);
 const groups = ref<WallGroup[]>([]);
-const selectedIds = ref<Set<string>>(new Set());
+const selectedIds = ref<Set<string>>(new Set(props.initialSelection?.filter((id) => props.shots.some((shot) => shot.id === id))));
 const pendingEdge = ref<{ from: string; x: number; y: number } | null>(null);
 const edgeHint = ref('');
 /* S43 分镜PPT 放映 + 镜头卡标注 */
@@ -390,6 +393,7 @@ onMounted(() => {
   restoreStillViewMode();
   ensureLayout();
   void reloadGraph();
+  if (props.initialPresentation) void openPlayer(props.initialPresentation);
   window.addEventListener('resize', onWindowResize);
   // capture 阶段拦截：放映打开时按键先于 App 全局快捷键（否则 Esc 会连带关掉整面墙）
   window.addEventListener('keydown', onGlobalKey, true);
@@ -885,6 +889,9 @@ function playerMove(d: number): void {
   annSel.value = null;
   stopPlay();
 }
+
+watch(() => player.value.open ? player.value.scope[player.value.idx]?.id ?? null : null,
+  (id) => emit('presentationChange', id));
 
 function stopPlay(): void {
   player.value.playing = false;
@@ -1710,13 +1717,9 @@ function onWheel(event: WheelEvent): void {
   }
 }
 
-let viewStateTimer: ReturnType<typeof setTimeout> | null = null;
 function emitViewState(): void {
   userAdjusted = true;
-  if (viewStateTimer) clearTimeout(viewStateTimer);
-  viewStateTimer = setTimeout(() => {
-    emit('viewStateChange', { scale: scale.value, panX: panX.value, panY: panY.value });
-  }, 300);
+  emit('viewStateChange', { scale: scale.value, panX: panX.value, panY: panY.value });
 }
 
 /* ---------- 抓手平移（空白拖拽 / 中键 / 空格+左键） ---------- */
@@ -1832,12 +1835,12 @@ function onCardPointerDown(event: PointerEvent, shot: WorkspaceShot): void {
 }
 
 function onCardClick(shot: WorkspaceShot, event: PointerEvent): void {
-  if (dragMoved) {
+  if (dragMoved.value) {
     dragMoved.value = false;
     return;
   }
   toggleSelect(shot.id, event);
-  emit('seek', shot.startMs);
+  if (!props.boardMode) emit('seek', shot.startMs);
 }
 
 function onCardDblClick(shot: WorkspaceShot): void {
@@ -1889,6 +1892,7 @@ function fmtDuration(ms: number): string {
     @keyup="onKeyUp"
     tabindex="-1"
   >
+    <div v-if="$slots.projects" class="wall-project-tabs"><slot name="projects" /></div>
     <StillLibraryGrid
       v-if="stillsOpen && !props.boardMode"
       :project-id="props.projectId"
@@ -1957,6 +1961,7 @@ function fmtDuration(ms: number): string {
         v-for="item in visibleShots"
         :key="item.shot.id"
         class="wall-card"
+        :data-shot-id="item.shot.id"
         :class="{ dragging: draggingId === item.shot.id, selected: selectedIds.has(item.shot.id) }"
         :style="{ left: `${item.x}px`, top: `${item.y}px`, width: `${CARD_W}px` }"
         @pointerdown="onCardPointerDown($event, item.shot)"
@@ -2214,6 +2219,8 @@ function fmtDuration(ms: number): string {
 </template>
 
 <style scoped>
+.wall-project-tabs { position: absolute; top: 0; left: 0; right: 52px; z-index: 20; }
+
 .wall-stage {
   /* 覆盖 workbench 区（避开 40px 顶栏与 24px 状态栏），视频 HWND 已由 overlayOpen 降层 */
   position: fixed;

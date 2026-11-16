@@ -60,6 +60,7 @@ interface ActiveJob {
 }
 
 interface TranscodeQueueEntry extends TranscodeQueueItem {
+  owners: Set<string | null>;
   args: TranscodeProxyArgs;
   outputPath: string;
   sourceSizeBytes: number;
@@ -120,6 +121,7 @@ interface CreateAiSegmentArgs {
 export class MediaService {
   private readonly jobs = new Map<string, ActiveJob>();
   private readonly transcodeQueue: TranscodeQueueEntry[] = [];
+  private readonly pausedProjects = new Set<string>();
   private transcodeActive: TranscodeQueueEntry[] = [];
   private transcodeConcurrency: 1 | 2 | 4 = 4;
   private readonly transcodeRecent: TranscodeQueueEntry[] = [];
@@ -601,7 +603,11 @@ export class MediaService {
       mkdirSync(dirname(outputPath), { recursive: true });
 
       const pending = this.findPendingTranscode(hash);
-      if (pending) return pending.promise;
+      if (pending) {
+        pending.owners.add(args.projectId ?? null);
+        this.pump();
+        return pending.promise;
+      }
 
       if (!existsSync(outputPath)) {
         return this.enqueueTranscode(args, sourcePath, sourceStat.size, hash, outputPath);
@@ -623,7 +629,11 @@ export class MediaService {
     if (cachedResult) return cachedResult;
 
     const pending = this.findPendingTranscode(hash);
-    if (pending) return pending.promise;
+    if (pending) {
+      pending.owners.add(args.projectId ?? null);
+      this.pump();
+      return pending.promise;
+    }
     return this.enqueueTranscode(args, sourcePath, sourceSizeBytes, hash, outputPath);
   }
 
@@ -644,6 +654,7 @@ export class MediaService {
     });
     const item: TranscodeQueueEntry = {
       jobId,
+      owners: new Set([args.projectId ?? null]),
       sourcePath,
       hash,
       outputPath,
@@ -676,8 +687,9 @@ export class MediaService {
       ...this.transcodeActive,
       ...this.transcodeRecent,
     ];
-    return items.map(({ jobId, sourcePath, hash, state, percent, message, encoderUsed, startedAt }) => ({
+    return items.map(({ jobId, sourcePath, hash, state, percent, message, encoderUsed, startedAt, owners }) => ({
       jobId,
+      projectIds: [...owners].filter((id): id is string => id !== null),
       sourcePath,
       hash,
       state,
@@ -797,6 +809,28 @@ export class MediaService {
     return this.transcodeQueue.find((item) => item.hash === hash) ?? null;
   }
 
+  setProjectPaused(projectId: string, paused: boolean): void {
+    if (paused) this.pausedProjects.add(projectId);
+    else this.pausedProjects.delete(projectId);
+    this.pump();
+  }
+
+  async releaseProject(projectId: string): Promise<void> {
+    const cancelling: Promise<TranscodeProxyResult>[] = [];
+    for (const item of [...this.transcodeQueue, ...this.transcodeActive]) {
+      if (!item.owners.delete(projectId) || item.owners.size) continue;
+      cancelling.push(item.promise);
+      this.cancelJob(item.jobId);
+    }
+    await Promise.allSettled(cancelling);
+    this.pausedProjects.delete(projectId);
+    this.pump();
+  }
+
+  private isRunnable(item: TranscodeQueueEntry): boolean {
+    return [...item.owners].some((id) => id === null || !this.pausedProjects.has(id));
+  }
+
   private pump(): void {
     if (this.pumpScheduled) return;
     this.pumpScheduled = true;
@@ -805,8 +839,9 @@ export class MediaService {
       try {
         capacity = await this.resolveTranscodeCapacity();
         while (this.transcodeActive.length < capacity && this.transcodeQueue.length > 0) {
-          const item = this.transcodeQueue.shift();
-          if (!item) break;
+          const index = this.transcodeQueue.findIndex((item) => this.isRunnable(item));
+          if (index < 0) break;
+          const [item] = this.transcodeQueue.splice(index, 1);
           this.transcodeActive.push(item);
           item.state = 'running';
           item.percent = 0;
@@ -824,7 +859,7 @@ export class MediaService {
         }
       } finally {
         this.pumpScheduled = false;
-        if (this.transcodeQueue.length > 0 && this.transcodeActive.length < capacity) {
+        if (this.transcodeActive.length < capacity && this.transcodeQueue.some((item) => this.isRunnable(item))) {
           setTimeout(() => this.pump(), 0);
         }
       }
@@ -1168,6 +1203,7 @@ export class MediaService {
 
   /** 退出/窗口关闭时中止所有长任务 */
   dispose(): void {
+    this.pausedProjects.clear();
     for (const item of this.transcodeQueue.splice(0)) {
       item.state = 'cancelled';
       item.message = '媒体服务已关闭';

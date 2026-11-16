@@ -401,7 +401,14 @@ export interface WallApi {
   dissolveComposite(args: WallDissolveCompositeArgs): Promise<IpcResult<void>>;
 }
 
-export interface WorkspaceState {
+export interface ProjectWallSession {
+  views: Record<string, WallViewState>;
+  selections: Record<string, string[]>;
+  presentations: Record<string, string>;
+  open: 'storyboard' | 'stills' | null;
+}
+
+export interface ProjectWorkspaceState {
   projectId: string | null;
   activeMediaId?: string | null;
   timeMs: number;
@@ -410,6 +417,7 @@ export interface WorkspaceState {
   rightCollapsed: boolean;
   volume: number;
   shotScrollTop?: number;
+  wallSession?: ProjectWallSession;
   mediaSessions?: Record<
     string,
     {
@@ -425,6 +433,10 @@ export interface WorkspaceState {
       };
     }
   >;
+}
+
+export interface WorkspaceState extends ProjectWorkspaceState {
+  openProjects?: ProjectWorkspaceState[];
 }
 
 export interface SessionApi {
@@ -525,6 +537,7 @@ export type TranscodeQueueState = 'waiting' | 'running' | 'done' | 'failed' | 'c
 
 export interface TranscodeQueueItem {
   jobId: string;
+  projectIds?: string[];
   sourcePath: string;
   hash: string;
   state: TranscodeQueueState;
@@ -611,6 +624,7 @@ export interface ExtractFramesResult {
 
 export interface TranscodeProxyArgs {
   sourcePath: string;
+  projectId?: string;
   /** 缺省为 userData/lapian/proxies/<原名>-proxy.mp4；绝不覆盖源文件 */
   outputPath?: string;
   /** 兼容旧调用：仅用于 auto 分辨率模式的目标高度上限 */
@@ -669,6 +683,7 @@ export interface AppApi {
 export interface PlayerApi {
   open(args: PlayerOpenArgs): Promise<IpcResult<MediaInfo>>;
   openDialog(): Promise<IpcResult<MediaInfo | null>>;
+  pickMedia(): Promise<IpcResult<string | null>>;
   close(): Promise<IpcResult<void>>;
   play(): Promise<IpcResult<PlayerState>>;
   pause(): Promise<IpcResult<PlayerState>>;
@@ -682,6 +697,7 @@ export interface PlayerApi {
   setSpeed(args: { rate: number }): Promise<IpcResult<PlayerState>>;
   setBounds(bounds: RenderBounds): Promise<IpcResult<void>>;
   setLayer(args: { level: OverlayLayer }): Promise<IpcResult<PlayerState>>;
+  setProjectTransition(args: { active: boolean }): Promise<IpcResult<PlayerState>>;
   onState(listener: (state: PlayerState) => void): () => void;
   onTime(listener: (event: PlayerTimeEvent) => void): () => void;
   onLoaded(listener: (info: MediaInfo) => void): () => void;
@@ -731,6 +747,18 @@ export interface ScopeExtractAudioWaveformArgs {
   bucketMs?: number;
 }
 
+export interface ProjectTask {
+  jobId: string;
+  kind: 'boundary' | 'labels' | 'transcode';
+  state: 'queued' | 'running';
+}
+
+export interface ProjectTasksApi {
+  list(args: { projectId: string }): Promise<IpcResult<ProjectTask[]>>;
+  release(args: { projectId: string }): Promise<IpcResult<void>>;
+  setPaused(args: { projectId: string; paused: boolean }): Promise<IpcResult<void>>;
+}
+
 export interface WindowApi {
   app: AppApi;
   settings: SettingsApi;
@@ -740,6 +768,7 @@ export interface WindowApi {
   gpu: GpuApi;
   scope: ScopeApi;
   project: ProjectApi;
+  projectTasks: ProjectTasksApi;
   shot: ShotApi;
   still: StillApi;
   tag: TagApi;

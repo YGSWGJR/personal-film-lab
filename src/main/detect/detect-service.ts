@@ -130,6 +130,9 @@ interface ResolvedBoundaryPlan {
  */
 export class DetectService {
   private readonly jobs = new Map<string, InternalDetectJob>();
+  private readonly pendingJobs = new Map<InternalDetectJob, () => Promise<void>>();
+  private readonly runners = new Map<InternalDetectJob, Promise<void>>();
+  private readonly pausedProjects = new Set<string>();
   private readonly latestByProject = new Map<string, DetectResult>();
   private readonly labelPreviews = new Map<string, LabelPreviewEntry>();
 
@@ -162,7 +165,7 @@ export class DetectService {
     const options = normalizeOptions(args.options);
 
     const job = this.createJob(args.projectId, engine, engine === 'ai' ? 'labels' : 'boundary');
-    void this.runJob(job, options, { dryRun: Boolean(args.dryRun), annotate: engine === 'ai' });
+    this.schedule(job, () => this.runJob(job, options, { dryRun: Boolean(args.dryRun), annotate: engine === 'ai' }));
     return { jobId: job.jobId };
   }
 
@@ -176,7 +179,7 @@ export class DetectService {
     resolveDetectSource(project);
     const options = normalizeOptions(args.options);
     const job = this.createJob(args.projectId, 'opencv', 'boundary');
-    void this.runJob(job, options, { dryRun: false, annotate: false, autoApply: true });
+    this.schedule(job, () => this.runJob(job, options, { dryRun: false, annotate: false, autoApply: true }));
     return { jobId: job.jobId };
   }
 
@@ -205,7 +208,7 @@ export class DetectService {
       });
     }
     const job = this.createJob(args.projectId, 'ai', 'labels');
-    void this.runLabelJob(job, shots);
+    this.schedule(job, () => this.runLabelJob(job, shots));
     return { jobId: job.jobId };
   }
 
@@ -295,6 +298,51 @@ export class DetectService {
     }
   }
 
+  listProjectTasks(projectId: string): { jobId: string; kind: DetectPipeline; state: 'queued' | 'running' }[] {
+    return [...this.jobs.values()].flatMap((job) =>
+      job.projectId === projectId && (job.status === 'queued' || job.status === 'running')
+        ? [{ jobId: job.jobId, kind: job.pipeline, state: job.status }]
+        : [],
+    );
+  }
+
+  async releaseProject(projectId: string): Promise<void> {
+    const owned = [...this.jobs.values()].filter((job) => job.projectId === projectId);
+    for (const job of owned) this.cancel(job.jobId);
+    await Promise.allSettled(owned.flatMap((job) => this.runners.get(job) ?? []));
+    this.latestByProject.delete(projectId);
+    for (const job of owned) {
+      this.jobs.delete(job.jobId);
+      this.labelPreviews.delete(job.jobId);
+    }
+    this.pausedProjects.delete(projectId);
+  }
+
+  setProjectPaused(projectId: string, paused: boolean): void {
+    if (paused) this.pausedProjects.add(projectId);
+    else this.pausedProjects.delete(projectId);
+    this.pumpJobs();
+  }
+
+  private schedule(job: InternalDetectJob, run: () => Promise<void>): void {
+    this.pendingJobs.set(job, run);
+    this.pumpJobs();
+  }
+
+  private pumpJobs(): void {
+    if (this.runners.size >= 1) return;
+    for (const [job, run] of this.pendingJobs) {
+      if (this.pausedProjects.has(job.projectId)) continue;
+      this.pendingJobs.delete(job);
+      const runner = run().finally(() => {
+        this.runners.delete(job);
+        this.pumpJobs();
+      });
+      this.runners.set(job, runner);
+      return;
+    }
+  }
+
   assertNoRunningJob(projectId: string): void {
     for (const job of this.jobs.values()) {
       if (job.projectId === projectId && (job.status === 'running' || job.status === 'queued')) {
@@ -309,12 +357,14 @@ export class DetectService {
     const job = this.jobs.get(jobId);
     if (!job) throw new DetectError('DETECT_JOB_NOT_FOUND', `检测任务不存在：${jobId}`, { jobId });
     if (job.status !== 'running' && job.status !== 'queued') return;
+    this.pendingJobs.delete(job);
     job.controller.abort();
     this.media.cancelJob(jobId);
     job.child?.kill();
     job.provider?.cancel();
     job.status = 'cancelled';
     job.progress = 0;
+    this.pumpJobs();
   }
 
   getJob(jobId: string): DetectJobSnapshot {
@@ -421,6 +471,8 @@ export class DetectService {
   }
 
   dispose(): void {
+    this.pendingJobs.clear();
+    this.pausedProjects.clear();
     for (const job of this.jobs.values()) {
       job.controller.abort();
       job.child?.kill();
@@ -442,9 +494,11 @@ export class DetectService {
     opts: { dryRun: boolean; annotate: boolean; autoApply?: boolean },
   ): Promise<void> {
     let framesDir: string | null = null;
+    let thumbsDir: string | null = null;
     try {
       job.status = 'running';
       const environment = await this.checkEnvironment();
+      this.assertActive(job);
       if (!environment.ok && environment.error) {
         throw new DetectError(environment.error.code, `${environment.error.message}。${environment.error.guide}`, {
           guide: environment.error.guide,
@@ -462,7 +516,7 @@ export class DetectService {
       // 删掉新任务刚抽出的帧（detect000001.jpg 丢失）。
       framesDir = join(resolveDetectFramesDir(project.id), job.jobId);
       // S41：缩略图按 job 隔离，禁止清空整个项目 thumbs 目录。
-      const thumbsDir = join(resolveThumbCacheDir(), project.id, 'detect', job.jobId);
+      thumbsDir = join(resolveThumbCacheDir(), project.id, 'detect', job.jobId);
       const fps = project.media.fps && project.media.fps > 0 ? project.media.fps : 25;
       const durationMs = project.media.durationMs;
       const intervalMs = resolveIntervalMs(options, fps, durationMs);
@@ -587,6 +641,7 @@ export class DetectService {
       job.error = error instanceof Error ? error.message : String(error);
     } finally {
       this.cleanupDetectFrames(framesDir);
+      if (job.status === 'cancelled' || job.status === 'error') this.cleanupDetectFrames(thumbsDir);
       // S42/Z03：帧目录回收结果计入任务内存治理记录
       job.memory.framesCleaned = framesDir ? !existsSync(framesDir) : true;
       this.sampleMemory(job, `job-${job.status}`);

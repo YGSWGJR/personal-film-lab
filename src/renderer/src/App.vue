@@ -58,6 +58,7 @@ import type {
   HardwareCapabilityReport,
   IpcResult,
   MediaInfo,
+  MediaProbeResult,
   MediaProgressEvent,
   Note,
   OverlayLayer,
@@ -65,6 +66,7 @@ import type {
   PlayerErrorEvent,
   PlayerState,
   Project,
+  ProjectWorkspaceState,
   RenderBounds,
   Settings,
   SettingsDataRootChangingEvent,
@@ -87,12 +89,24 @@ import {
   snapToLevel,
 } from '../../shared/types';
 import { formatTimeMs, frameToMs } from '../../shared/time';
+import { ProjectSessionRegistry } from './project-sessions';
+import ProjectTabs from './components/ProjectTabs.vue';
 
 const info = ref<AppInfo | null>(null);
 const bridgeReady = ref(false);
 const busy = ref(false);
 const savingNote = ref(false);
 const activeProject = ref<Project | null>(null);
+const projectSessions = new ProjectSessionRegistry();
+const projectTransition = ref(false);
+let projectNavigation: Promise<void> = Promise.resolve();
+const noteDrafts = new Map<string, Map<string, string>>();
+const noteSaves = new Map<string, Promise<boolean>>();
+const projectClosePrompt = ref<{ id: string; name: string; dirty: boolean; taskCount: number } | null>(null);
+const projectCloseCancel = ref<HTMLButtonElement | null>(null);
+let projectTaskTimer: ReturnType<typeof setInterval> | null = null;
+const closingProjects = new Set<string>();
+let finishProjectClose: ((action: 'save' | 'discard' | 'cancel') => void) | null = null;
 const demoMode = ref(true);
 const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
@@ -442,7 +456,7 @@ const overlayOpen = computed(
     // S41 修复：标签预览弹窗与确认框也必须把视频 HWND 降层，否则被画面盖住
     labelPreviewOpen.value ||
     feedbackOpen.value ||
-    confirmState.open,
+    confirmState.open || projectClosePrompt.value !== null,
 );
 const gpuStatusText = computed(() => {
   const status = gpuStatus.value;
@@ -672,29 +686,60 @@ async function loadAudioWaveform(
 
 async function loadProject(
   project: Project,
-  restoreState: WorkspaceState | null = null,
+  restoreState: ProjectWorkspaceState | null = null,
   deferWaveform = false,
 ): Promise<void> {
   const previousProjectId = activeProject.value?.id;
   const previousMediaId = activeProject.value?.activeMediaId;
-  if (!projectLoadDepth.value && !mediaSwitchBusy.value && previousProjectId !== project.id) {
-    rememberCurrentMediaSession();
+  const changedProject = previousProjectId !== project.id;
+  const session = projectSessions.open(project);
+  if (changedProject) restoreState ??= session.workspace;
+  if (changedProject && restoreState?.wallSession) {
+    Object.assign(session.wallViews, restoreState.wallSession.views);
+    Object.assign(session.wallSelection, restoreState.wallSession.selections);
+    Object.assign(session.wallPresentation, restoreState.wallSession.presentations);
+    session.openWall = restoreState.wallSession.open;
+  }
+  if (changedProject && previousProjectId) {
+    snapshotProjectSession();
+    if (!closingProjects.has(previousProjectId)) void persistProjectNotes(previousProjectId);
   }
   projectLoadDepth.value += 1;
   try {
+    if (changedProject) {
+      projectTransition.value = true;
+      const hidden = await window.api.player.setProjectTransition({ active: true });
+      if (!hidden.ok) throw new Error(hidden.error.message);
+      resetProjectSurfaces();
+      mediaSessions.value = {};
+      leftCollapsed.value = restoreState?.leftCollapsed ?? false;
+      rightCollapsed.value = restoreState?.rightCollapsed ?? false;
+    }
     await loadProjectData(project, restoreState, deferWaveform);
+    if (changedProject && session.openWall === 'storyboard') await openProjectWall();
+    if (changedProject && session.openWall === 'stills') await openStillWall();
   } finally {
     if (previousProjectId !== activeProject.value?.id || previousMediaId !== activeProject.value?.activeMediaId) {
       timelineRevision.value += 1;
     }
-    projectLoadDepth.value -= 1;
-    if (!projectLoadDepth.value) scheduleWorkspaceSave();
+    try {
+      if (changedProject) {
+        await nextTick();
+        await applyPlayerLayer(overlayOpen.value || projectedMode.value ? 'hidden' : 'normal');
+        const visible = await window.api.player.setProjectTransition({ active: false });
+        if (visible.ok) Object.assign(player, visible.data);
+      }
+    } finally {
+      if (changedProject) projectTransition.value = false;
+      projectLoadDepth.value -= 1;
+      if (!projectLoadDepth.value) scheduleWorkspaceSave();
+    }
   }
 }
 
 async function loadProjectData(
   project: Project,
-  restoreState: WorkspaceState | null = null,
+  restoreState: ProjectWorkspaceState | null = null,
   deferWaveform = false,
 ): Promise<void> {
   let selectedProject = project;
@@ -741,6 +786,7 @@ async function loadProjectData(
   labelPreview.value =
     (restoredDetection?.labelPreview as LabelPreviewResult | null) ?? null;
   detectionJobId.value = restoredDetection?.detectionJobId ?? null;
+  if (projectChanged && detectionJobId.value) void restoreDetectionJob(detectionJobId.value, selectedProject.id);
   const requestedTime = restoreState?.timeMs ?? (projectChanged ? mediaSession?.timeMs : undefined);
   const playback = loadProjectPlayback(selectedProject, projectChanged, requestedTime);
   const refreshVocabulary = !mediaSwitchBusy.value ? Promise.all([loadTerms(true, true), loadTags()]) : Promise.resolve();
@@ -763,6 +809,7 @@ async function loadProjectData(
   shots.value = mapped;
   projectStills.value = loadedStills;
   seedDemoNoteMap(mapped, loadedNotes);
+  for (const [id, text] of noteDrafts.get(selectedProject.id) ?? []) notes[id] = text;
   markers.value = markersFromData(mapped, loadedStills, loadedNotes);
   const restoredId = restoreState?.selectedShotId ?? (projectChanged ? mediaSession?.selectedShotId : selectedId.value);
   const restoredShot = mapped.find((shot) => shot.id === restoredId) ?? null;
@@ -825,7 +872,7 @@ async function refreshProjectData(projectId: string, preferredShotId?: string | 
   const loadedShots = unwrap(shotResult);
   const loadedStills = unwrap(stillResult);
   const loadedNotes = unwrap(noteResult);
-  if (!loadedShots || !loadedStills || !loadedNotes) return false;
+  if (!loadedShots || !loadedStills || !loadedNotes || activeProject.value?.id !== projectId) return false;
 
   for (const key of Object.keys(notes)) delete notes[key];
   for (const key of Object.keys(noteIds)) delete noteIds[key];
@@ -856,22 +903,26 @@ function cleanProjectName(filePath: string): string {
   return name.replace(/\.[^.]+$/u, '').replace(/[\[\]]/g, '').trim().slice(0, 120);
 }
 
-async function createProjectForMedia(media: MediaInfo): Promise<Project | null> {
-  const probe = unwrap(await window.api.media.probe({ path: media.path }));
+async function pickMediaInfo(): Promise<MediaProbeResult | null> {
+  const path = unwrap(await window.api.player.pickMedia());
+  return path ? unwrap(await window.api.media.probe({ path })) : null;
+}
+
+async function createProjectForMedia(media: MediaProbeResult): Promise<Project | null> {
   const project = unwrap(
     await window.api.project.create({
       name: cleanProjectName(media.path),
       source: { type: 'local', path: media.path },
       media: {
-        filename: probe?.filename ?? cleanProjectName(media.path),
-        container: probe?.container ?? null,
-        durationMs: probe?.durationMs ?? media.durationMs,
-        width: probe?.width ?? media.width,
-        height: probe?.height ?? media.height,
-        fps: probe?.fps ?? media.fps,
-        videoCodec: probe?.videoCodec ?? null,
-        audioCodec: probe?.audioCodec ?? null,
-        sizeBytes: probe?.sizeBytes ?? null,
+        filename: media.filename ?? cleanProjectName(media.path),
+        container: media.container,
+        durationMs: media.durationMs,
+        width: media.width,
+        height: media.height,
+        fps: media.fps,
+        videoCodec: media.videoCodec,
+        audioCodec: media.audioCodec,
+        sizeBytes: media.sizeBytes,
         proxyPath: null,
       },
     }),
@@ -887,23 +938,22 @@ async function appendMediaToProject(projectId: string): Promise<void> {
   busy.value = true;
   try {
     if (activeProject.value?.id === projectId) rememberCurrentMediaSession();
-    const media = unwrap(await window.api.player.openDialog());
+    const media = await pickMediaInfo();
     if (!media) return;
-    const probe = unwrap(await window.api.media.probe({ path: media.path }));
     const item = unwrap(
       await window.api.project.addMedia({
         projectId,
         source: { type: 'local', path: media.path },
         media: {
-          filename: probe?.filename ?? cleanProjectName(media.path),
-          container: probe?.container ?? null,
-          durationMs: probe?.durationMs ?? media.durationMs,
-          width: probe?.width ?? media.width,
-          height: probe?.height ?? media.height,
-          fps: probe?.fps ?? media.fps,
-          videoCodec: probe?.videoCodec ?? null,
-          audioCodec: probe?.audioCodec ?? null,
-          sizeBytes: probe?.sizeBytes ?? null,
+          filename: media.filename ?? cleanProjectName(media.path),
+          container: media.container,
+          durationMs: media.durationMs,
+          width: media.width,
+          height: media.height,
+          fps: media.fps,
+          videoCodec: media.videoCodec,
+          audioCodec: media.audioCodec,
+          sizeBytes: media.sizeBytes,
           proxyPath: null,
         },
         activate: true,
@@ -927,13 +977,12 @@ async function appendMediaToProject(projectId: string): Promise<void> {
 }
 
 async function openVideo(): Promise<void> {
-  if (busy.value) return;
+  if (busy.value || projectTransition.value) return;
   busy.value = true;
   let backgroundProxy: { projectId: string; mediaId: string; sourcePath: string } | null = null;
   try {
-    const media = unwrap(await window.api.player.openDialog());
+    const media = await pickMediaInfo();
     if (!media) return;
-    loadedPlaybackPath.value = media.path;
     const project = await createProjectForMedia(media);
     if (project) {
       await loadProject(project, null, true);
@@ -958,6 +1007,7 @@ async function openVideo(): Promise<void> {
 }
 
 async function openProjectCenter(): Promise<void> {
+  if (projectTransition.value) return;
   await mediaSwitchQueue.catch(() => undefined);
   projectCenterBusy.value = true;
   try {
@@ -1003,10 +1053,8 @@ async function openProjectFromCenter(projectId: string): Promise<void> {
   if (projectCenterBusy.value) return;
   projectCenterBusy.value = true;
   try {
-    const project = unwrap(await window.api.project.get({ id: projectId }));
-    if (!project) return;
     projectCenterOpen.value = false;
-    await loadProject(project);
+    await navigateProject(() => activateProjectTab(projectId));
   } finally {
     projectCenterBusy.value = false;
   }
@@ -1016,9 +1064,8 @@ async function relinkProjectMedia(projectId: string, mediaId: string): Promise<v
   if (projectCenterBusy.value) return;
   projectCenterBusy.value = true;
   try {
-    const media = unwrap(await window.api.player.openDialog());
+    const media = await pickMediaInfo();
     if (!media) return;
-    const probe = unwrap(await window.api.media.probe({ path: media.path }));
     unwrap(
       await window.api.project.updateMedia({
         projectId,
@@ -1026,15 +1073,15 @@ async function relinkProjectMedia(projectId: string, mediaId: string): Promise<v
         patch: {
           source: { type: 'local', path: media.path },
           media: {
-            filename: probe?.filename ?? cleanProjectName(media.path),
-            container: probe?.container ?? null,
-            durationMs: probe?.durationMs ?? media.durationMs,
-            width: probe?.width ?? media.width,
-            height: probe?.height ?? media.height,
-            fps: probe?.fps ?? media.fps,
-            videoCodec: probe?.videoCodec ?? null,
-            audioCodec: probe?.audioCodec ?? null,
-            sizeBytes: probe?.sizeBytes ?? null,
+            filename: media.filename ?? cleanProjectName(media.path),
+            container: media.container,
+            durationMs: media.durationMs,
+            width: media.width,
+            height: media.height,
+            fps: media.fps,
+            videoCodec: media.videoCodec,
+            audioCodec: media.audioCodec,
+            sizeBytes: media.sizeBytes,
             proxyPath: null,
           },
         },
@@ -1051,6 +1098,187 @@ async function relinkProjectMedia(projectId: string, mediaId: string): Promise<v
   } finally {
     projectCenterBusy.value = false;
   }
+}
+
+function resetProjectSurfaces(): void {
+  wallOpen.value = false;
+  wallPickerOpen.value = false;
+  wallMode.value = 'project';
+  wallProjectScope.value = null;
+  wallBoardId.value = null;
+  wallBoardName.value = '';
+  stillWallProjectId.value = null;
+  wallSavedLayout.value = [];
+  wallSelectedIds.value = [];
+  wallViewState.value = null;
+  wallNodeEdit.value = null;
+  boardFocusNodeId.value = null;
+  projectionOn.value = false;
+  projectionManuallyExited.value = false;
+  boardNodesInfo.value = [];
+  boardShots.value = [];
+  compositeChildrenShots.value = {};
+  detectionOpen.value = false;
+  detectionCapsuleHidden.value = false;
+  detectionProgress.value = null;
+  detectionError.value = null;
+  stopDetectionPolling();
+  detecting.value = false;
+  boundaryFlow.value = false;
+  labelsFlow.value = false;
+  labelPreviewOpen.value = false;
+  labelSelected.value = [];
+  stagedDetection.value = { kind: 'idle' };
+  selectedId.value = null;
+  mergePartnerId.value = null;
+  shots.value = [];
+  projectStills.value = [];
+  markers.value = [];
+  for (const id of Object.keys(notes)) delete notes[id];
+  for (const id of Object.keys(noteIds)) delete noteIds[id];
+}
+
+function navigateProject(action: () => Promise<void>): Promise<void> {
+  projectNavigation = projectNavigation.catch(() => undefined).then(async () => {
+    ++mediaSwitchRequest;
+    await mediaSwitchQueue.catch(() => undefined);
+    if (shotEditing.value || busy.value || settingsSaving.value || applyingDetection.value || labelApplying.value || exporting.value ||
+      (detecting.value && !detectionJobId.value)) return;
+    await action();
+  }).catch((error) => showToast(error instanceof Error ? error.message : String(error), 'error'));
+  return projectNavigation;
+}
+
+async function activateProjectTab(id: string): Promise<void> {
+  if (activeProject.value?.id === id && !demoMode.value) return;
+  const project = unwrap(await window.api.project.get({ id }));
+  if (project) await loadProject(project);
+}
+
+async function refreshProjectTasks(): Promise<void> {
+  await Promise.all(projectSessions.sessions.map(async (session) => {
+    const result = await window.api.projectTasks.list({ projectId: session.id });
+    if (!result.ok || projectSessions.get(session.id) !== session) return;
+    session.taskCount = result.data.length;
+    if (!session.taskCount && session.tasksPaused) {
+      session.tasksPaused = false;
+      await window.api.projectTasks.setPaused({ projectId: session.id, paused: false });
+    }
+  }));
+}
+
+async function toggleProjectTasks(id: string): Promise<void> {
+  const session = projectSessions.get(id);
+  if (!session || closingProjects.has(id)) return;
+  const paused = !session.tasksPaused;
+  const result = await window.api.projectTasks.setPaused({ projectId: id, paused });
+  if (result.ok) session.tasksPaused = paused;
+  else showToast(result.error.message, 'error', result.error.code);
+}
+
+function selectProjectTab(id: string): void {
+  void navigateProject(() => activateProjectTab(id));
+}
+
+function resolveProjectClose(action: 'save' | 'discard' | 'cancel'): void {
+  projectClosePrompt.value = null;
+  const resolve = finishProjectClose;
+  finishProjectClose = null;
+  resolve?.(action);
+}
+
+function askCloseProject(id: string, name: string, dirty: boolean, taskCount: number): Promise<'save' | 'discard' | 'cancel'> {
+  projectClosePrompt.value = { id, name, dirty, taskCount };
+  void nextTick(() => projectCloseCancel.value?.focus());
+  return new Promise((resolve) => { finishProjectClose = resolve; });
+}
+
+function closeProjectFromCenter(id: string): void {
+  projectCenterOpen.value = false;
+  closeProjectTab(id);
+}
+
+function closeProjectTab(id: string): void {
+  void navigateProject(async () => {
+    const session = projectSessions.get(id);
+    if (!session) return;
+    const tasks = await window.api.projectTasks.list({ projectId: id });
+    if (!tasks.ok) throw new Error(tasks.error.message);
+    const dirty = Boolean(noteDrafts.get(id)?.size);
+    const action = dirty || tasks.data.length
+      ? await askCloseProject(id, session.name, dirty, tasks.data.length)
+      : 'save';
+    if (action === 'cancel') return;
+    if (action === 'save' && !await persistProjectNotes(id)) return;
+    closingProjects.add(id);
+    try {
+      const released = await window.api.projectTasks.release({ projectId: id });
+      if (!released.ok) throw new Error(released.error.message);
+      const active = activeProject.value?.id === id;
+      const index = projectSessions.sessions.findIndex((entry) => entry.id === id);
+      if (active) {
+        const next = projectSessions.sessions[index + 1] ?? projectSessions.sessions[index - 1];
+        if (next) {
+          await activateProjectTab(next.id);
+          if (activeProject.value?.id === id) return;
+        } else {
+          projectTransition.value = true;
+          try {
+            resetProjectSurfaces();
+            resetAudioWaveform();
+            await closePlayer();
+            mediaSessions.value = {};
+            enterDemoWorkspace();
+          } finally {
+            projectTransition.value = false;
+          }
+        }
+      }
+      if (active && noteTimer) {
+        clearTimeout(noteTimer);
+        noteTimer = null;
+      }
+      noteDrafts.delete(id);
+      projectSessions.close(id);
+      scheduleWorkspaceSave(true);
+    } finally {
+      closingProjects.delete(id);
+    }
+  });
+}
+
+function handleProjectTabShortcut(event: KeyboardEvent): void {
+  if (projectClosePrompt.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      resolveProjectClose('cancel');
+    }
+    return;
+  }
+  if ((!event.ctrlKey && !event.metaKey) || event.altKey || demoMode.value || confirmState.open ||
+    projectCenterOpen.value || settingsOpen.value || importWizardOpen.value) return;
+  const sessions = projectSessions.sessions;
+  const id = activeProject.value?.id;
+  if (!id) return;
+  if (event.key.toLowerCase() === 'w') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeProjectTab(id);
+    return;
+  }
+  let next: string | undefined;
+  if (event.key === 'Tab' && sessions.length > 1) {
+    const index = sessions.findIndex((session) => session.id === id);
+    const offset = event.shiftKey ? -1 : 1;
+    next = sessions[(index + offset + sessions.length) % sessions.length]?.id;
+  } else if (/^[1-9]$/.test(event.key)) {
+    next = sessions[Number(event.key) - 1]?.id;
+  }
+  if (!next) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  selectProjectTab(next);
 }
 
 function rememberCurrentMediaSession(): void {
@@ -1110,10 +1338,11 @@ async function removeProjectMedia(projectId: string, mediaId: string): Promise<v
 
 function switchProjectMedia(mediaId: string): Promise<void> {
   const projectId = activeProject.value?.id;
+  if (projectTransition.value) return Promise.resolve();
   const request = ++mediaSwitchRequest;
   mediaSwitchQueue = mediaSwitchQueue.catch(() => undefined).then(async () => {
     const project = activeProject.value;
-    if (request !== mediaSwitchRequest || !project || project.id !== projectId ||
+    if (request !== mediaSwitchRequest || projectTransition.value || !project || project.id !== projectId ||
       project.activeMediaId === mediaId || demoMode.value || busy.value ||
       projectCenterBusy.value || detecting.value || shotEditing.value) return;
     mediaSwitchBusy.value = true;
@@ -1149,6 +1378,8 @@ async function startBackgroundProxy(
   mediaId: string,
   sourcePath: string,
 ): Promise<void> {
+  if (!projectSessions.get(projectId) || closingProjects.has(projectId)) return;
+  const session = projectSessions.get(projectId);
   const tier = settings.value?.proxyTier ?? '540p';
   transcoding.value = true;
   transcodeProgress.value = {
@@ -1162,10 +1393,11 @@ async function startBackgroundProxy(
     const proxy = unwrap(
       await window.api.media.transcodeProxy({
         sourcePath,
+        projectId,
         tier,
       }),
     );
-    if (!proxy) return;
+    if (!proxy || projectSessions.get(projectId) !== session || closingProjects.has(projectId)) return;
     const updated = unwrap(
       await window.api.project.updateMedia({
         projectId,
@@ -1186,7 +1418,9 @@ async function startBackgroundProxy(
   } catch (error) {
     const current = activeProject.value;
     if (current?.id === projectId) prepareAudioWaveform(current);
-    showToast(error instanceof Error ? error.message : String(error), 'error', '后台代理生成失败');
+    if (projectSessions.get(projectId) === session && !closingProjects.has(projectId)) {
+      showToast(error instanceof Error ? error.message : String(error), 'error', '后台代理生成失败');
+    }
   } finally {
     await refreshTranscodeQueueState();
   }
@@ -2262,13 +2496,24 @@ function updateNote(value: string): void {
     queueProjectedNodePatch(selectedId.value, { note: value });
     return;
   }
+  const projectId = activeProject.value?.id;
+  if (projectId && !demoMode.value) {
+    const drafts = noteDrafts.get(projectId) ?? new Map<string, string>();
+    drafts.set(selectedId.value, value);
+    noteDrafts.set(projectId, drafts);
+    const session = projectSessions.get(projectId);
+    if (session) session.dirty = true;
+  }
   pendingNoteShotId = selectedId.value;
   if (noteTimer) clearTimeout(noteTimer);
   noteTimer = setTimeout(() => {
     const shotId = pendingNoteShotId;
     noteTimer = null;
     pendingNoteShotId = null;
-    if (shotId) void saveNoteForShot(shotId, false);
+    if (projectId && !closingProjects.has(projectId) && projectClosePrompt.value?.id !== projectId) {
+      void persistProjectNotes(projectId);
+    }
+    else if (!projectId && shotId) void saveNoteForShot(shotId, false);
   }, 800);
 }
 
@@ -2289,18 +2534,23 @@ async function saveNoteForShot(shotId: string, showConfirmation: boolean): Promi
     if (showConfirmation) showToast('示例笔记已保存在当前会话。');
     return;
   }
+  const projectId = activeProject.value.id;
+  if (noteDrafts.get(projectId)?.has(shotId)) {
+    if (await persistProjectNotes(projectId) && showConfirmation) showToast('镜头笔记已保存。', 'success');
+    return;
+  }
   const text = notes[shot.id] ?? '';
   savingNote.value = true;
   try {
     const saved = unwrap(
       await window.api.note.upsert({
         id: noteIds[shot.id],
-        projectId: activeProject.value.id,
+        projectId,
         shotId: shot.id,
         text,
       }),
     );
-    if (saved) {
+    if (saved && activeProject.value?.id === projectId) {
       noteIds[shot.id] = saved.id;
       markerUpdatesFromNote(shot, saved);
       if (showConfirmation) showToast('镜头笔记已保存。', 'success');
@@ -2308,6 +2558,42 @@ async function saveNoteForShot(shotId: string, showConfirmation: boolean): Promi
   } finally {
     savingNote.value = false;
   }
+}
+
+function persistProjectNotes(projectId: string): Promise<boolean> {
+  const existing = noteSaves.get(projectId);
+  if (existing) return existing;
+  const save = writeProjectNotes(projectId).finally(() => noteSaves.delete(projectId));
+  noteSaves.set(projectId, save);
+  return save;
+}
+
+async function writeProjectNotes(projectId: string): Promise<boolean> {
+  const drafts = noteDrafts.get(projectId);
+  if (!drafts?.size) return true;
+  const stored = await window.api.note.list({ projectId });
+  if (!stored.ok) {
+    showToast(stored.error.message, 'error', stored.error.code);
+    return false;
+  }
+  const ids = new Map(stored.data.filter((note) => note.shotId).map((note) => [note.shotId, note.id]));
+  for (const [shotId, text] of [...drafts]) {
+    const result = await window.api.note.upsert({ projectId, shotId, text, id: ids.get(shotId) });
+    if (!result.ok) {
+      showToast(result.error.message, 'error', result.error.code);
+      return false;
+    }
+    if (drafts.get(shotId) === text) drafts.delete(shotId);
+    if (activeProject.value?.id === projectId) {
+      noteIds[shotId] = result.data.id;
+      const shot = shots.value.find((entry) => entry.id === shotId);
+      if (shot) markerUpdatesFromNote(shot, result.data);
+    }
+  }
+  const session = projectSessions.get(projectId);
+  if (session) session.dirty = drafts.size > 0;
+  if (!drafts.size) noteDrafts.delete(projectId);
+  return !drafts.size;
 }
 
 function markerUpdatesFromNote(shot: WorkspaceShot, note: Note): void {
@@ -2394,6 +2680,8 @@ function syncStillToShotThumbnail(still: Still): void {
 }
 
 function upsertStill(still: Still): void {
+  if (activeProject.value?.id !== still.projectId ||
+    (still.mediaId && activeProject.value.activeMediaId !== still.mediaId)) return;
   const next = projectStills.value.filter((item) => item.id !== still.id);
   next.push(still);
   projectStills.value = next;
@@ -2440,6 +2728,52 @@ async function saveProject(): Promise<void> {
   } finally {
     busy.value = false;
   }
+}
+
+function ownsActiveDetection(jobId: string): boolean {
+  const projectId = activeProject.value?.id;
+  return Boolean(projectId && !closingProjects.has(projectId) && detectionJobId.value === jobId &&
+    projectSessions.get(projectId)?.detectionJobId === jobId);
+}
+
+function rememberBackgroundDetection(jobId: string, update: Partial<NonNullable<MediaSessionRecord['detectionState']>>): void {
+  const owner = projectSessions.sessions.find((session) => session.detectionJobId === jobId);
+  const workspace = owner?.workspace;
+  const mediaId = workspace?.activeMediaId;
+  const state = mediaId ? workspace?.mediaSessions?.[mediaId] : undefined;
+  if (owner && state && !closingProjects.has(owner.id)) {
+    state.detectionState = { ...state.detectionState, ...update };
+  }
+}
+
+async function restoreDetectionJob(jobId: string, projectId: string): Promise<void> {
+  const result = await window.api.detect.getJob({ jobId });
+  if (activeProject.value?.id !== projectId || detectionJobId.value !== jobId || !result.ok) return;
+  const job = result.data;
+  const owner = projectSessions.get(projectId);
+  if (!owner || job.projectId !== owner.id) return;
+  owner.detectionJobId = jobId;
+  if (job.status !== 'queued' && job.status !== 'running') return;
+  detecting.value = true;
+  boundaryFlow.value = job.pipeline === 'boundary';
+  labelsFlow.value = job.pipeline === 'labels';
+  detectionCapsuleHidden.value = true;
+  detectionProgress.value = { jobId, stage: 'analyze', percent: job.progress, pipeline: job.pipeline };
+  updateDetectionBoundaryState(job);
+  stopDetectionPolling();
+  detectionPollTimer = setInterval(async () => {
+    const next = await window.api.detect.getJob({ jobId });
+    if (!ownsActiveDetection(jobId)) return;
+    if (next.ok && (next.data.status === 'running' || next.data.status === 'queued')) return;
+    detecting.value = false;
+    boundaryFlow.value = false;
+    labelsFlow.value = false;
+    if (next.ok && next.data.status === 'error') {
+      detectionError.value = next.data.error;
+      showToast(next.data.error ?? '项目任务失败。', 'error');
+    }
+    stopDetectionPolling();
+  }, 500);
 }
 
 function stopDetectionPolling(): void {
@@ -2568,6 +2902,10 @@ async function handleDataRootChanging(event: SettingsDataRootChangingEvent): Pro
 async function refreshWorkspaceAfterDataRootSwitch(preferred: Project[] = []): Promise<void> {
   await closePlayer();
   resetAudioWaveform();
+  resetProjectSurfaces();
+  projectSessions.clear();
+  noteDrafts.clear();
+  mediaSessions.value = {};
   enterDemoWorkspace();
   const projects = unwrap(await window.api.project.list());
   const project = preferred[0] ?? projects?.[0] ?? null;
@@ -2742,7 +3080,8 @@ function enterDemoWorkspace(): void {
 
 async function toggleDemoWorkspace(): Promise<void> {
   if (!demoMode.value) {
-    rememberCurrentMediaSession();
+    snapshotProjectSession();
+    resetProjectSurfaces();
     if (detecting.value) await cancelDetection();
     await closePlayer();
     resetAudioWaveform();
@@ -2921,7 +3260,7 @@ async function saveSettings(value: SettingsSetArgs): Promise<void> {
   }
 }
 
-function workspaceStateSnapshot(): WorkspaceState {
+function currentProjectSnapshot(): ProjectWorkspaceState {
   rememberCurrentMediaSession();
   const activeMediaId = demoMode.value ? null : activeProject.value?.activeMediaId ?? null;
   return {
@@ -2939,14 +3278,41 @@ function workspaceStateSnapshot(): WorkspaceState {
   };
 }
 
+function snapshotProjectSession(): ProjectWorkspaceState {
+  const workspace = currentProjectSnapshot();
+  if (workspace.projectId) {
+    const session = projectSessions.get(workspace.projectId);
+    if (session) {
+      session.openWall = !wallOpen.value ? null : stillWallProjectId.value === session.id
+        ? 'stills' : wallMode.value === 'project' ? 'storyboard' : null;
+      workspace.wallSession = JSON.parse(JSON.stringify({
+        views: session.wallViews,
+        selections: session.wallSelection,
+        presentations: session.wallPresentation,
+        open: session.openWall,
+      })) as ProjectWorkspaceState['wallSession'];
+      session.workspace = workspace;
+    }
+  }
+  return workspace;
+}
+
+function workspaceStateSnapshot(): WorkspaceState {
+  const workspace = snapshotProjectSession();
+  return {
+    ...workspace,
+    openProjects: JSON.parse(JSON.stringify(projectSessions.sessions.flatMap((session) => session.workspace ? [session.workspace] : []))) as ProjectWorkspaceState[],
+  };
+}
+
 function scheduleWorkspaceSave(immediate = false): void {
-  if (restoringSession || projectLoadDepth.value || mediaSwitchBusy.value) return;
+  if (restoringSession || projectLoadDepth.value || mediaSwitchBusy.value || projectTransition.value) return;
   const save = (): void => {
     sessionSaveTimer = null;
     if (restoringSession || projectLoadDepth.value || mediaSwitchBusy.value) return;
-    void window.api.session.save(workspaceStateSnapshot()).catch((error) => {
-      console.warn('[session] 工作区状态保存失败', error);
-    });
+    void window.api.session.save(workspaceStateSnapshot()).then((result) => {
+      if (!result.ok) console.warn('[session] 工作区状态保存失败', result.error.message);
+    }).catch((error) => console.warn('[session] 工作区状态保存失败', error));
   };
   if (immediate) {
     if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
@@ -2956,7 +3322,7 @@ function scheduleWorkspaceSave(immediate = false): void {
   }
 }
 
-async function restorePlaybackState(state: WorkspaceState): Promise<void> {
+async function restorePlaybackState(state: ProjectWorkspaceState): Promise<void> {
   if (!player.hasFile) return;
   const time = Math.max(0, Math.min(state.timeMs, displayDurationMs.value));
   if (Math.abs(time - player.timeMs) > 20) {
@@ -3282,6 +3648,9 @@ async function startDetection(): Promise<void> {
     return;
   }
   detectionJobId.value = started.jobId;
+  const owner = projectSessions.get(activeProject.value.id);
+  if (owner) owner.detectionJobId = started.jobId;
+  void refreshProjectTasks();
   stagedDetection.value = { kind: 'boundary-running', jobId: started.jobId };
   if (detectionCancelRequested.value) {
     detectionCancelRequested.value = false;
@@ -3296,7 +3665,9 @@ async function startDetection(): Promise<void> {
   }
   detectionPollTimer = setInterval(async () => {
     if (!detectionJobId.value) return;
-    const result = await window.api.detect.getJob({ jobId: detectionJobId.value });
+    const id = detectionJobId.value;
+    const result = await window.api.detect.getJob({ jobId: id });
+    if (!ownsActiveDetection(id)) return;
     if (!result.ok) {
       detectionError.value = result.error.message;
       detecting.value = false;
@@ -3414,6 +3785,7 @@ async function applyDetection(shotIds: string[], sceneIds: string[]): Promise<vo
 /** S41：标签识别（用户主动启动；Qwen 只分析已落库镜头，结果仅生成预览）。 */
 async function startLabelDetection(): Promise<void> {
   if (!activeProject.value || detecting.value) return;
+  const projectId = activeProject.value.id;
   if (shots.value.length === 0) {
     showToast('请先完成镜头切分，再运行标签识别。');
     return;
@@ -3437,6 +3809,7 @@ async function startLabelDetection(): Promise<void> {
       return;
     }
   }
+  if (activeProject.value?.id !== projectId || projectTransition.value) return;
   stopDetectionPolling();
   detectionJobId.value = null;
   detecting.value = true;
@@ -3464,10 +3837,15 @@ async function startLabelDetection(): Promise<void> {
     return;
   }
   detectionJobId.value = started.jobId;
+  const owner = projectSessions.get(projectId);
+  if (owner) owner.detectionJobId = started.jobId;
+  void refreshProjectTasks();
   stagedDetection.value = { kind: 'labels-running', jobId: started.jobId };
   detectionPollTimer = setInterval(async () => {
     if (!detectionJobId.value) return;
-    const result = await window.api.detect.getJob({ jobId: detectionJobId.value });
+    const id = detectionJobId.value;
+    const result = await window.api.detect.getJob({ jobId: id });
+    if (!ownsActiveDetection(id)) return;
     if (!result.ok) {
       detectionError.value = result.error.message;
       detecting.value = false;
@@ -3594,10 +3972,12 @@ async function openProjectWall(): Promise<void> {
   wallProjectScope.value = scope;
   wallSavedLayout.value = layout.data;
   const views = settings.value?.wallViewState;
-  const base = views?.[`media:${scope.mediaId}`] ?? views?.[scope.projectId] ?? null;
+  const base = projectSessions.get(project.id)?.wallViews[wallViewKey(scope.mediaId)]
+    ?? views?.[`media:${scope.mediaId}`] ?? views?.[scope.projectId] ?? null;
   wallViewState.value = base;
   wallOpen.value = true;
   wallPickerOpen.value = false;
+  scheduleWorkspaceSave();
   const notice = project.wallMigrationNotice;
   if (notice && !shownWallMigrationNotices.has(project.id)) {
     shownWallMigrationNotices.add(project.id);
@@ -3626,9 +4006,11 @@ async function openStillWall(): Promise<void> {
   wallBoardName.value = '静帧墙';
   await loadBoardNodes();
   if (activeProject.value?.id !== projectId) return;
-  const base = settings.value?.wallViewState?.[`stills:${projectId}`] ?? settings.value?.wallViewState?.[projectId] ?? null;
+  const base = projectSessions.get(projectId)?.wallViews['stills']
+    ?? settings.value?.wallViewState?.[`stills:${projectId}`] ?? settings.value?.wallViewState?.[projectId] ?? null;
   wallViewState.value = base;
   wallOpen.value = true;
+  scheduleWorkspaceSave();
 }
 
 async function pickIndependentBoard(boardId: string | null): Promise<void> {
@@ -4219,8 +4601,28 @@ async function toggleProjectedNodeTag(tag: Tag): Promise<void> {
   if (Object.keys(patch).length > 0) await window.api.wall.updateNode({ nodeId: shot.id, patch });
 }
 
+function currentWallKey(): string {
+  return stillWallProjectId.value ? 'stills' : wallViewKey(wallProjectScope.value?.mediaId);
+}
+
+const wallSession = computed(() => activeProject.value && (wallMode.value === 'project' || stillWallProjectId.value)
+  ? projectSessions.get(activeProject.value.id) : undefined);
+
 function onWallSelectionChange(ids: string[]): void {
   wallSelectedIds.value = ids;
+  if (wallSession.value) {
+    wallSession.value.wallSelection[currentWallKey()] = [...ids];
+    scheduleWorkspaceSave();
+  }
+}
+
+function onWallPresentationChange(id: string | null): void {
+  const session = wallSession.value;
+  if (!session) return;
+  const key = currentWallKey();
+  if (id) session.wallPresentation[key] = id;
+  else delete session.wallPresentation[key];
+  scheduleWorkspaceSave();
 }
 
 function onWallNodePanelChanged(): void {
@@ -4369,6 +4771,7 @@ async function saveNodeEdit(): Promise<void> {
 
 function closeWall(): void {
   wallOpen.value = false;
+  scheduleWorkspaceSave();
   // 批次7（用户确认 A）：独立分镜本关墙自动投影——主界面时间线/主播放直接显示节点
   if (
     wallMode.value === 'independent' &&
@@ -4392,14 +4795,24 @@ async function onWallLayoutChange(items: WallLayoutItem[]): Promise<void> {
   if (!result.ok) showToast(result.error.message, 'error', result.error.code);
 }
 
+function wallViewKey(mediaId: string | null | undefined): string {
+  return mediaId ? `media:${mediaId}` : 'storyboard';
+}
+
 function onWallViewStateChange(view: WallViewState): void {
   wallViewState.value = view;
   const mediaId = wallMode.value === 'project' ? wallProjectScope.value?.mediaId : null;
+  const projectId = activeProject.value?.id;
+  const session = projectId ? projectSessions.get(projectId) : undefined;
+  if (session && !projectTransition.value && (wallMode.value === 'project' || stillWallProjectId.value === projectId)) {
+    session.wallViews[stillWallProjectId.value ? 'stills' : wallViewKey(mediaId)] = { ...view };
+  }
   const key = mediaId ? `media:${mediaId}` : stillWallProjectId.value
     ? `stills:${stillWallProjectId.value}`
     : activeProject.value?.id;
   if (!key) return;
   if (wallViewStateTimer) clearTimeout(wallViewStateTimer);
+  scheduleWorkspaceSave();
   wallViewStateTimer = setTimeout(() => void persistWallViewState(key, view), 400);
 }
 
@@ -4540,6 +4953,7 @@ function closeTopOverlay(): boolean {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
+  if (projectTransition.value || projectClosePrompt.value) return;
   // S36-1b：删除确认弹窗打开时，全部按键交给 ConfirmDialog（Esc 取消 / Enter 确认），
   // 避免空格播放、Delete 删除等全局快捷键与弹窗互相干扰。
   if (confirmState.open) return;
@@ -4765,6 +5179,12 @@ onMounted(async () => {
   }
   try {
     const projectResult = await api.project.list();
+    if (projectResult.ok) {
+      for (const [index, workspace] of (savedSession?.openProjects ?? []).entries()) {
+        const project = projectResult.data.find((item) => item.id === workspace.projectId);
+        if (project && index < 200) projectSessions.open(project).workspace = workspace;
+      }
+    }
     if (savedSession?.projectId) {
       const project = projectResult.ok
         ? projectResult.data.find((item) => item.id === savedSession?.projectId) ?? null
@@ -4774,9 +5194,13 @@ onMounted(async () => {
         rightCollapsed.value = savedSession.rightCollapsed;
         shotScrollTop.value = savedSession.shotScrollTop ?? 0;
         await loadProject(project, savedSession);
+      } else if (projectSessions.sessions[0]) {
+        await activateProjectTab(projectSessions.sessions[0].id);
       } else {
         await handleMissingSessionProject(savedSession.projectId);
       }
+    } else if (savedSession?.openProjects?.length === 0) {
+      await loadTerms();
     } else if (savedSession) {
       await handleMissingSessionProject(savedSession.projectId ?? null);
     } else if (projectResult.ok && projectResult.data.length > 0) {
@@ -4799,6 +5223,7 @@ onMounted(async () => {
       void syncTranscodeConcurrency();
     }),
     api.player.onTime((event) => {
+      if (projectTransition.value) return;
       player.timeMs = event.timeMs;
       previewTimeMs.value = event.timeMs;
       const active = shots.value.find(
@@ -4829,15 +5254,15 @@ onMounted(async () => {
       }
     }),
     api.detect.onProgress((event) => {
-      if (!detecting.value) return;
-      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      if (!detecting.value || !ownsActiveDetection(event.jobId)) return;
       detectionProgress.value = event;
     }),
     api.detect.onDone(async (event) => {
       if (!detecting.value) return;
       if (boundaryFlow.value || labelsFlow.value) return;
-      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      if (!ownsActiveDetection(event.jobId)) return;
       const snapshot = await window.api.detect.getJob({ jobId: event.jobId });
+      if (!ownsActiveDetection(event.jobId)) return;
       if (snapshot.ok) updateDetectionBoundaryState(snapshot.data);
       detectionResult.value = event.result;
       detectionProgress.value = {
@@ -4867,7 +5292,10 @@ onMounted(async () => {
     }),
     // S41：边界任务完成 → 已自动落库，刷新项目并提示
     api.detect.onBoundaryApplied(async (event) => {
-      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      if (!ownsActiveDetection(event.jobId)) {
+        rememberBackgroundDetection(event.jobId, { boundaryNotice: event.result });
+        return;
+      }
       stopDetectionPolling();
       detecting.value = false;
       boundaryFlow.value = false;
@@ -4878,7 +5306,8 @@ onMounted(async () => {
       boundaryNotice.value = event.result;
       void syncTranscodeConcurrency();
       const project = activeProject.value;
-      if (project) await loadProject(project);
+      if (project) await refreshProjectData(project.id);
+      if (!ownsActiveDetection(event.jobId)) return;
       if (event.result.applied === 0 && event.result.skippedProtected > 0) {
         showToast(
           `切分完成，但 ${event.result.skippedProtected} 个候选镜头与人工/锁定镜头重叠，未应用任何新镜头。`,
@@ -4895,7 +5324,10 @@ onMounted(async () => {
     }),
     // S41：标签识别完成 → 打开预览，不自动写库
     api.detect.onLabelsDone((event) => {
-      if (detectionJobId.value && event.jobId !== detectionJobId.value) return;
+      if (!ownsActiveDetection(event.jobId)) {
+        rememberBackgroundDetection(event.jobId, { labelPreview: event.result });
+        return;
+      }
       stopDetectionPolling();
       detecting.value = false;
       labelsFlow.value = false;
@@ -4933,6 +5365,8 @@ onMounted(async () => {
 
   await nextTick();
   restoringSession = false;
+  projectTaskTimer = setInterval(() => void refreshProjectTasks(), 750);
+  window.addEventListener('keydown', handleProjectTabShortcut, true);
   window.addEventListener('keydown', handleKeydown);
   document.addEventListener('keydown', onDocumentEscape, true);
   window.addEventListener('beforeunload', handleBeforeUnload);
@@ -4945,6 +5379,7 @@ function handleBeforeUnload(): void {
 onBeforeUnmount(() => {
   for (const unsubscribe of unsubscribers) unsubscribe();
   unsubscribers.length = 0;
+  window.removeEventListener('keydown', handleProjectTabShortcut, true);
   window.removeEventListener('keydown', handleKeydown);
   document.removeEventListener('keydown', onDocumentEscape, true);
   window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -4956,6 +5391,7 @@ onBeforeUnmount(() => {
   audioGeneration += 1;
   if (timelinePersistTimer) clearTimeout(timelinePersistTimer);
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  if (projectTaskTimer) clearInterval(projectTaskTimer);
   for (const timer of nodeTextTimers.values()) clearTimeout(timer);
   nodeTextTimers.clear();
   for (const timer of projectedPatchTimers.values()) clearTimeout(timer);
@@ -4965,7 +5401,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
-    <header class="topbar">
+    <header class="topbar" :inert="projectTransition">
       <button
         class="brand"
         ref="feedbackTrigger"
@@ -5128,7 +5564,16 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div class="workspace-stack">
+    <div class="workspace-stack" :inert="projectTransition">
+      <ProjectTabs
+        v-if="projectSessions.sessions.length > 1 && !demoMode"
+        :sessions="projectSessions.sessions"
+        :active-id="activeProject?.id ?? null"
+        :busy="projectTransition"
+        @select="selectProjectTab"
+        @close="closeProjectTab"
+        @toggle-tasks="toggleProjectTasks"
+      />
       <ProjectMediaTabs
         v-if="activeProject && !demoMode"
         :project="activeProject"
@@ -5235,9 +5680,11 @@ onBeforeUnmount(() => {
       :open="projectCenterOpen"
       :projects="projectCenterProjects"
       :current-project="activeProject"
+      :open-project-ids="projectSessions.sessions.map((session) => session.id)"
       :busy="projectCenterBusy"
       @close="projectCenterOpen = false"
       @open-project="openProjectFromCenter"
+      @close-project="closeProjectFromCenter"
       @create-empty="createEmptyProject"
       @import-new="importNewProjectFromCenter"
       @append-media="appendMediaToProject"
@@ -5269,6 +5716,21 @@ onBeforeUnmount(() => {
       </div>
     </footer>
 
+    <Teleport to="body">
+      <div v-if="projectClosePrompt" class="node-edit-mask" @pointerdown.self="resolveProjectClose('cancel')">
+        <div class="node-edit-card" role="alertdialog" aria-modal="true" aria-labelledby="project-close-title">
+          <h3 id="project-close-title">关闭「{{ projectClosePrompt.name }}」</h3>
+          <p v-if="projectClosePrompt.dirty">此项目有未保存的笔记。</p>
+          <p v-if="projectClosePrompt.taskCount">关闭会取消此项目的 {{ projectClosePrompt.taskCount }} 项任务。</p>
+          <div class="node-edit-actions">
+            <button type="button" ref="projectCloseCancel" @click="resolveProjectClose('cancel')">取消</button>
+            <button type="button" @click="resolveProjectClose('discard')">放弃</button>
+            <button type="button" class="primary" @click="resolveProjectClose('save')">保存并关闭</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <StoryboardWall
       v-if="wallOpen"
       :key="wallMode === 'independent' ? wallBoardId ?? 'board' : wallProjectScope?.mediaId ?? 'project-wall'"
@@ -5283,6 +5745,9 @@ onBeforeUnmount(() => {
       :board-id="wallBoardId"
       :composite-children="compositeChildrenShots"
       :focus-node-id="boardFocusNodeId"
+      :initial-selection="wallSession?.wallSelection[currentWallKey()]"
+      :initial-presentation="wallSession?.wallPresentation[currentWallKey()]"
+      @presentation-change="onWallPresentationChange"
       @close="closeWall"
       @seek="onWallSeek"
       @layout-change="onWallLayoutChange"
@@ -5299,6 +5764,16 @@ onBeforeUnmount(() => {
       @delete-selection="deleteBoardNodes"
       @project="toggleProjection"
     >
+      <template v-if="projectSessions.sessions.length > 1" #projects>
+        <ProjectTabs
+          :sessions="projectSessions.sessions"
+          :active-id="activeProject?.id ?? null"
+          :busy="projectTransition"
+          @select="selectProjectTab"
+          @close="closeProjectTab"
+          @toggle-tasks="toggleProjectTasks"
+        />
+      </template>
       <div v-if="wallMode === 'independent'" class="board-badge">
         {{ stillWallProjectId ? wallBoardName : `${wallBoardName}（独立分镜本）` }}
       </div>

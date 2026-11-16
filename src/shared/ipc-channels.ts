@@ -35,6 +35,7 @@ export const IPC = {
 
   /** player 域（I 方向） */
   PLAYER_OPEN: 'player:open',
+  PLAYER_PICK_MEDIA: 'player:pickMedia',
   PLAYER_OPEN_DIALOG: 'player:openDialog',
   PLAYER_CLOSE: 'player:close',
   PLAYER_PLAY: 'player:play',
@@ -49,6 +50,7 @@ export const IPC = {
   PLAYER_SET_SPEED: 'player:setSpeed',
   PLAYER_SET_BOUNDS: 'player:setBounds',
   PLAYER_SET_LAYER: 'player:setLayer',
+  PLAYER_SET_PROJECT_TRANSITION: 'player:setProjectTransition',
 
   /** player 域（E 方向，主进程 → 渲染层） */
   PLAYER_EVENT_STATE: 'player:event:state',
@@ -62,6 +64,9 @@ export const IPC = {
   MEDIA_EXTRACT_FRAMES: 'media:extractFrames',
   MEDIA_TRANSCODE_PROXY: 'media:transcodeProxy',
   MEDIA_CANCEL_JOB: 'media:cancelJob',
+  PROJECT_TASK_LIST: 'project-task:list',
+  PROJECT_TASK_RELEASE: 'project-task:release',
+  PROJECT_TASK_PAUSE: 'project-task:pause',
   MEDIA_QUEUE_LIST: 'media:queueList',
   MEDIA_SET_TRANSCODE_CONCURRENCY: 'media:setTranscodeConcurrency',
   GPU_GET_STATUS: 'gpu:status',
