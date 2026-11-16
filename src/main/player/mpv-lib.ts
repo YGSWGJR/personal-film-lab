@@ -101,7 +101,7 @@ export function resolveMpvDllPath(): string {
 interface MpvBindings {
   create(): unknown;
   initialize(ctx: unknown): number;
-  terminateDestroy(ctx: unknown): void;
+  terminateDestroy(ctx: unknown): Promise<void>;
   setOptionString(ctx: unknown, name: string, value: string): number;
   setPropertyString(ctx: unknown, name: string, value: string): number;
   getProperty(ctx: unknown, name: string, format: number, data: Buffer): number;
@@ -136,11 +136,14 @@ export function getMpvLibrary(): MpvLibrary {
 
   const dllPath = resolveMpvDllPath();
   const lib = koffi.load(dllPath);
+  const terminateDestroy = lib.func('void mpv_terminate_destroy(void *ctx)');
 
   const fns: MpvBindings = {
     create: lib.func('void *mpv_create()'),
     initialize: lib.func('int mpv_initialize(void *ctx)'),
-    terminateDestroy: lib.func('void mpv_terminate_destroy(void *ctx)'),
+    terminateDestroy: (ctx) => new Promise<void>((done, fail) => {
+      terminateDestroy.async(ctx, (error: unknown) => error ? fail(error) : done());
+    }),
     setOptionString: lib.func('int mpv_set_option_string(void *ctx, const char *name, const char *value)'),
     setPropertyString: lib.func('int mpv_set_property_string(void *ctx, const char *name, const char *value)'),
     getProperty: lib.func('int mpv_get_property(void *ctx, const char *name, int format, void *data)'),

@@ -139,11 +139,16 @@ export class MpvClient {
     return this.loadedPath;
   }
 
-  async loadFile(filePath: string, timeoutMs = 15000): Promise<void> {
+  async loadFile(filePath: string, timeoutMs = 15000, startTimeMs = 0): Promise<void> {
     this.fileLoaded = false;
     this.loadedPath = null;
 
-    const rc = this.lib.fns.commandString(this.ctx, `loadfile "${escapeMpvPath(filePath)}"`);
+    const load = `loadfile "${escapeMpvPath(filePath)}"`;
+    const start = Number.isFinite(startTimeMs) && startTimeMs > 0
+      ? ` replace -1 start=${(startTimeMs / 1000).toFixed(3)}`
+      : '';
+    let rc = this.lib.fns.commandString(this.ctx, load + start);
+    if (rc < 0 && start) rc = this.lib.fns.commandString(this.ctx, load);
     if (rc < 0) {
       throw toPlayerError(rc, '加载文件失败');
     }
@@ -339,7 +344,7 @@ export class MpvClient {
     this.loadInfo = { width: 0, height: 0, fps: 0, durationMs: 0 };
   }
 
-  destroy(): void {
+  async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.pollTimer) {
@@ -353,7 +358,8 @@ export class MpvClient {
       this.loadWaiter = null;
     }
     try {
-      this.lib.fns.terminateDestroy(this.ctx);
+      // libmpv can wait for the Win32 window thread to process messages during shutdown.
+      await this.lib.fns.terminateDestroy(this.ctx);
     } catch {
       // 退出阶段的清理失败不应阻塞窗口关闭
     }
@@ -523,6 +529,7 @@ export class MpvClient {
   }
 
   private getNumber(name: string): number | null {
+    if (this.destroyed) return null;
     const buffer = Buffer.alloc(8);
     if (this.lib.fns.getProperty(this.ctx, name, MPV_FORMAT.DOUBLE, buffer) < 0) return null;
     const value = buffer.readDoubleLE(0);
@@ -530,12 +537,14 @@ export class MpvClient {
   }
 
   private getInt(name: string): number | null {
+    if (this.destroyed) return null;
     const buffer = Buffer.alloc(8);
     if (this.lib.fns.getProperty(this.ctx, name, MPV_FORMAT.INT64, buffer) < 0) return null;
     return Number(buffer.readBigInt64LE(0));
   }
 
   private getFlag(name: string): boolean | null {
+    if (this.destroyed) return null;
     const buffer = Buffer.alloc(4);
     if (this.lib.fns.getProperty(this.ctx, name, MPV_FORMAT.FLAG, buffer) < 0) return null;
     return buffer.readInt32LE(0) !== 0;

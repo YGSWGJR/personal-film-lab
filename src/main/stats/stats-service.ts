@@ -39,14 +39,14 @@ export class StatsError extends Error {
 export class StatsService {
   constructor(private readonly data: DataLayer) {}
 
-  tagDistribution(projectId: string): StatsTagDistributionItem[] {
-    this.assertProject(projectId);
+  tagDistribution(projectId: string, mediaId?: string): StatsTagDistributionItem[] {
+    this.assertScope(projectId, mediaId);
     const rows = this.data.db
       .prepare(
         `SELECT t.category, t.name, COUNT(DISTINCT s.id) AS count
          FROM tags t
          LEFT JOIN shot_tags st ON st.tag_id = t.id
-         LEFT JOIN shots s ON s.id = st.shot_id AND s.project_id = ?
+         LEFT JOIN shots s ON s.id = st.shot_id AND s.project_id = ? AND (? IS NULL OR s.media_id = ?)
          WHERE t.category IN ('景别', '机位', '运镜')
          GROUP BY t.id, t.category, t.name, t.sort_order
          ORDER BY CASE t.category
@@ -56,7 +56,7 @@ export class StatsService {
            ELSE 4
          END, t.sort_order ASC, t.name ASC`,
       )
-      .all(projectId) as TagDistributionRow[];
+      .all(projectId, mediaId ?? null, mediaId ?? null) as TagDistributionRow[];
     return rows.map((row) => ({
       category: row.category,
       name: row.name,
@@ -64,16 +64,16 @@ export class StatsService {
     }));
   }
 
-  rhythm(projectId: string): StatsRhythmPoint[] {
-    this.assertProject(projectId);
+  rhythm(projectId: string, mediaId?: string): StatsRhythmPoint[] {
+    this.assertScope(projectId, mediaId);
     const rows = this.data.db
       .prepare(
         `SELECT id, shot_index, start_ms, end_ms
          FROM shots
-         WHERE project_id = ?
+         WHERE project_id = ? AND (? IS NULL OR media_id = ?)
          ORDER BY start_ms ASC, shot_index ASC`,
       )
-      .all(projectId) as RhythmRow[];
+      .all(projectId, mediaId ?? null, mediaId ?? null) as RhythmRow[];
     return rows.map((row) => {
       const durationMs = Math.max(0, row.end_ms - row.start_ms);
       return {
@@ -86,8 +86,8 @@ export class StatsService {
     });
   }
 
-  progress(projectId: string): StatsProgress {
-    this.assertProject(projectId);
+  progress(projectId: string, mediaId?: string): StatsProgress {
+    this.assertScope(projectId, mediaId);
     const row = this.data.db
       .prepare(
         `SELECT
@@ -100,9 +100,9 @@ export class StatsService {
              THEN 1 ELSE 0 END
            ), 0) AS annotated
          FROM shots s
-         WHERE s.project_id = ?`,
+         WHERE s.project_id = ? AND (? IS NULL OR s.media_id = ?)`,
       )
-      .get(projectId) as ProgressRow;
+      .get(projectId, mediaId ?? null, mediaId ?? null) as ProgressRow;
     const totalShots = Number(row?.total ?? 0);
     const annotatedShots = Number(row?.annotated ?? 0);
     return {
@@ -112,9 +112,10 @@ export class StatsService {
     };
   }
 
-  private assertProject(projectId: string): void {
+  private assertScope(projectId: string, mediaId?: string): void {
     if (!this.data.projects.exists(projectId)) {
       throw new DataError('PROJECT_NOT_FOUND', `项目不存在：${projectId}`, { projectId });
     }
+    if (mediaId) this.data.projectMedia.get(projectId, mediaId);
   }
 }

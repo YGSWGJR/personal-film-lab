@@ -23,6 +23,7 @@ export interface TimelineMarker {
 export interface BoundaryChange {
   index: number;
   timeMs: number;
+  beforeMs?: number;
 }
 
 export interface DetailTerm extends Term {

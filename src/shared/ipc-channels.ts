@@ -139,6 +139,7 @@ export const IPC = {
   PROJECT_ADD_MEDIA: 'project:addMedia',
   PROJECT_UPDATE_MEDIA: 'project:updateMedia',
   PROJECT_ACTIVATE_MEDIA: 'project:activateMedia',
+  PROJECT_REMOVE_MEDIA: 'project:removeMedia',
   PROJECT_DELETE: 'project:delete',
   PROJECT_OPEN: 'project:open',
   PROJECT_SAVE: 'project:save',

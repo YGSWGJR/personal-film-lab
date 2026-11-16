@@ -428,10 +428,12 @@ export class ShotRepository {
          FROM shot_edges e
          JOIN shots fs ON fs.id = e.from_shot
          JOIN shots ts ON ts.id = e.to_shot
-         WHERE e.project_id = ?
+         WHERE e.project_id = ? AND fs.media_id = ? AND ts.media_id = ?
            AND ((fs.media_id = ? AND fs.project_id = ? AND fs.locked = 0 AND fs.origin = 'auto')
              OR (ts.media_id = ? AND ts.project_id = ? AND ts.locked = 0 AND ts.origin = 'auto'))`,
         projectId,
+        mediaId,
+        mediaId,
         mediaId,
         projectId,
         mediaId,
@@ -543,7 +545,7 @@ export class ShotRepository {
         preserved.notes += 1;
       }
       const insertEdge = this.db.prepare(
-        'INSERT OR IGNORE INTO shot_edges (project_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+        'INSERT OR IGNORE INTO shot_edges (project_id, media_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       );
       for (const edge of edgesToKeep) {
         const from = anchorToShot(edge.fromAnchor);
@@ -552,11 +554,11 @@ export class ShotRepository {
           preserved.droppedEdges += 1;
           continue;
         }
-        insertEdge.run(projectId, from, to, edge.kind, edge.created_at);
+        insertEdge.run(projectId, mediaId, from, to, edge.kind, edge.created_at);
         preserved.edges += 1;
       }
       const insertAnnotation = this.db.prepare(
-        'INSERT INTO shot_annotations (id, project_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO shot_annotations (id, project_id, media_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       );
       for (const item of annotationsToKeep) {
         const host = anchorToShot(item.anchor);
@@ -564,6 +566,7 @@ export class ShotRepository {
         insertAnnotation.run(
           randomUUID(),
           projectId,
+          mediaId,
           host,
           item.type,
           item.color,
@@ -573,12 +576,12 @@ export class ShotRepository {
         preserved.annotations += 1;
       }
       const putLayout = this.db.prepare(
-        'INSERT OR REPLACE INTO shot_layout (project_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?)',
+        'INSERT OR REPLACE INTO shot_layout (project_id, media_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
       );
       for (const item of layoutsToKeep) {
         const host = anchorToShot(item.anchor);
         if (!host) continue;
-        putLayout.run(projectId, host, item.x, item.y, item.updated_at);
+        putLayout.run(projectId, mediaId, host, item.x, item.y, item.updated_at);
         preserved.layouts += 1;
       }
       const putGroupMember = this.db.prepare(

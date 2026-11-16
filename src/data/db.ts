@@ -79,7 +79,8 @@ export class DataLayer {
     const latest = MIGRATIONS.at(-1)?.version ?? current;
     if (current > 0 && current < latest) {
       try {
-        this.db.pragma('wal_checkpoint(FULL)');
+        const [checkpoint] = this.db.pragma('wal_checkpoint(FULL)') as Array<{ busy: number }>;
+        if (checkpoint?.busy) throw new Error('数据库仍有未写入主文件的记录');
         const backupDir = join(this.dataRoot, 'backups');
         mkdirSync(backupDir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/gu, '-');

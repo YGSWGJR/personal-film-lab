@@ -360,6 +360,7 @@ const INVOKE_WHITELIST: Record<string, ZodType> = {
   [IPC.PROJECT_ADD_MEDIA]: projectMediaAddArgsSchema,
   [IPC.PROJECT_UPDATE_MEDIA]: projectMediaUpdateArgsSchema,
   [IPC.PROJECT_ACTIVATE_MEDIA]: projectMediaActivateArgsSchema,
+  [IPC.PROJECT_REMOVE_MEDIA]: projectMediaActivateArgsSchema,
   [IPC.PROJECT_DELETE]: idArgsSchema,
   [IPC.PROJECT_SAVE]: projectSaveArgsSchema,
   [IPC.PROJECT_SAVE_AS]: projectSaveAsArgsSchema,
@@ -631,6 +632,8 @@ const projectApi = {
     invoke<ProjectMediaItem>(IPC.PROJECT_UPDATE_MEDIA, [args]),
   activateMedia: (args: ProjectMediaActivateArgs) =>
     invoke<Project>(IPC.PROJECT_ACTIVATE_MEDIA, [args]),
+  removeMedia: (args: ProjectMediaActivateArgs) =>
+    invoke<Project>(IPC.PROJECT_REMOVE_MEDIA, [args]),
   delete: (args: { id: string }) => invoke<{ deleted: true }>(IPC.PROJECT_DELETE, [args]),
   save: (args: ProjectSaveArgs) => invoke<ProjectSaveArgs extends never ? never : { path: string; sizeBytes: number; projectId: string }>(IPC.PROJECT_SAVE, [args]),
   saveAs: (args: { id: string; targetPath: string }) =>
@@ -707,11 +710,11 @@ const exportApi = {
 };
 
 const statsApi = {
-  tagDistribution: (args: { projectId: string }) =>
+  tagDistribution: (args: { projectId: string; mediaId?: string }) =>
     invoke<StatsTagDistributionItem[]>(IPC.STATS_TAG_DISTRIBUTION, [args]),
-  rhythm: (args: { projectId: string }) =>
+  rhythm: (args: { projectId: string; mediaId?: string }) =>
     invoke<StatsRhythmPoint[]>(IPC.STATS_RHYTHM, [args]),
-  progress: (args: { projectId: string }) =>
+  progress: (args: { projectId: string; mediaId?: string }) =>
     invoke<StatsProgress>(IPC.STATS_PROGRESS, [args]),
 };
 

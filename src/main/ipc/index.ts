@@ -370,7 +370,7 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // ---------- player ----------
   ipcMain.handle(
     IPC.PLAYER_OPEN,
-    withEnvelope((args: { mediaPath?: string; projectId?: string }): Promise<MediaInfo> =>
+    withEnvelope((args: { mediaPath?: string; projectId?: string; startTimeMs?: number }): Promise<MediaInfo> =>
       requirePlayer().open(args),
     ),
   );
@@ -531,60 +531,60 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // S43：分镜墙画布一期
   ipcMain.handle(
     IPC.WALL_GET_LAYOUT,
-    withEnvelope((args: WallGetLayoutArgs): WallLayoutItem[] => requireData().wall.getLayout(args.projectId)),
+    withEnvelope((args: WallGetLayoutArgs): WallLayoutItem[] => requireData().wall.getLayout(args.projectId, args.mediaId)),
   );
   ipcMain.handle(
     IPC.WALL_SAVE_LAYOUT,
-    withEnvelope((args: WallSaveLayoutArgs): void => requireData().wall.saveLayout(args.projectId, args.items)),
+    withEnvelope((args: WallSaveLayoutArgs): void => requireData().wall.saveLayout(args.projectId, args.items, args.mediaId)),
   );
   ipcMain.handle(
     IPC.WALL_LIST_EDGES,
-    withEnvelope((args: WallEdgeListArgs) => requireData().wall.listEdges(args.projectId)),
+    withEnvelope((args: WallEdgeListArgs) => requireData().wall.listEdges(args.projectId, args.mediaId)),
   );
   ipcMain.handle(
     IPC.WALL_ADD_EDGE,
     withEnvelope((args: WallEdgeAddArgs) =>
-      requireData().wall.addEdge(args.projectId, args.fromShotId, args.toShotId, args.kind),
+      requireData().wall.addEdge(args.projectId, args.fromShotId, args.toShotId, args.kind, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.WALL_REMOVE_EDGE,
     withEnvelope((args: WallEdgeRemoveArgs): void =>
-      requireData().wall.removeEdge(args.projectId, args.fromShotId, args.toShotId),
+      requireData().wall.removeEdge(args.projectId, args.fromShotId, args.toShotId, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.WALL_LIST_GROUPS,
-    withEnvelope((args: WallEdgeListArgs) => requireData().wall.listGroups(args.projectId)),
+    withEnvelope((args: WallEdgeListArgs) => requireData().wall.listGroups(args.projectId, args.mediaId)),
   );
   ipcMain.handle(
     IPC.WALL_CREATE_GROUP,
     withEnvelope((args: WallGroupCreateArgs) =>
-      requireData().wall.createGroup(args.projectId, args.name, args.shotIds),
+      requireData().wall.createGroup(args.projectId, args.name, args.shotIds, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.WALL_DISSOLVE_GROUP,
     withEnvelope((args: WallGroupDissolveArgs): void =>
-      requireData().wall.dissolveGroup(args.projectId, args.groupId),
+      requireData().wall.dissolveGroup(args.projectId, args.groupId, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.WALL_LIST_ANNOTATIONS,
     withEnvelope((args: WallAnnotationListArgs) =>
-      requireData().wall.listAnnotations(args.projectId, args.shotIds),
+      requireData().wall.listAnnotations(args.projectId, args.shotIds, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.WALL_SAVE_ANNOTATIONS,
     withEnvelope((args: WallAnnotationSaveArgs): void =>
-      requireData().wall.saveAnnotations(args.projectId, args.shotId, args.items),
+      requireData().wall.saveAnnotations(args.projectId, args.shotId, args.items, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.WALL_EXPORT_IMAGES,
     withEnvelope((args: WallExportArgs) =>
-      requireData().wall.exportImages(args.projectId, requireData().dataRoot),
+      requireData().wall.exportImages(args.projectId, requireData().dataRoot, args.mediaId),
     ),
   );
   // ---------- S44 独立分镜本 ----------
@@ -899,9 +899,10 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.PROJECT_ADD_MEDIA,
-    withEnvelope((args: ProjectMediaAddArgs): ProjectMediaItem =>
-      requireData().projects.addMedia(args),
-    ),
+    withEnvelope((args: ProjectMediaAddArgs): ProjectMediaItem => {
+      if (args.activate !== false) requireDetect().assertNoRunningJob(args.projectId);
+      return requireData().projects.addMedia(args);
+    }),
   );
   ipcMain.handle(
     IPC.PROJECT_UPDATE_MEDIA,
@@ -911,9 +912,19 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   );
   ipcMain.handle(
     IPC.PROJECT_ACTIVATE_MEDIA,
-    withEnvelope((args: ProjectMediaActivateArgs): Project =>
-      requireData().projects.activateMedia(args),
-    ),
+    withEnvelope((args: ProjectMediaActivateArgs): Project => {
+      requireDetect().assertNoRunningJob(args.projectId);
+      return requireData().projects.activateMedia(args);
+    }),
+  );
+  ipcMain.handle(
+    IPC.PROJECT_REMOVE_MEDIA,
+    withEnvelope((args: ProjectMediaActivateArgs): Project => {
+      requireDetect().assertNoRunningJob(args.projectId);
+      const data = requireData();
+      data.projectMedia.remove(args.projectId, args.mediaId);
+      return data.projects.get(args.projectId);
+    }),
   );
   ipcMain.handle(
     IPC.PROJECT_DELETE,
@@ -1178,20 +1189,20 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   // ---------- stats ----------
   ipcMain.handle(
     IPC.STATS_TAG_DISTRIBUTION,
-    withEnvelope((args: { projectId: string }): StatsTagDistributionItem[] =>
-      requireStats().tagDistribution(args.projectId),
+    withEnvelope((args: { projectId: string; mediaId?: string }): StatsTagDistributionItem[] =>
+      requireStats().tagDistribution(args.projectId, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.STATS_RHYTHM,
-    withEnvelope((args: { projectId: string }): StatsRhythmPoint[] =>
-      requireStats().rhythm(args.projectId),
+    withEnvelope((args: { projectId: string; mediaId?: string }): StatsRhythmPoint[] =>
+      requireStats().rhythm(args.projectId, args.mediaId),
     ),
   );
   ipcMain.handle(
     IPC.STATS_PROGRESS,
-    withEnvelope((args: { projectId: string }): StatsProgress =>
-      requireStats().progress(args.projectId),
+    withEnvelope((args: { projectId: string; mediaId?: string }): StatsProgress =>
+      requireStats().progress(args.projectId, args.mediaId),
     ),
   );
 }

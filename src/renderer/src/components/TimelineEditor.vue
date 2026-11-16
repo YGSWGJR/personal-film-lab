@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import type { BoundaryChange, TimelineMarker, WorkspaceShot } from '../types/workspace';
-import type { AudioWaveform } from '../../../shared/types';
+import type { AudioWaveform, TimelineViewState } from '../../../shared/types';
 import { PX_PER_SEC_LEVELS, TRACK_HEIGHT_LEVELS, snapToLevel } from '../../../shared/types';
 import { formatTimecodeFF } from '../../../shared/time';
 
@@ -30,6 +30,8 @@ const props = defineProps<{
   /** S45 投影模式：按连线链分组的轨道（每链一行，轨数无限） */
   boardTracks?: Array<Array<{ id: string; title: string; durationMs: number; thumbnail?: string | null }>> | null;
   projectionMode?: boolean;
+  initialView?: TimelineViewState | null;
+  restoring?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -47,17 +49,21 @@ const emit = defineEmits<{
   updateTrackHeight: [value: number];
   updatePxPerSecond: [value: number];
   deleteBackspace: [];
+  viewChange: [view: TimelineViewState];
 }>();
 
 const timelineViewportEl = ref<HTMLElement | null>(null);
+const tracksEl = ref<HTMLElement | null>(null);
+const scrollTop = ref(props.initialView?.scrollTop ?? 0);
 const audioCanvasEl = ref<HTMLCanvasElement | null>(null);
 const viewStartMs = ref(0);
 const trackWidthPx = ref(0);
-const v2Visible = ref(true);
-const v1Visible = ref(true);
-const v1Locked = ref(false);
-const audioMuted = ref(false);
-const audioSolo = ref(false);
+const v2Visible = ref(props.initialView?.v2Visible ?? true);
+const v1Visible = ref(props.initialView?.v1Visible ?? true);
+const v1Locked = ref(props.initialView?.v1Locked ?? false);
+const audioMuted = ref(props.initialView?.audioMuted ?? false);
+const audioSolo = ref(props.initialView?.audioSolo ?? false);
+let initialBoundaryTime = 0;
 const draggingBoundary = ref<number | null>(null);
 let activeBoundary: number | null = null;
 let latestBoundaryTime = 0;
@@ -626,6 +632,7 @@ function beginBoundaryDrag(index: number, event: PointerEvent): void {
   activeBoundary = index;
   draggingBoundary.value = index;
   latestBoundaryTime = shot.endMs;
+  initialBoundaryTime = shot.endMs;
   boundaryMinTime = shot.startMs + 350;
   boundaryMaxTime = next.endMs - 350;
   window.addEventListener('pointermove', handleBoundaryMove);
@@ -646,7 +653,7 @@ function handleBoundaryMove(event: PointerEvent): void {
 function finishBoundaryDrag(): void {
   window.removeEventListener('pointermove', handleBoundaryMove);
   if (activeBoundary !== null) {
-    emit('boundaryCommit', { index: activeBoundary, timeMs: latestBoundaryTime });
+    emit('boundaryCommit', { index: activeBoundary, timeMs: latestBoundaryTime, beforeMs: initialBoundaryTime });
   }
   activeBoundary = null;
   draggingBoundary.value = null;
@@ -738,7 +745,7 @@ watch(
 watch(
   () => props.currentTimeMs,
   (timeMs) => {
-    if (draggingBoundary.value !== null) return;
+    if (props.restoring || draggingBoundary.value !== null) return;
     const end = viewStartMs.value + visibleDurationMs.value;
     if (timeMs >= viewStartMs.value && timeMs <= end) return;
     viewStartMs.value = clampViewStart(timeMs - visibleDurationMs.value * 0.12);
@@ -750,12 +757,26 @@ function measureTrackWidth(): void {
   trackWidthPx.value = rect && rect.width > 0 ? rect.width : 0;
 }
 
+watch([viewStartMs, scrollTop, v2Visible, v1Visible, v1Locked, audioMuted, audioSolo], () => {
+  if (props.restoring) return;
+  emit('viewChange', {
+    viewStartMs: viewStartMs.value,
+    scrollTop: scrollTop.value,
+    v2Visible: v2Visible.value,
+    v1Visible: v1Visible.value,
+    v1Locked: v1Locked.value,
+    audioMuted: audioMuted.value,
+    audioSolo: audioSolo.value,
+  });
+});
+
 onMounted(async () => {
   await nextTick();
   document.addEventListener('pointerdown', onDocumentPointerDown);
   window.addEventListener('keydown', onDeleteBackspace, true);
   measureTrackWidth();
-  viewStartMs.value = clampViewStart(props.currentTimeMs - visibleDurationMs.value * 0.12);
+  viewStartMs.value = clampViewStart(props.initialView?.viewStartMs ?? (props.currentTimeMs - visibleDurationMs.value * 0.12));
+  if (tracksEl.value) tracksEl.value.scrollTop = scrollTop.value;
   resizeObserver = new ResizeObserver(() => {
     measureTrackWidth();
     scheduleDraw();
@@ -919,9 +940,11 @@ onBeforeUnmount(() => {
     </div>
 
     <div
+      ref="tracksEl"
       class="tracks"
       :style="timelineGridStyle"
       @wheel="onTracksWheel"
+      @scroll.passive="scrollTop = ($event.target as HTMLElement).scrollTop"
       @pointerdown.capture="zoomOpen = false"
     >
       <div class="track-row track-row-v2" :class="{ 'track-hidden': !v2Visible }">

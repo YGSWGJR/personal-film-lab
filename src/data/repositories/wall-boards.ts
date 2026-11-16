@@ -9,6 +9,7 @@ export interface WallBoardNode {
   id: string;
   source: 'image' | 'text' | 'composite';
   assetPath: string | null;
+  stillMediaId?: string | null;
   parentId: string | null;
   title: string;
   textContent: string;
@@ -84,7 +85,11 @@ export class WallBoardsRepository {
   listNodes(boardId: string): WallBoardNode[] {
     this.assertBoard(boardId);
     const rows = this.db
-      .prepare('SELECT * FROM wall_nodes WHERE board_id = ? ORDER BY created_at ASC')
+      .prepare(`SELECT n.*, s.media_id AS still_media_id
+                FROM wall_nodes n
+                LEFT JOIN still_wall_nodes link ON link.node_id = n.id
+                LEFT JOIN stills s ON s.id = link.still_id
+                WHERE n.board_id = ? ORDER BY n.created_at ASC`)
       .all(boardId) as Array<Record<string, unknown>>;
     return rows.map(mapNode);
   }
@@ -416,7 +421,7 @@ export class WallBoardsRepository {
     const boardId = this.stillBoardId(projectId);
     if (!boardId) return { added: false, boardId: null };
     const still = this.layer.stills.get(stillId);
-    if (still.role !== 'main') return { added: false, boardId };
+    if (still.projectId !== projectId || still.role !== 'main') return { added: false, boardId };
     if (this.isStillMapped(projectId, stillId)) return { added: false, boardId };
     const added = this.attachStill(projectId, boardId, still, this.stillNodeCount(boardId));
     return { added, boardId };
@@ -433,6 +438,35 @@ export class WallBoardsRepository {
       .prepare('DELETE FROM still_wall_nodes WHERE project_id = ? AND still_id = ?')
       .run(projectId, stillId);
     return { removed: true, boardId };
+  }
+
+  detachMediaStills(projectId: string, mediaId: string): { boardId: string; assets: string[] } | null {
+    const boardId = this.stillBoardId(projectId);
+    if (!boardId) return null;
+    const nodes = this.db.prepare(
+      `SELECT n.id, n.asset_path FROM still_wall_nodes link
+       JOIN stills s ON s.id = link.still_id
+       JOIN wall_nodes n ON n.id = link.node_id
+       WHERE link.project_id = ? AND s.project_id = ? AND s.media_id = ? AND n.board_id = ?`,
+    ).all(projectId, projectId, mediaId, boardId) as Array<{ id: string; asset_path: string | null }>;
+    for (const node of nodes) this.deleteNode(node.id);
+    return { boardId, assets: nodes.flatMap((node) => node.asset_path ? [node.asset_path] : []) };
+  }
+
+  cleanDetachedMediaAssets(boardId: string, assets: string[]): void {
+    const root = `boards/${boardId}/`;
+    for (const asset of assets) {
+      if (!asset.startsWith(root)) continue;
+      const name = asset.slice(root.length);
+      if (!/^[0-9a-f-]{36}\.png$/iu.test(name)) continue;
+      try {
+        unlinkSync(join(this.layer.dataRoot, 'projects', 'boards', boardId, name));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn('[still-wall] 无法清理下墙静帧副本', error);
+        }
+      }
+    }
   }
 
   private stillBoardId(projectId: string): string | null {
@@ -519,10 +553,7 @@ export class WallBoardsRepository {
 
   /** 全量对账：新静帧上墙、已删静帧下墙 */
   private syncStillWall(projectId: string, boardId: string): { added: number; removed: number; total: number } {
-    const stills = this.layer.stills
-      .list({ projectId })
-      .filter((s) => s.role === 'main')
-      .sort((a, b) => a.timeMs - b.timeMs);
+    const stills = this.layer.stills.listMainForProject(projectId);
     const maps = this.db
       .prepare('SELECT still_id, node_id FROM still_wall_nodes WHERE project_id = ?')
       .all(projectId) as Array<{ still_id: string; node_id: string }>;
@@ -571,6 +602,7 @@ function mapNode(row: Record<string, unknown>): WallBoardNode {
   const source = row.source === 'text' ? 'text' : row.source === 'composite' ? 'composite' : 'image';
   return {
     id: String(row.id),
+    stillMediaId: typeof row.still_media_id === 'string' ? row.still_media_id : null,
     source,
     assetPath: (row.asset_path as string | null) ?? null,
     parentId: (row.parent_id as string | null) ?? null,

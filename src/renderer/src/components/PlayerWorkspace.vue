@@ -8,6 +8,7 @@ import type {
   OverlayLayer,
   PlayerState,
   RenderBounds,
+  TimelineViewState,
 } from '../../../shared/types';
 import { PLAYBACK_SPEEDS } from '../../../shared/types';
 import { formatTimecodeFF, frameFromMs, parseTimecodeFF } from '../../../shared/time';
@@ -30,6 +31,9 @@ const props = withDefaults(defineProps<{
   trackHeight: number;
   pxPerSecond: number;
   inPointMs: number | null;
+  timelineKey: string;
+  timelineView: TimelineViewState | null;
+  timelineRestoring: boolean;
   outPointMs: number | null;
   projectionImages?: string[];
 }>(), { projectionImages: () => [] });
@@ -54,6 +58,7 @@ const emit = defineEmits<{
   updateTrackHeight: [value: number];
   updatePxPerSecond: [value: number];
   deleteSelected: [];
+  timelineViewChange: [view: TimelineViewState];
 }>();
 
 const videoSlot = ref<HTMLElement | null>(null);
@@ -297,6 +302,9 @@ onBeforeUnmount(() => {
     </section>
 
     <TimelineEditor
+      :key="timelineKey"
+      :initial-view="timelineView"
+      :restoring="timelineRestoring"
       :shots="shots"
       :markers="markers"
       :selected-id="selectedShot?.id ?? null"
@@ -323,6 +331,7 @@ onBeforeUnmount(() => {
       @update-track-height="emit('updateTrackHeight', $event)"
       @update-px-per-second="emit('updatePxPerSecond', $event)"
       @delete-backspace="emit('deleteSelected')"
+      @view-change="emit('timelineViewChange', $event)"
     />
 
     <div v-show="controlsVisible" class="transport">

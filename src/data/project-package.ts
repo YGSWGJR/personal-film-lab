@@ -30,8 +30,8 @@ interface PackageManifest {
 }
 
 const PACKAGE_FORMAT = 'lapian-project';
-const PACKAGE_VERSION = 2;
-const SUPPORTED_PACKAGE_VERSIONS = new Set([1, PACKAGE_VERSION]);
+const PACKAGE_VERSION = 3;
+const SUPPORTED_PACKAGE_VERSIONS = new Set([1, 2, PACKAGE_VERSION]);
 const ASSET_DIRS = ['stills', 'frames', 'exports'];
 const MEDIA_DIRS = ['source', 'proxy'];
 
@@ -247,13 +247,31 @@ export class ProjectPackageService {
         const mediaIdMap = new Map<string, string>();
         for (const row of mediaRows) mediaIdMap.set(String(row.id), randomUUID());
         const groupIdMap = new Map<string, string>();
-        for (const row of groupRows) groupIdMap.set(String(row.id), randomUUID());
         const activeMediaSourceId = String(
           projectRow.active_media_id ?? mediaRows[0]?.id ?? '',
         );
         const fallbackMediaId = mediaIdMap.values().next().value;
         const activeMediaId =
           mediaIdMap.get(activeMediaSourceId) ?? fallbackMediaId ?? null;
+        const shotMedia = new Map(shotRows.map((row) => [
+          String(row.id), mediaIdMap.get(String(row.media_id)) ?? activeMediaId,
+        ]));
+        const groupMedia = new Map<string, Set<string>>();
+        for (const member of groupMemberRows) {
+          const mediaId = shotMedia.get(String(member.shot_id));
+          if (!mediaId) continue;
+          const groupId = String(member.group_id);
+          const media = groupMedia.get(groupId) ?? new Set<string>();
+          media.add(mediaId);
+          groupMedia.set(groupId, media);
+        }
+        const verifyWallMedia = (row: Record<string, unknown>, mediaId: string | null): void => {
+          if (manifest.version === PACKAGE_VERSION && (mediaIdMap.get(String(row.media_id)) ?? null) !== mediaId) {
+            throw new DataError('PACKAGE_INVALID', '项目包的分镜墙记录与镜头媒体归属不一致');
+          }
+        };
+        let crossMediaEdges = 0;
+        let crossMediaGroups = 0;
         const tagIdMap = new Map<string, string>();
         for (const row of tagRows) tagIdMap.set(String(row.id), this.resolveImportedTagId(row));
 
@@ -267,7 +285,7 @@ export class ProjectPackageService {
             );
           }
           for (const row of shotRows) {
-            const mediaId = mediaIdMap.get(String(row.media_id)) ?? activeMediaId;
+            const mediaId = shotMedia.get(String(row.id));
             if (!mediaId) {
               throw new DataError('PACKAGE_INVALID', '镜头缺少所属媒体');
             }
@@ -308,17 +326,31 @@ export class ProjectPackageService {
             );
           }
           for (const row of groupRows) {
-            this.insertGroup(row, projectId, groupIdMap.get(String(row.id))!);
+            const oldGroupId = String(row.id);
+            const media = groupMedia.get(oldGroupId) ?? new Set<string>();
+            if (media.size > 1) {
+              if (manifest.version === PACKAGE_VERSION) throw new DataError('PACKAGE_INVALID', '项目包含跨视频分组');
+              crossMediaGroups += 1;
+              continue;
+            }
+            const mediaId = media.values().next().value ?? mediaIdMap.get(String(row.media_id)) ?? activeMediaId;
+            verifyWallMedia(row, mediaId);
+            const groupId = randomUUID();
+            groupIdMap.set(oldGroupId, groupId);
+            this.insertGroup(row, projectId, groupId, mediaId);
           }
           for (const row of layoutRows) {
             const mappedShot = shotIdMap.get(String(row.shot_id));
             if (!mappedShot) continue;
+            const mediaId = shotMedia.get(String(row.shot_id)) ?? null;
+            verifyWallMedia(row, mediaId);
             this.layer.db
               .prepare(
-                'INSERT INTO shot_layout (project_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?)',
+                'INSERT INTO shot_layout (project_id, media_id, shot_id, x, y, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
               )
               .run(
                 projectId,
+                mediaId,
                 mappedShot,
                 Number(row.x) || 0,
                 Number(row.y) || 0,
@@ -329,12 +361,20 @@ export class ProjectPackageService {
             const from = shotIdMap.get(String(row.from_shot));
             const to = shotIdMap.get(String(row.to_shot));
             if (!from || !to) continue;
+            const mediaId = shotMedia.get(String(row.from_shot)) ?? null;
+            if (mediaId !== shotMedia.get(String(row.to_shot))) {
+              if (manifest.version === PACKAGE_VERSION) throw new DataError('PACKAGE_INVALID', '项目包含跨视频连线');
+              crossMediaEdges += 1;
+              continue;
+            }
+            verifyWallMedia(row, mediaId);
             this.layer.db
               .prepare(
-                'INSERT INTO shot_edges (project_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+                'INSERT INTO shot_edges (project_id, media_id, from_shot, to_shot, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)',
               )
               .run(
                 projectId,
+                mediaId,
                 from,
                 to,
                 String(row.kind ?? 'solid'),
@@ -354,15 +394,18 @@ export class ProjectPackageService {
           for (const row of annotationRows) {
             const shotId = shotIdMap.get(String(row.shot_id));
             if (!shotId) continue;
+            const mediaId = shotMedia.get(String(row.shot_id)) ?? null;
+            verifyWallMedia(row, mediaId);
             this.layer.db
               .prepare(
                 `INSERT INTO shot_annotations
-                  (id, project_id, shot_id, type, color, data_json, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                  (id, project_id, media_id, shot_id, type, color, data_json, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
               )
               .run(
                 randomUUID(),
                 projectId,
+                mediaId,
                 shotId,
                 String(row.type),
                 String(row.color),
@@ -374,6 +417,11 @@ export class ProjectPackageService {
             const shotId = shotIdMap.get(link.shot_id);
             const tagId = tagIdMap.get(link.tag_id);
             if (shotId && tagId) this.insertShotTag(shotId, tagId);
+          }
+          if (crossMediaEdges || crossMediaGroups) {
+            this.layer.db.prepare(
+              "INSERT INTO media_wall_migration_notices VALUES (?, ?, ?, 'package')",
+            ).run(projectId, crossMediaEdges, crossMediaGroups);
           }
         });
 
@@ -665,14 +713,16 @@ export class ProjectPackageService {
     row: Record<string, unknown>,
     projectId: string,
     id: string,
+    mediaId: string | null,
   ): void {
     this.layer.db
       .prepare(
-        'INSERT INTO shot_groups (id, project_id, name, created_at) VALUES (?, ?, ?, ?)',
+        'INSERT INTO shot_groups (id, project_id, media_id, name, created_at) VALUES (?, ?, ?, ?, ?)',
       )
       .run(
         id,
         projectId,
+        mediaId,
         String(row.name ?? '场景'),
         Number(row.created_at) || Date.now(),
       );

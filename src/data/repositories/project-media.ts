@@ -212,6 +212,34 @@ export class ProjectMediaRepository {
     return this.get(projectId, mediaId);
   }
 
+  remove(projectId: string, mediaId: string): void {
+    this.get(projectId, mediaId);
+    const detached = this.layer.transaction(() => {
+      const stillWall = this.layer.wallBoards.detachMediaStills(projectId, mediaId);
+      this.db.prepare('DELETE FROM stills WHERE project_id = ? AND media_id = ?').run(projectId, mediaId);
+      this.db.prepare('DELETE FROM scenes WHERE project_id = ? AND media_id = ?').run(projectId, mediaId);
+      this.db.prepare('DELETE FROM shots WHERE project_id = ? AND media_id = ?').run(projectId, mediaId);
+      this.db.prepare('DELETE FROM project_media WHERE project_id = ? AND id = ?').run(projectId, mediaId);
+      if (this.activeId(projectId) === mediaId) {
+        const next = this.active(projectId);
+        if (next) {
+          this.activateInTransaction(projectId, next.id);
+        } else {
+          this.db.prepare(
+            `UPDATE projects SET active_media_id = NULL, source_type = 'local', source_path = NULL,
+              source_url = NULL, source_platform = NULL, media_filename = NULL, media_container = NULL,
+              media_duration_ms = 0, media_width = NULL, media_height = NULL, media_fps = NULL,
+              media_video_codec = NULL, media_audio_codec = NULL, media_size_bytes = NULL,
+              proxy_path = NULL, detect_options_json = ? WHERE id = ?`,
+          ).run(JSON.stringify(defaultDetectOptions()), projectId);
+        }
+      }
+      this.layer.projects.touch(projectId);
+      return stillWall;
+    });
+    if (detached) this.layer.wallBoards.cleanDetachedMediaAssets(detached.boardId, detached.assets);
+  }
+
   activeId(projectId: string): string | null {
     const row = this.db
       .prepare('SELECT active_media_id FROM projects WHERE id = ?')

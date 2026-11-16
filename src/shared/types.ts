@@ -18,6 +18,32 @@ export interface TimelineSettings {
   pxPerSecond: number;
 }
 
+export interface TimelineViewState {
+  viewStartMs: number;
+  scrollTop: number;
+  v2Visible: boolean;
+  v1Visible: boolean;
+  v1Locked: boolean;
+  audioMuted: boolean;
+  audioSolo: boolean;
+}
+
+export interface TimelineBoundaryEdit {
+  leftShotId: string;
+  rightShotId: string;
+  beforeMs: number;
+  afterMs: number;
+}
+
+export interface TimelineContext extends TimelineSettings {
+  view: TimelineViewState | null;
+  inPointMs: number | null;
+  outPointMs: number | null;
+  mergePartnerId: string | null;
+  undo: TimelineBoundaryEdit[];
+  redo: TimelineBoundaryEdit[];
+}
+
 export interface ShortcutSettings {
   split: string;
   merge: string;
@@ -390,6 +416,7 @@ export interface WorkspaceState {
       timeMs: number;
       selectedShotId: string | null;
       shotScrollTop?: number;
+      timeline?: TimelineContext;
       detectionState?: {
         detectionResult?: unknown;
         boundaryNotice?: unknown;
@@ -487,6 +514,7 @@ export interface PlayerErrorEvent {
 export interface PlayerOpenArgs {
   mediaPath?: string;
   projectId?: string;
+  startTimeMs?: number;
 }
 
 /** ---------- MediaService（S01 §5.2） ---------- */
@@ -801,6 +829,7 @@ export interface Project {
   media: ProjectMedia;
   activeMediaId: string | null;
   mediaItems: ProjectMediaItem[];
+  wallMigrationNotice?: { edges: number; groups: number; source: 'backup' | 'package' };
   detectOptions: DetectOptions;
   createdAt: string;
   updatedAt: string;
@@ -1084,12 +1113,14 @@ export interface WallLayoutItem {
   y: number;
 }
 
-export interface WallGetLayoutArgs {
+export interface ProjectWallScope {
   projectId: string;
+  mediaId: string | null;
 }
 
-export interface WallSaveLayoutArgs {
-  projectId: string;
+export type WallGetLayoutArgs = ProjectWallScope;
+
+export interface WallSaveLayoutArgs extends ProjectWallScope {
   items: WallLayoutItem[];
 }
 
@@ -1101,22 +1132,18 @@ export interface WallEdge {
   kind: WallEdgeKind;
 }
 
-export interface WallEdgeAddArgs {
-  projectId: string;
+export interface WallEdgeAddArgs extends ProjectWallScope {
   fromShotId: string;
   toShotId: string;
   kind: WallEdgeKind;
 }
 
-export interface WallEdgeRemoveArgs {
-  projectId: string;
+export interface WallEdgeRemoveArgs extends ProjectWallScope {
   fromShotId: string;
   toShotId: string;
 }
 
-export interface WallEdgeListArgs {
-  projectId: string;
-}
+export type WallEdgeListArgs = ProjectWallScope;
 
 export interface WallGroup {
   groupId: string;
@@ -1124,14 +1151,12 @@ export interface WallGroup {
   shotIds: string[];
 }
 
-export interface WallGroupCreateArgs {
-  projectId: string;
+export interface WallGroupCreateArgs extends ProjectWallScope {
   name: string;
   shotIds: string[];
 }
 
-export interface WallGroupDissolveArgs {
-  projectId: string;
+export interface WallGroupDissolveArgs extends ProjectWallScope {
   groupId: string;
 }
 
@@ -1160,20 +1185,16 @@ export interface WallAnnotation {
   };
 }
 
-export interface WallAnnotationListArgs {
-  projectId: string;
+export interface WallAnnotationListArgs extends ProjectWallScope {
   shotIds?: string[];
 }
 
-export interface WallAnnotationSaveArgs {
-  projectId: string;
+export interface WallAnnotationSaveArgs extends ProjectWallScope {
   shotId: string;
   items: Array<Omit<WallAnnotation, 'id'>>;
 }
 
-export interface WallExportArgs {
-  projectId: string;
-}
+export type WallExportArgs = ProjectWallScope;
 
 export interface WallExportResult {
   dir: string;
@@ -1187,6 +1208,7 @@ export interface WallBoardNodeInfo {
   id: string;
   source: WallBoardNodeSource;
   assetPath: string | null;
+  stillMediaId?: string | null;
   /** 批次9：所属复合节点（null=顶层节点） */
   parentId: string | null;
   /** 批次9：复合节点的子节点数（App 映射层填充） */
@@ -1750,6 +1772,7 @@ export interface ProjectApi {
   addMedia(args: ProjectMediaAddArgs): Promise<IpcResult<ProjectMediaItem>>;
   updateMedia(args: ProjectMediaUpdateArgs): Promise<IpcResult<ProjectMediaItem>>;
   activateMedia(args: ProjectMediaActivateArgs): Promise<IpcResult<Project>>;
+  removeMedia(args: ProjectMediaActivateArgs): Promise<IpcResult<Project>>;
   delete(args: { id: string }): Promise<IpcResult<{ deleted: true }>>;
   save(args: ProjectSaveArgs): Promise<IpcResult<ProjectSaveResult>>;
   saveAs(args: { id: string; targetPath: string }): Promise<IpcResult<ProjectSaveResult>>;
@@ -1838,10 +1861,12 @@ export interface ScopeApi {
 }
 
 export interface StatsApi {
-  tagDistribution(args: { projectId: string }): Promise<IpcResult<StatsTagDistributionItem[]>>;
-  rhythm(args: { projectId: string }): Promise<IpcResult<StatsRhythmPoint[]>>;
-  progress(args: { projectId: string }): Promise<IpcResult<StatsProgress>>;
+  tagDistribution(args: StatsProjectArgs): Promise<IpcResult<StatsTagDistributionItem[]>>;
+  rhythm(args: StatsProjectArgs): Promise<IpcResult<StatsRhythmPoint[]>>;
+  progress(args: StatsProjectArgs): Promise<IpcResult<StatsProgress>>;
 }
+
+export interface StatsProjectArgs { projectId: string; mediaId?: string }
 
 /** ---------- S42/Z04：硬件能力扫描 ---------- */
 

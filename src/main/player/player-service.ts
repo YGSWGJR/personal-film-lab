@@ -36,6 +36,7 @@ export class PlayerService {
   private layer: OverlayLayer = 'normal';
   private timeTimer: NodeJS.Timeout | null = null;
   private lastDecodeErrorAt = 0;
+  private destruction: Promise<void> | null = null;
   /** S42/Z02：串行化 overlay 状态迁移（hide/show/setZ/setBounds 不再交错） */
   private overlayQueue: Promise<void> = Promise.resolve();
 
@@ -67,7 +68,7 @@ export class PlayerService {
     win.on('hide', this.handleWindowHide);
     win.on('restore', this.handleWindowShow);
     win.on('show', this.handleWindowShow);
-    win.on('closed', () => this.destroy());
+    win.on('closed', () => { void this.destroy(); });
   }
 
   // ---------- 渲染区域 ----------
@@ -206,7 +207,7 @@ export class PlayerService {
 
   // ---------- 播放控制 ----------
 
-  async open(args: { mediaPath?: string; projectId?: string }): Promise<MediaInfo> {
+  async open(args: { mediaPath?: string; projectId?: string; startTimeMs?: number }): Promise<MediaInfo> {
     if (!args.mediaPath) {
       throw new PlayerError(
         'PROJECT_PLAYER_NOT_READY',
@@ -232,7 +233,7 @@ export class PlayerService {
     this.overlay?.show();
 
     try {
-      await this.client!.loadFile(mediaPath, 15000);
+      await this.client!.loadFile(mediaPath, 15000, args.startTimeMs);
     } catch (error) {
       this.media = null;
       this.stopTimeEvents();
@@ -378,7 +379,8 @@ export class PlayerService {
     };
   }
 
-  destroy(): void {
+  destroy(): Promise<void> {
+    if (this.destruction) return this.destruction;
     this.debugLog('destroy', {});
     this.stopTimeEvents();
     this.win.removeListener('resize', this.handleWindowBoundsChange);
@@ -387,10 +389,16 @@ export class PlayerService {
     this.win.removeListener('hide', this.handleWindowHide);
     this.win.removeListener('restore', this.handleWindowShow);
     this.win.removeListener('show', this.handleWindowShow);
-    this.client?.destroy();
+    const client = this.client;
+    const overlay = this.overlay;
     this.client = null;
-    this.overlay?.destroy();
     this.overlay = null;
+    overlay?.hide();
+    this.destruction = (client?.destroy() ?? Promise.resolve()).finally(() => {
+      overlay?.destroy();
+      this.debugLog('destroyed', {});
+    });
+    return this.destruction;
   }
 
   // ---------- 内部实现 ----------
@@ -412,7 +420,7 @@ export class PlayerService {
       try {
         client.initialize({ wid: this.overlay.wid });
       } catch (error) {
-        client.destroy();
+        void client.destroy();
         throw error;
       }
       client.onEnded = () => this.emitState();

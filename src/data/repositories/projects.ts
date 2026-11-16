@@ -232,7 +232,9 @@ export class ProjectRepository {
     const mediaItems = this.layer.projectMedia.list(row.id);
     const active =
       mediaItems.find((item) => item.id === row.active_media_id) ?? mediaItems[0] ?? null;
-    if (!active) return mapLegacyProject(row, mediaItems);
+    const notice = this.layer.wall.migrationNotice(row.id);
+    const noticeField = notice ? { wallMigrationNotice: notice } : {};
+    if (!active) return { ...mapLegacyProject(row, mediaItems), ...noticeField };
     return {
       id: row.id,
       name: row.name,
@@ -251,6 +253,7 @@ export class ProjectRepository {
       },
       activeMediaId: active.id,
       mediaItems,
+      ...noticeField,
       detectOptions: active.detectOptions,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

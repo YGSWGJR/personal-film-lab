@@ -76,6 +76,8 @@ import type {
   Tag,
   Term,
   TimelineSettings,
+  TimelineBoundaryEdit,
+  TimelineViewState,
   WorkspaceState,
 } from '../../shared/types';
 import {
@@ -161,8 +163,12 @@ const wallOpen = ref(false);
 const wallViewState = ref<WallViewState | null>(null);
 /** S44 分镜本：independent=独立分镜本（节点来自 wall_boards），project=现有镜头分镜本 */
 const wallMode = ref<'project' | 'independent'>('project');
+const wallProjectScope = ref<{ projectId: string; mediaId: string | null } | null>(null);
+const wallSavedLayout = ref<WallLayoutItem[]>([]);
+const shownWallMigrationNotices = new Set<string>();
 const wallBoardId = ref<string | null>(null);
 const wallBoardName = ref('');
+const stillWallProjectId = ref<string | null>(null);
 /** S45 分镜本投影：独立分镜本按连线顺序/分层呈现在拉片工作区 */
 const projectionOn = ref(false);
 /** 批次7：用户手动退出过投影时，关墙不自动重开（下次进墙重置） */
@@ -175,6 +181,22 @@ const wallRef = ref<InstanceType<typeof StoryboardWall> | null>(null);
 const boardShots = ref<WorkspaceShot[]>([]);
 /** 批次3：独立分镜本节点原始信息（WallNodePanel 数据源，一一对应保存） */
 const boardNodesInfo = ref<WallBoardNodeInfo[]>([]);
+const boardLayout = computed(() => boardNodesInfo.value.map((node) => ({
+  shotId: node.id, x: node.x, y: node.y,
+})));
+const stillWallSources = computed(() => {
+  const project = activeProject.value;
+  if (!project || stillWallProjectId.value !== project.id) return undefined;
+  return {
+    media: project.mediaItems.map((item) => ({
+      id: item.id,
+      label: item.filename?.trim() || item.source.path?.split(/[\\/]/u).at(-1) || `视频 ${item.index}`,
+    })),
+    nodeMedia: Object.fromEntries(boardNodesInfo.value
+      .filter((node) => node.stillMediaId)
+      .map((node) => [node.id, node.stillMediaId!])),
+  };
+});
 /** 批次9：复合节点展开托盘的子卡（compositeId → 子节点映射） */
 const compositeChildrenShots = ref<Record<string, WorkspaceShot[]>>({});
 /** 批次3：分镜墙当前选中节点（0/1/多） */
@@ -229,9 +251,11 @@ const feedbackOpen = ref(false);
 const projectCenterProjects = ref<Project[]>([]);
 const projectCenterBusy = ref(false);
 const mediaSwitchBusy = ref(false);
+const projectLoadDepth = ref(0);
 type MediaSessionRecord = NonNullable<WorkspaceState['mediaSessions']>[string];
 const mediaSessions = ref<Record<string, MediaSessionRecord>>({});
 let mediaSwitchQueue: Promise<void> = Promise.resolve();
+let mediaSwitchRequest = 0;
 const settingsMigrationPreviousRoot = ref<string | null>(null);
 const settingsMigrationNextRoot = ref<string | null>(null);
 const loadedPlaybackPath = ref<string | null>(null);
@@ -260,6 +284,10 @@ const needDeleteConfirm = computed(() => settings.value?.confirmUserContent ?? t
 
 /** S36-3：时间线轨道缩放状态，由 settings.timeline 持久化（默认轨高 96px / 密度 96px/s）。 */
 const timelineSettings = ref<TimelineSettings>({ trackHeight: 96, pxPerSecond: 96 });
+const timelineView = ref<TimelineViewState | null>(null);
+const timelineRevision = ref(0);
+const boundaryUndo = ref<TimelineBoundaryEdit[]>([]);
+const boundaryRedo = ref<TimelineBoundaryEdit[]>([]);
 let timelinePersistTimer: ReturnType<typeof setTimeout> | null = null;
 /** S36-4b：入点 / 出点（仅时间线选区，不做导出与循环联动）。 */
 const inPointMs = ref<number | null>(null);
@@ -647,6 +675,28 @@ async function loadProject(
   restoreState: WorkspaceState | null = null,
   deferWaveform = false,
 ): Promise<void> {
+  const previousProjectId = activeProject.value?.id;
+  const previousMediaId = activeProject.value?.activeMediaId;
+  if (!projectLoadDepth.value && !mediaSwitchBusy.value && previousProjectId !== project.id) {
+    rememberCurrentMediaSession();
+  }
+  projectLoadDepth.value += 1;
+  try {
+    await loadProjectData(project, restoreState, deferWaveform);
+  } finally {
+    if (previousProjectId !== activeProject.value?.id || previousMediaId !== activeProject.value?.activeMediaId) {
+      timelineRevision.value += 1;
+    }
+    projectLoadDepth.value -= 1;
+    if (!projectLoadDepth.value) scheduleWorkspaceSave();
+  }
+}
+
+async function loadProjectData(
+  project: Project,
+  restoreState: WorkspaceState | null = null,
+  deferWaveform = false,
+): Promise<void> {
   let selectedProject = project;
   if (
     restoreState?.activeMediaId &&
@@ -665,19 +715,35 @@ async function loadProject(
   const projectChanged =
     activeProject.value?.id !== selectedProject.id ||
     activeProject.value?.activeMediaId !== selectedProject.activeMediaId;
+  const mediaSession = selectedProject.activeMediaId
+    ? mediaSessions.value[selectedProject.activeMediaId]
+    : undefined;
+  if (projectChanged) {
+    if (wallMode.value === 'project') wallOpen.value = false;
+    const timeline = mediaSession?.timeline;
+    timelineSettings.value = timeline
+      ? { trackHeight: timeline.trackHeight, pxPerSecond: timeline.pxPerSecond }
+      : { ...(settings.value?.timeline ?? { trackHeight: 96, pxPerSecond: 96 }) };
+    timelineView.value = timeline?.view ?? null;
+    inPointMs.value = timeline?.inPointMs ?? null;
+    outPointMs.value = timeline?.outPointMs ?? null;
+    boundaryUndo.value = [...(timeline?.undo ?? [])];
+    boundaryRedo.value = [...(timeline?.redo ?? [])];
+    shotScrollTop.value = restoreState?.shotScrollTop ?? mediaSession?.shotScrollTop ?? 0;
+  }
   activeProject.value = selectedProject;
   demoMode.value = false;
-  if (projectChanged && !deferWaveform) prepareAudioWaveform(selectedProject);
-  const restoredDetection =
-    selectedProject.activeMediaId && restoreState?.mediaSessions
-      ? restoreState.mediaSessions[selectedProject.activeMediaId]?.detectionState
-      : undefined;
+  if (projectChanged) resetAudioWaveform();
+  const restoredDetection = mediaSession?.detectionState;
   detectionResult.value = (restoredDetection?.detectionResult as DetectResult | null) ?? null;
   boundaryNotice.value =
     (restoredDetection?.boundaryNotice as BoundaryAppliedResult | null) ?? null;
   labelPreview.value =
     (restoredDetection?.labelPreview as LabelPreviewResult | null) ?? null;
   detectionJobId.value = restoredDetection?.detectionJobId ?? null;
+  const requestedTime = restoreState?.timeMs ?? (projectChanged ? mediaSession?.timeMs : undefined);
+  const playback = loadProjectPlayback(selectedProject, projectChanged, requestedTime);
+  const refreshVocabulary = !mediaSwitchBusy.value ? Promise.all([loadTerms(true, true), loadTags()]) : Promise.resolve();
   const [shotResult, stillResult, noteResult] = await Promise.all([
     window.api.shot.list({ projectId: selectedProject.id }),
     window.api.still.list({ projectId: selectedProject.id }),
@@ -686,31 +752,56 @@ async function loadProject(
   const loadedShots = unwrap(shotResult);
   const loadedStills = unwrap(stillResult);
   const loadedNotes = unwrap(noteResult);
-  if (!loadedShots || !loadedStills || !loadedNotes) return;
+  if (!loadedShots || !loadedStills || !loadedNotes) {
+    await Promise.all([playback, refreshVocabulary]);
+    return;
+  }
 
+  for (const key of Object.keys(notes)) delete notes[key];
+  for (const key of Object.keys(noteIds)) delete noteIds[key];
   const mapped = mapShots(loadedShots, loadedStills);
   shots.value = mapped;
   projectStills.value = loadedStills;
   seedDemoNoteMap(mapped, loadedNotes);
   markers.value = markersFromData(mapped, loadedStills, loadedNotes);
-  const restoredShot = restoreState
-    ? mapped.find((shot) => shot.id === restoreState.selectedShotId) ?? null
-    : null;
+  const restoredId = restoreState?.selectedShotId ?? (projectChanged ? mediaSession?.selectedShotId : selectedId.value);
+  const restoredShot = mapped.find((shot) => shot.id === restoredId) ?? null;
   selectedId.value = restoredShot?.id ?? mapped[0]?.id ?? null;
-  mergePartnerId.value = null;
-  previewTimeMs.value = restoreState?.timeMs ?? mapped[0]?.startMs ?? 0;
-  await Promise.all([loadTerms(true, true), loadTags()]);
+  mergePartnerId.value = projectChanged
+    ? mapped.find((shot) => shot.id === mediaSession?.timeline?.mergePartnerId)?.id ?? null
+    : null;
+  previewTimeMs.value = restoreState?.timeMs ?? (projectChanged ? mediaSession?.timeMs : undefined) ?? mapped[0]?.startMs ?? 0;
+  const [playbackReady] = await Promise.all([playback, refreshVocabulary]);
+  if (restoreState && playbackReady) {
+    await restorePlaybackState(restoreState);
+  } else if (projectChanged && mediaSession && playbackReady &&
+    Math.abs(mediaSession.timeMs - player.timeMs) > 20) {
+    await seekTo(mediaSession.timeMs);
+  }
+  if (projectChanged && !deferWaveform) prepareAudioWaveform(selectedProject);
+}
 
+async function loadProjectPlayback(
+  selectedProject: Project,
+  projectChanged: boolean,
+  requestedTime?: number,
+): Promise<boolean> {
+  if (projectChanged && player.hasFile && !player.paused && !player.ended) {
+    const paused = await window.api.player.pause();
+    if (paused.ok) Object.assign(player, paused.data);
+  }
   const playbackCandidates = [selectedProject.media.proxyPath, selectedProject.source.path]
     .filter((path): path is string => Boolean(path))
     .filter((path, index, paths) => paths.findIndex((item) => samePath(item, path)) === index);
   let playbackReady = false;
+  const duration = selectedProject.media.durationMs;
+  const startTimeMs = requestedTime !== undefined && requestedTime < duration ? requestedTime : undefined;
   for (const [index, path] of playbackCandidates.entries()) {
     if (player.hasFile && samePath(loadedPlaybackPath.value, path)) {
       playbackReady = true;
       break;
     }
-    if (await openMediaPath(path, false, false)) {
+    if (await openMediaPath(path, false, false, startTimeMs)) {
       if (index > 0) showToast('代理文件不可用，已切换为源文件播放。');
       playbackReady = true;
       break;
@@ -722,9 +813,7 @@ async function loadProject(
   } else if (player.hasFile) {
     if (playbackCandidates.length === 0) await closePlayer();
   }
-  if (restoreState && playbackReady) {
-    await restorePlaybackState(restoreState);
-  }
+  return playbackReady;
 }
 
 async function refreshProjectData(projectId: string, preferredShotId?: string | null): Promise<boolean> {
@@ -793,13 +882,13 @@ async function createProjectForMedia(media: MediaInfo): Promise<Project | null> 
 }
 
 async function appendMediaToProject(projectId: string): Promise<void> {
-  if (projectCenterBusy.value || busy.value) return;
+  if (projectCenterBusy.value || busy.value || detecting.value) return;
   projectCenterBusy.value = true;
   busy.value = true;
   try {
+    if (activeProject.value?.id === projectId) rememberCurrentMediaSession();
     const media = unwrap(await window.api.player.openDialog());
     if (!media) return;
-    if (activeProject.value?.id === projectId) rememberCurrentMediaSession();
     const probe = unwrap(await window.api.media.probe({ path: media.path }));
     const item = unwrap(
       await window.api.project.addMedia({
@@ -869,6 +958,7 @@ async function openVideo(): Promise<void> {
 }
 
 async function openProjectCenter(): Promise<void> {
+  await mediaSwitchQueue.catch(() => undefined);
   projectCenterBusy.value = true;
   try {
     const projects = unwrap(await window.api.project.list());
@@ -894,8 +984,8 @@ async function createEmptyProject(): Promise<void> {
     );
     if (!project) return;
     projectCenterProjects.value = unwrap(await window.api.project.list()) ?? [project];
-    projectCenterOpen.value = false;
     await loadProject(project);
+    projectCenterOpen.value = false;
     showToast('空项目已创建，可以稍后保存或追加视频。', 'success');
   } finally {
     projectCenterBusy.value = false;
@@ -972,6 +1062,15 @@ function rememberCurrentMediaSession(): void {
       timeMs: Math.max(0, Math.round(displayTimeMs.value)),
       selectedShotId: selectedId.value,
       shotScrollTop: shotScrollTop.value,
+      timeline: {
+        ...timelineSettings.value,
+        view: timelineView.value,
+        inPointMs: inPointMs.value,
+        outPointMs: outPointMs.value,
+        mergePartnerId: mergePartnerId.value,
+        undo: boundaryUndo.value,
+        redo: boundaryRedo.value,
+      },
       detectionState: {
         detectionResult: detectionResult.value,
         boundaryNotice: boundaryNotice.value,
@@ -982,10 +1081,41 @@ function rememberCurrentMediaSession(): void {
   };
 }
 
+async function removeProjectMedia(projectId: string, mediaId: string): Promise<void> {
+  if (busy.value || projectCenterBusy.value || mediaSwitchBusy.value || detecting.value || transcoding.value) {
+    showToast('请等待当前任务结束后再移除视频。');
+    return;
+  }
+  if (!await confirmUserDelete(
+    '从项目移除视频',
+    '此视频的镜头、时间线、静帧和分镜墙会从项目中移除。原始视频文件会保留。',
+    { confirmLabel: '移除视频' },
+  )) return;
+  if (busy.value || mediaSwitchBusy.value || detecting.value || transcoding.value) return;
+  projectCenterBusy.value = true;
+  mediaSwitchBusy.value = true;
+  try {
+    rememberCurrentMediaSession();
+    const project = unwrap(await window.api.project.removeMedia({ projectId, mediaId }));
+    if (!project) return;
+    delete mediaSessions.value[mediaId];
+    projectCenterProjects.value = projectCenterProjects.value.map((item) => item.id === projectId ? project : item);
+    if (activeProject.value?.id === projectId) await loadProject(project);
+  } finally {
+    mediaSwitchBusy.value = false;
+    projectCenterBusy.value = false;
+    scheduleWorkspaceSave(true);
+  }
+}
+
 function switchProjectMedia(mediaId: string): Promise<void> {
+  const projectId = activeProject.value?.id;
+  const request = ++mediaSwitchRequest;
   mediaSwitchQueue = mediaSwitchQueue.catch(() => undefined).then(async () => {
     const project = activeProject.value;
-    if (!project || project.activeMediaId === mediaId || demoMode.value) return;
+    if (request !== mediaSwitchRequest || !project || project.id !== projectId ||
+      project.activeMediaId === mediaId || demoMode.value || busy.value ||
+      projectCenterBusy.value || detecting.value || shotEditing.value) return;
     mediaSwitchBusy.value = true;
     try {
       rememberCurrentMediaSession();
@@ -1115,9 +1245,9 @@ async function syncTranscodeConcurrency(): Promise<void> {
   }
 }
 
-async function openMediaPath(path: string, autoplay: boolean, reportError = true): Promise<boolean> {
+async function openMediaPath(path: string, autoplay: boolean, reportError = true, startTimeMs?: number): Promise<boolean> {
   try {
-    const result = await window.api.player.open({ mediaPath: path });
+    const result = await window.api.player.open({ mediaPath: path, startTimeMs });
     if (!result.ok) {
       if (reportError) showToast(result.error.message, 'error', result.error.code);
       return false;
@@ -1222,8 +1352,9 @@ async function stepFrame(dir: 1 | -1): Promise<void> {
 
 function applyTimelineSettings(next: TimelineSettings): void {
   timelineSettings.value = next;
+  if (!demoMode.value && activeProject.value?.activeMediaId) return;
   if (timelinePersistTimer) clearTimeout(timelinePersistTimer);
-  timelinePersistTimer = setTimeout(() => void persistTimelineSettings(), 400);
+  timelinePersistTimer = setTimeout(() => void persistTimelineSettings(next), 400);
 }
 
 /** IPC 结构化克隆不接受 Vue 响应式 Proxy，设置落盘前统一转普通对象。 */
@@ -1231,11 +1362,11 @@ function plainSettings<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-async function persistTimelineSettings(): Promise<void> {
+async function persistTimelineSettings(timeline: TimelineSettings): Promise<void> {
   const current = settings.value;
   if (!current || current.environmentOverride) return;
   const result = await window.api.settings.set(
-    plainSettings({ ...current, timeline: timelineSettings.value }),
+    plainSettings({ ...current, timeline }),
   );
   if (result.ok) {
     settings.value = result.data;
@@ -1754,10 +1885,56 @@ async function commitBoundary(change: BoundaryChange): Promise<void> {
       if (activeProject.value) await loadProject(activeProject.value);
       return;
     }
+    if (change.beforeMs !== undefined && change.beforeMs !== change.timeMs) {
+      boundaryUndo.value = [...boundaryUndo.value, {
+        leftShotId: shot.id,
+        rightShotId: next.id,
+        beforeMs: change.beforeMs,
+        afterMs: change.timeMs,
+      }].slice(-50);
+      boundaryRedo.value = [];
+    }
     if (activeProject.value) {
       await refreshProjectData(activeProject.value.id, selectedId.value);
     }
     showToast('镜头边界已保存。', 'success');
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function replayBoundaryEdit(redo: boolean): Promise<void> {
+  const project = activeProject.value;
+  if (!project || demoMode.value || busy.value || mediaSwitchBusy.value || projectedMode.value) return;
+  const source = redo ? boundaryRedo : boundaryUndo;
+  const target = redo ? boundaryUndo : boundaryRedo;
+  const expected = (entry: TimelineBoundaryEdit) => redo ? entry.beforeMs : entry.afterMs;
+  const entries = source.value.slice();
+  let entry = entries.pop();
+  while (entry) {
+    const edit = entry;
+    const leftIndex = shots.value.findIndex((shot) => shot.id === edit.leftShotId);
+    if (leftIndex >= 0 && shots.value[leftIndex]?.endMs === expected(edit) &&
+      shots.value[leftIndex + 1]?.id === edit.rightShotId) break;
+    entry = entries.pop();
+  }
+  if (!entry) {
+    source.value = entries;
+    return;
+  }
+  busy.value = true;
+  try {
+    const changed = unwrap(await window.api.shot.trim({
+      projectId: project.id,
+      leftShotId: entry.leftShotId,
+      rightShotId: entry.rightShotId,
+      cutMs: redo ? entry.afterMs : entry.beforeMs,
+    }));
+    if (!changed) return;
+    source.value = entries;
+    target.value = [...target.value, entry].slice(-50);
+    await refreshProjectData(project.id, selectedId.value);
+    showToast(redo ? '已重做镜头边界调整。' : '已撤销镜头边界调整。', 'success');
   } finally {
     busy.value = false;
   }
@@ -2565,6 +2742,7 @@ function enterDemoWorkspace(): void {
 
 async function toggleDemoWorkspace(): Promise<void> {
   if (!demoMode.value) {
+    rememberCurrentMediaSession();
     if (detecting.value) await cancelDetection();
     await closePlayer();
     resetAudioWaveform();
@@ -2762,9 +2940,10 @@ function workspaceStateSnapshot(): WorkspaceState {
 }
 
 function scheduleWorkspaceSave(immediate = false): void {
-  if (restoringSession) return;
+  if (restoringSession || projectLoadDepth.value || mediaSwitchBusy.value) return;
   const save = (): void => {
     sessionSaveTimer = null;
+    if (restoringSession || projectLoadDepth.value || mediaSwitchBusy.value) return;
     void window.api.session.save(workspaceStateSnapshot()).catch((error) => {
       console.warn('[session] 工作区状态保存失败', error);
     });
@@ -2779,12 +2958,16 @@ function scheduleWorkspaceSave(immediate = false): void {
 
 async function restorePlaybackState(state: WorkspaceState): Promise<void> {
   if (!player.hasFile) return;
-  const bounded = Math.max(0, Math.min(state.timeMs, displayDurationMs.value));
-  const seeked = await window.api.player.seek({ timeMs: bounded });
-  if (seeked.ok) Object.assign(player, seeked.data);
-  previewTimeMs.value = bounded;
-  const volume = await window.api.player.setVolume({ volume: state.volume });
-  if (volume.ok) Object.assign(player, volume.data);
+  const time = Math.max(0, Math.min(state.timeMs, displayDurationMs.value));
+  if (Math.abs(time - player.timeMs) > 20) {
+    const seeked = await window.api.player.seek({ timeMs: time });
+    if (seeked.ok) Object.assign(player, seeked.data);
+  }
+  previewTimeMs.value = time;
+  if (Math.abs(state.volume - player.volume) >= 0.001) {
+    const volume = await window.api.player.setVolume({ volume: state.volume });
+    if (volume.ok) Object.assign(player, volume.data);
+  }
 }
 
 async function handleSetVolume(volume: number): Promise<void> {
@@ -3045,6 +3228,9 @@ watch(
   () => scheduleWorkspaceSave(true),
   { flush: 'post' },
 );
+
+watch([timelineSettings, timelineView, inPointMs, outPointMs, mergePartnerId, boundaryUndo, boundaryRedo],
+  () => scheduleWorkspaceSave(), { flush: 'post' });
 
 watch(
   () => player.timeMs,
@@ -3393,12 +3579,31 @@ async function openWall(): Promise<void> {
 }
 
 async function openProjectWall(): Promise<void> {
-  wallPickerOpen.value = false;
+  const project = activeProject.value;
+  if (!project) return;
+  const scope = { projectId: project.id, mediaId: project.activeMediaId };
+  const layout = await window.api.wall.getLayout(scope);
+  if (activeProject.value?.id !== scope.projectId || activeProject.value.activeMediaId !== scope.mediaId) return;
+  if (!layout.ok) {
+    showToast(layout.error.message, 'error', layout.error.code);
+    return;
+  }
   wallMode.value = 'project';
   wallBoardId.value = null;
-  const base = settings.value?.wallViewState?.[activeProject.value?.id ?? ''] ?? null;
+  stillWallProjectId.value = null;
+  wallProjectScope.value = scope;
+  wallSavedLayout.value = layout.data;
+  const views = settings.value?.wallViewState;
+  const base = views?.[`media:${scope.mediaId}`] ?? views?.[scope.projectId] ?? null;
   wallViewState.value = base;
   wallOpen.value = true;
+  wallPickerOpen.value = false;
+  const notice = project.wallMigrationNotice;
+  if (notice && !shownWallMigrationNotices.has(project.id)) {
+    shownWallMigrationNotices.add(project.id);
+    const source = notice.source === 'backup' ? '迁移前数据库备份' : '原项目包';
+    showToast(`旧版跨视频关系保留在${source}中（连线 ${notice.edges} 条、分组 ${notice.groups} 个）。`, 'default', '分镜墙已按视频隔离');
+  }
 }
 
 /** S42 v0.5.1：静帧墙——全部截取静帧自动同步为独立板节点，功能与分镜墙一致 */
@@ -3407,18 +3612,21 @@ async function openStillWall(): Promise<void> {
     showToast('请先导入影片并截取静帧，再打开静帧墙。');
     return;
   }
+  const projectId = activeProject.value.id;
   projectionManuallyExited.value = false;
-  const result = await window.api.still.openStillWall({ projectId: activeProject.value.id });
+  const result = await window.api.still.openStillWall({ projectId });
   if (!result.ok) {
     showToast(result.error.message, 'error', result.error.code);
     return;
   }
-  // 无条件加载节点（重开且无变化时 boardNodes 也可能为空）
-  await loadBoardNodes();
+  if (activeProject.value?.id !== projectId) return;
   wallMode.value = 'independent';
   wallBoardId.value = result.data.boardId;
+  stillWallProjectId.value = projectId;
   wallBoardName.value = '静帧墙';
-  const base = settings.value?.wallViewState?.[activeProject.value.id] ?? null;
+  await loadBoardNodes();
+  if (activeProject.value?.id !== projectId) return;
+  const base = settings.value?.wallViewState?.[`stills:${projectId}`] ?? settings.value?.wallViewState?.[projectId] ?? null;
   wallViewState.value = base;
   wallOpen.value = true;
 }
@@ -3446,6 +3654,7 @@ async function openIndependentBoard(boardId: string | null): Promise<void> {
   const board = boards.ok ? boards.data.find((b) => b.id === id) : null;
   wallMode.value = 'independent';
   wallBoardId.value = id;
+  stillWallProjectId.value = null;
   wallBoardName.value = board?.name ?? '独立分镜本';
   await loadBoardNodes();
   wallViewState.value = null;
@@ -3454,11 +3663,13 @@ async function openIndependentBoard(boardId: string | null): Promise<void> {
 
 /** 独立分镜本节点 → WorkspaceShot 映射（拓扑分层：并行节点共享同一时间段） */
 async function loadBoardNodes(): Promise<void> {
-  if (!wallBoardId.value) return;
+  const boardId = wallBoardId.value;
+  if (!boardId) return;
   const [nodes, edges] = await Promise.all([
-    window.api.wall.listNodes({ boardId: wallBoardId.value }),
-    window.api.wall.listNodeEdges({ boardId: wallBoardId.value }),
+    window.api.wall.listNodes({ boardId }),
+    window.api.wall.listNodeEdges({ boardId }),
   ]);
+  if (wallBoardId.value !== boardId) return;
   if (!nodes.ok) {
     showToast(nodes.error.message, 'error', nodes.error.code);
     return;
@@ -3470,7 +3681,8 @@ async function loadBoardNodes(): Promise<void> {
   boardNodesInfo.value = nodes.data;
   // 批次4：节点标签（wall_node_tags）映射回标签 id，供投影面板 chips 回显
   if (tags.value.length === 0) await loadTags();
-  const tagListResult = await window.api.wall.listNodeTags({ boardId: wallBoardId.value });
+  const tagListResult = await window.api.wall.listNodeTags({ boardId });
+  if (wallBoardId.value !== boardId) return;
   const nodeTags: Record<string, Array<{ category: string; name: string }>> = tagListResult.ok ? tagListResult.data : {};
   const wallTagIds = (nodeId: string): string[] =>
     (nodeTags[nodeId] ?? [])
@@ -4171,9 +4383,10 @@ function closeWall(): void {
 }
 
 async function onWallLayoutChange(items: WallLayoutItem[]): Promise<void> {
-  if (!activeProject.value) return;
+  const scope = wallProjectScope.value;
+  if (!scope || wallMode.value !== 'project') return;
   const result = await window.api.wall.saveLayout({
-    projectId: activeProject.value.id,
+    ...scope,
     items,
   });
   if (!result.ok) showToast(result.error.message, 'error', result.error.code);
@@ -4181,15 +4394,20 @@ async function onWallLayoutChange(items: WallLayoutItem[]): Promise<void> {
 
 function onWallViewStateChange(view: WallViewState): void {
   wallViewState.value = view;
+  const mediaId = wallMode.value === 'project' ? wallProjectScope.value?.mediaId : null;
+  const key = mediaId ? `media:${mediaId}` : stillWallProjectId.value
+    ? `stills:${stillWallProjectId.value}`
+    : activeProject.value?.id;
+  if (!key) return;
   if (wallViewStateTimer) clearTimeout(wallViewStateTimer);
-  wallViewStateTimer = setTimeout(() => void persistWallViewState(), 400);
+  wallViewStateTimer = setTimeout(() => void persistWallViewState(key, view), 400);
 }
 
-async function persistWallViewState(): Promise<void> {
+async function persistWallViewState(key: string, view: WallViewState): Promise<void> {
   const current = settings.value;
-  if (!current || current.environmentOverride || !activeProject.value) return;
+  if (!current || current.environmentOverride) return;
   const next = { ...(current.wallViewState ?? {}) };
-  next[activeProject.value.id] = wallViewState.value ?? { scale: 1, panX: 0, panY: 0 };
+  next[key] = view;
   const result = await window.api.settings.set(plainSettings({ ...current, wallViewState: next }));
   if (result.ok) settings.value = result.data;
 }
@@ -4392,6 +4610,13 @@ function handleKeydown(event: KeyboardEvent): void {
     if (!shot || demoMode.value) return;
     event.preventDefault();
     void deleteShot(shot);
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' &&
+    !target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
+    event.preventDefault();
+    void replayBoundaryEdit(event.shiftKey);
     return;
   }
 
@@ -4915,6 +5140,7 @@ onBeforeUnmount(() => {
 
       <div class="workbench" :style="{ gridTemplateColumns: workbenchColumns }">
       <ShotListPanel
+        :key="timelineRevision"
         :shots="workbenchShots"
         :selected-id="selectedId"
         :merge-partner-id="mergePartnerId"
@@ -4947,6 +5173,9 @@ onBeforeUnmount(() => {
         :media-label="mediaLabel"
         :track-height="timelineSettings.trackHeight"
         :px-per-second="timelineSettings.pxPerSecond"
+        :timeline-key="`${timelineRevision}:${demoMode ? 'demo' : 'media'}`"
+        :timeline-view="timelineView"
+        :timeline-restoring="projectLoadDepth > 0 || mediaSwitchBusy"
         :board-tracks="boardTracks"
         :projection-mode="projectedMode"
         :in-point-ms="inPointMs"
@@ -4967,6 +5196,7 @@ onBeforeUnmount(() => {
         @set-volume="handleSetVolume"
         @set-speed="handleSetSpeed"
         @toggle-mute="handleToggleMute"
+        @timeline-view-change="timelineView = $event"
         @update-track-height="onTrackHeightChange"
         @update-px-per-second="onPxPerSecondChange"
       @delete-selected="deleteSelectedByBackspace"
@@ -5012,6 +5242,7 @@ onBeforeUnmount(() => {
       @import-new="importNewProjectFromCenter"
       @append-media="appendMediaToProject"
       @relink-media="relinkProjectMedia"
+      @remove-media="removeProjectMedia"
     />
 
     <FeedbackDialog
@@ -5040,9 +5271,13 @@ onBeforeUnmount(() => {
 
     <StoryboardWall
       v-if="wallOpen"
+      :key="wallMode === 'independent' ? wallBoardId ?? 'board' : wallProjectScope?.mediaId ?? 'project-wall'"
       ref="wallRef"
       :shots="wallMode === 'independent' ? boardShots : shots"
-      :project-id="wallMode === 'independent' ? 'boards' : activeProject?.id ?? ''"
+      :project-id="wallMode === 'independent' ? 'boards' : wallProjectScope?.projectId ?? ''"
+      :media-id="wallProjectScope?.mediaId ?? null"
+      :saved-layout="wallMode === 'project' ? wallSavedLayout : boardLayout"
+      :still-sources="stillWallSources"
       :view-state="wallViewState"
       :board-mode="wallMode === 'independent'"
       :board-id="wallBoardId"
@@ -5065,7 +5300,7 @@ onBeforeUnmount(() => {
       @project="toggleProjection"
     >
       <div v-if="wallMode === 'independent'" class="board-badge">
-        {{ wallBoardName }}（独立分镜本）
+        {{ stillWallProjectId ? wallBoardName : `${wallBoardName}（独立分镜本）` }}
       </div>
     </StoryboardWall>
 
@@ -5334,6 +5569,7 @@ onBeforeUnmount(() => {
     />
 
     <StatsModal
+      :media="activeProject?.mediaItems.map((item) => ({ id: item.id, label: item.filename || `视频 ${item.index}` })) ?? []"
       :open="statsOpen"
       :project-id="activeProject?.id ?? null"
       :project-name="activeProject?.name ?? ''"

@@ -24,6 +24,9 @@ const props = withDefaults(
     shots: WorkspaceShot[];
     viewState: WallViewState | null;
     projectId: string;
+    mediaId: string | null;
+    savedLayout?: WallLayoutItem[];
+    stillSources?: { media: Array<{ id: string; label: string }>; nodeMedia: Record<string, string> };
     boardMode?: boolean;
     /** 批次6：独立分镜本真实 id（board 模式下 projectId 是 'boards' 字面量） */
     boardId?: string | null;
@@ -56,20 +59,53 @@ const emit = defineEmits<{
 /** 批次6：board 模式的真实分镜本 id（props.projectId 是 'boards' 字面量，仅作开关判断） */
 const activeBoardId = computed(() => props.boardId ?? props.projectId);
 
+function projectScope() {
+  return { projectId: props.projectId, mediaId: props.mediaId };
+}
+
 /* ---------- 批次9：复合节点展开托盘 ---------- */
 const expandedCompositeId = ref<string | null>(null);
 const stillsOpen = ref(false);
 const playerReturnToStills = ref(false);
 const playerStillTimeMs = ref<number | null>(null);
+const stillSourceFilter = ref('');
+const stillSourceLabels = computed(() => new Map(props.stillSources?.media.map(({ id, label }) => [id, label])));
+const stillSourceCount = computed(() => Object.values(props.stillSources?.nodeMedia ?? {})
+  .filter((mediaId) => !stillSourceFilter.value || mediaId === stillSourceFilter.value).length);
+
+function stillSourceLabel(nodeId: string): string | undefined {
+  const id = props.stillSources?.nodeMedia[nodeId];
+  return id ? stillSourceLabels.value.get(id) : undefined;
+}
+
+function matchesStillSource(shotId: string): boolean {
+  return !stillSourceFilter.value || props.stillSources?.nodeMedia[shotId] === stillSourceFilter.value;
+}
+
+const displayedShots = computed(() => props.shots.filter((shot) =>
+  matchesStillSource(shot.id) ||
+  (props.compositeChildren?.[shot.id]?.some((child) => matchesStillSource(child.id)) ?? false),
+));
+const displayedShotIds = computed(() => new Set(displayedShots.value.map((shot) => shot.id)));
+
+function resetStillSourceSelection(): void {
+  selectedIds.value = new Set();
+  expandedCompositeId.value = null;
+  emit('selectionChange', []);
+}
 
 function stillViewStorageKey(): string {
-  return `pfl:wall-view:${props.projectId}`;
+  return props.mediaId
+    ? `pfl:wall-view:${props.projectId}:${props.mediaId}`
+    : `pfl:wall-view:${props.projectId}`;
 }
 
 function restoreStillViewMode(): void {
   if (props.boardMode) return;
   try {
-    stillsOpen.value = localStorage.getItem(stillViewStorageKey()) === 'stills';
+    const stored = localStorage.getItem(stillViewStorageKey()) ??
+      localStorage.getItem(`pfl:wall-view:${props.projectId}`);
+    stillsOpen.value = stored === 'stills';
   } catch {
     stillsOpen.value = false;
   }
@@ -97,7 +133,9 @@ const trayComposite = computed(
   () => visibleShots.value.find((item) => item.shot.id === expandedCompositeId.value) ?? null,
 );
 const trayChildren = computed<WorkspaceShot[]>(() =>
-  expandedCompositeId.value ? (props.compositeChildren?.[expandedCompositeId.value] ?? []) : [],
+  expandedCompositeId.value
+    ? (props.compositeChildren?.[expandedCompositeId.value] ?? []).filter((child) => matchesStillSource(child.id))
+    : [],
 );
 const trayStyle = computed(() => {
   const item = trayComposite.value;
@@ -266,10 +304,11 @@ function buildInitialLayout(): Map<string, { x: number; y: number }> {
 function ensureLayout(): void {
   // 已有布局优先；shots 变化时仅对无位置的新镜头网格补位
   let changed = false;
+  let grid: ReturnType<typeof buildInitialLayout> | undefined;
+  const saved = new Map(props.savedLayout?.map((item) => [item.shotId, { x: item.x, y: item.y }]));
   for (const shot of props.shots) {
     if (!positions.value.has(shot.id)) {
-      const grid = buildInitialLayout();
-      const pos = grid.get(shot.id);
+      const pos = saved.get(shot.id) ?? (grid ??= buildInitialLayout()).get(shot.id);
       if (pos) {
         positions.value.set(shot.id, pos);
         changed = true;
@@ -313,7 +352,7 @@ watch(
 );
 
 const laidShots = computed(() =>
-  props.shots
+  displayedShots.value
     .map((shot) => {
       const pos = positions.value.get(shot.id);
       return pos ? { shot, x: pos.x, y: pos.y } : null;
@@ -369,8 +408,8 @@ async function reloadGraph(): Promise<void> {
     return;
   }
   const [e, g] = await Promise.all([
-    window.api.wall.listEdges({ projectId: props.projectId }),
-    window.api.wall.listGroups({ projectId: props.projectId }),
+    window.api.wall.listEdges({ ...projectScope(), }),
+    window.api.wall.listGroups({ ...projectScope(), }),
   ]);
   if (e.ok) edges.value = e.data;
   if (g.ok) groups.value = g.data;
@@ -388,7 +427,7 @@ function applyInitialState(): void {
 
 async function exportImages(): Promise<void> {
   if (!props.projectId) return;
-  const result = await window.api.wall.exportImages({ projectId: props.projectId });
+  const result = await window.api.wall.exportImages({ ...projectScope(), });
   if (result.ok) {
     edgeHint.value = `已按连线顺序导出 ${result.data.count} 张图片（跳过 ${result.data.skipped}）→ ${result.data.dir}`;
   } else {
@@ -491,6 +530,7 @@ function onGlobalKeyUp(e: KeyboardEvent): void {
 /* ---------- 连线渲染（世界坐标，SVG 曲线 + 箭头） ---------- */
 const CARDW = 220;
 const cardCenter = (id: string): { x: number; y: number } | null => {
+  if (!displayedShotIds.value.has(id)) return null;
   const pos = positions.value.get(id);
   return pos ? { x: pos.x + CARDW, y: pos.y + CARD_H / 2 + 10 } : null;
 };
@@ -544,7 +584,7 @@ async function removeEdge(fromShotId: string, toShotId: string): Promise<void> {
         toNodeId: toShotId,
       })
     : await window.api.wall.removeEdge({
-        projectId: props.projectId,
+        ...projectScope(),
         fromShotId,
         toShotId,
       });
@@ -616,7 +656,7 @@ function onPortDown(event: PointerEvent, shotId: string, side: 'out' | 'in' = 'o
           kind,
         })
       : await window.api.wall.addEdge({
-          projectId: props.projectId,
+          ...projectScope(),
           fromShotId: fromId,
           toShotId: toId,
           kind,
@@ -652,7 +692,7 @@ const ANN_TOOLS: Array<{ k: AnnType | 'select' | 'eraser'; n: string; key: strin
 /** 作用域：组内沿边可达（不跨分组）；无组=全画布连通分量；孤卡=单张 */
 function playerScope(startId: string): WorkspaceShot[] {
   const g = groups.value.find((item) => item.shotIds.includes(startId));
-  const poolIds = g ? g.shotIds : props.shots.map((item) => item.id);
+  const poolIds = g ? g.shotIds.filter((id) => displayedShotIds.value.has(id)) : [...displayedShotIds.value];
   const pool = new Set(poolIds);
   const adj = new Map<string, Array<string>>();
   for (const id of poolIds) adj.set(id, []);
@@ -764,7 +804,7 @@ async function openPlayer(startId: string): Promise<void> {
       const fresh = await window.api.wall.listNodeEdges({ boardId: activeBoardId.value });
       if (fresh.ok) edges.value = fresh.data;
     } else {
-      const fresh = await window.api.wall.listEdges({ projectId: props.projectId });
+      const fresh = await window.api.wall.listEdges({ ...projectScope(), });
       if (fresh.ok) edges.value = fresh.data;
     }
   }
@@ -792,7 +832,7 @@ async function openPlayer(startId: string): Promise<void> {
     }
   } else {
     const result = await window.api.wall.listAnnotations({
-      projectId: props.projectId,
+      ...projectScope(),
       shotIds: scope.map((item) => item.id),
     });
     if (result.ok) annotations.value = new Map(Object.entries(result.data));
@@ -1022,7 +1062,7 @@ function persistAnn(shotId: string): void {
   // 批次6 修复：独立分镜本标注走 node API（此前 saveAnnotations('boards') 静默失败）
   const save = props.boardMode
     ? window.api.wall.saveNodeAnnotations({ boardId: activeBoardId.value, nodeId: shotId, items })
-    : window.api.wall.saveAnnotations({ projectId: props.projectId, shotId, items });
+    : window.api.wall.saveAnnotations({ ...projectScope(), shotId, items });
   const previous = annPersistQueues.get(shotId) ?? Promise.resolve();
   const queued = previous
     .catch(() => undefined)
@@ -1369,7 +1409,7 @@ async function createGroupFromSelection(): Promise<void> {
   const ids = [...selectedIds.value];
   if (!props.projectId || ids.length < 2) return;
   const result = await window.api.wall.createGroup({
-    projectId: props.projectId,
+    ...projectScope(),
     name: `场景 ${groups.value.length + 1}`,
     shotIds: ids,
   });
@@ -1385,7 +1425,7 @@ async function createGroupFromSelection(): Promise<void> {
 
 async function dissolveGroup(groupId: string): Promise<void> {
   if (!props.projectId) return;
-  const result = await window.api.wall.dissolveGroup({ projectId: props.projectId, groupId });
+  const result = await window.api.wall.dissolveGroup({ ...projectScope(), groupId });
   if (result.ok) await reloadGraph();
 }
 
@@ -1426,7 +1466,7 @@ async function disconnectAll(shotId: string): Promise<void> {
       });
     } else {
       await window.api.wall.removeEdge({
-        projectId: props.projectId,
+        ...projectScope(),
         fromShotId: e.fromShotId,
         toShotId: e.toShotId,
       });
@@ -1965,6 +2005,9 @@ function fmtDuration(ms: number): string {
           <b>#{{ String(item.shot.index).padStart(2, '0') }}</b>
           <span v-if="item.shot.shotSize" class="wall-chip">{{ item.shot.shotSize }}</span>
           <span v-if="item.shot.cameraMethod" class="wall-chip">{{ item.shot.cameraMethod }}</span>
+          <span v-if="stillSourceLabel(item.shot.id)" class="wall-chip wall-source-tag" :title="stillSourceLabel(item.shot.id)">
+            {{ stillSourceLabel(item.shot.id) }}
+          </span>
           <span class="wall-dur">{{ fmtDuration(item.shot.durationMs) }}</span>
         </div>
       </div>
@@ -1985,6 +2028,7 @@ function fmtDuration(ms: number): string {
           >
             <img :src="child.thumbnail" :alt="child.title" draggable="false" />
             <span>{{ child.title || '子节点' }}</span>
+            <small v-if="stillSourceLabel(child.id)">{{ stillSourceLabel(child.id) }}</small>
           </div>
         </div>
         <button type="button" class="tray-dissolve" @click.stop="emit('dissolveComposite', trayComposite.shot.id)">
@@ -1999,6 +2043,14 @@ function fmtDuration(ms: number): string {
       <button type="button" @click.stop="selectedIds = new Set()">取消</button>
     </div>
     <div v-if="edgeHint" class="wall-edge-hint">{{ edgeHint }}</div>
+    <label v-if="stillSources" class="wall-source-filter">
+      <span>来源视频</span>
+      <select v-model="stillSourceFilter" aria-label="静帧来源视频" @change="resetStillSourceSelection">
+        <option value="">全部视频</option>
+        <option v-for="item in stillSources.media" :key="item.id" :value="item.id">{{ item.label }}</option>
+      </select>
+      <span>{{ stillSourceCount }} 张</span>
+    </label>
     <div class="wall-hud">
       <button type="button" class="wall-hud-btn" title="缩小画布" aria-label="缩小" @click.stop="zoomBy(1 / 1.2)">−</button>
       <span class="wall-zval">{{ Math.round(scale * 100) }}%</span>
@@ -2248,6 +2300,35 @@ function fmtDuration(ms: number): string {
 .wall-card.selected {
   border-color: #eab308;
   box-shadow: 0 0 0 1px #eab308;
+}
+
+.wall-source-filter {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel, #131a26);
+  font-size: 12px;
+}
+
+.wall-source-filter select {
+  max-width: min(45vw, 300px);
+  background: var(--bg-deep, #0a0e16);
+  color: inherit;
+}
+
+.wall-source-tag {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wall-port {

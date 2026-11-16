@@ -16,6 +16,7 @@ const emit = defineEmits<{
   importNew: [];
   appendMedia: [projectId: string];
   relinkMedia: [projectId: string, mediaId: string];
+  removeMedia: [projectId: string, mediaId: string];
 }>();
 
 const selectedProjectId = ref<string | null>(null);
@@ -143,6 +144,13 @@ function countShots(project: Project): string {
                   >
                     重定位
                   </button>
+                  <button
+                    type="button"
+                    class="relink-btn"
+                    :disabled="busy"
+                    :aria-label="`从项目移除 ${mediaName(media)}`"
+                    @click="emit('removeMedia', selectedProject.id, media.id)"
+                  >移除</button>
                 </article>
               </div>
               <p v-else class="empty-copy">

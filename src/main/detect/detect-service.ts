@@ -295,9 +295,9 @@ export class DetectService {
     }
   }
 
-  private assertNoRunningJob(projectId: string): void {
+  assertNoRunningJob(projectId: string): void {
     for (const job of this.jobs.values()) {
-      if (job.projectId === projectId && job.status === 'running') {
+      if (job.projectId === projectId && (job.status === 'running' || job.status === 'queued')) {
         throw new DetectError('DETECT_ALREADY_RUNNING', '该项目已有检测任务正在运行', {
           jobId: job.jobId,
         });

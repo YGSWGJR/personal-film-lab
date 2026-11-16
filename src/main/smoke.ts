@@ -33,6 +33,7 @@ import type { PlayerService } from './player/player-service';
 import type { LocalVisionService } from './ai/local-vision-service';
 import { SessionService } from './session/session-service';
 import { migrateLegacyAiSettings } from './settings/settings-service';
+import { runMediaScopeGate, type MediaScopeGate } from './s45-media-smoke';
 
 interface SmokeDeps {
   getPlayer(): PlayerService | null;
@@ -138,17 +139,21 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
   let overlayStressChecks: Record<string, unknown> = {};
   let redetectPreserveChecks: Record<string, unknown> = {};
   let stillWallChecks: Record<string, unknown> = {};
+  const mediaScopeChecks: Partial<Record<MediaScopeGate, Record<string, unknown>>> = {};
   const timeout = setTimeout(() => finish(1), SMOKE_TIMEOUT_MS);
+  let finished = false;
 
   function finish(code: number): void {
+    if (finished) return;
+    finished = true;
     clearTimeout(timeout);
     const passed = code === 0;
-    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks }, null, 2);
+    const payload = JSON.stringify({ passed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks, mediaScopeChecks }, null, 2);
     if (process.env['SMOKE_RESULT']) {
       writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
     }
     console.log(`SMOKE_RESULT ${payload}`);
-    app.exit(code);
+    void Promise.resolve(deps.getPlayer()?.destroy()).finally(() => app.exit(code));
   }
 
   try {
@@ -557,6 +562,19 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       Object.assign(checks, stillWallChecksAssertions(stillWallChecks));
     }
 
+    const mediaGates = {
+      timeline: 'SMOKE_MEDIA_TIMELINE',
+      wall: 'SMOKE_MEDIA_WALL_SCOPE',
+      stills: 'SMOKE_SHARED_STILL_WALL',
+    } as const;
+    for (const [gate, flag] of Object.entries(mediaGates) as Array<[MediaScopeGate, string]>) {
+      if (process.env[flag] !== '1') continue;
+      const data = deps.getData?.();
+      const result = data ? await runMediaScopeGate(win, data, gate) : { passed: false, reason: 'data unavailable' };
+      mediaScopeChecks[gate] = result;
+      checks[flag] = result.passed === true;
+    }
+
     const shotPath = process.env['SMOKE_SCREENSHOT'];
     if (shotPath) {
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -570,12 +588,13 @@ export async function runSmokeTest(win: BrowserWindow, deps: SmokeDeps): Promise
       if (videoPath) {
         await win.webContents.executeJavaScript('window.api.player.seek({ timeMs: 2000 })');
       }
-      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks }, null, 2);
+      const payload = JSON.stringify({ passed: allPassed, checks, playerChecks, mediaChecks, scopeChecks, settingsChecks, sessionChecks, dataChecks, importChecks, projectMediaChecks, s42ProjectChecks, s42WallChecks, detectChecks, sessionRecoveryChecks, settingsMigrationChecks, settingsVerifyChecks, environmentLockChecks, settingsDChecks, stillTimeChecks, stillUiChecks, overlayLayerChecks, detectionClickChecks, deleteUiChecks, timelineChecks, timelineZoomChecks, nleTrackChecks, settingsCloseSaveChecks, localSettingsChecks, aiSegmentChecks, frameChecks, aiChecks, mcpToolChecks, detectBgChecks, aiProviderChecks, aiLiveProbeChecks, aiLiveCallChecks, aiLiveTextChecks, localAiChecks, localDetectChecks, transnetHybridChecks, shotSplitChecks, shotSplitUiChecks, stagedDetectChecks, stagedDetectUiChecks, timelineWheelZoomChecks, wallChecks, wallUiChecks, boardChecks, opencvFrameChecks, state, hardwareChecks, playbackStressChecks, overlayStressChecks, redetectPreserveChecks, stillWallChecks, mediaScopeChecks }, null, 2);
       if (process.env['SMOKE_RESULT']) {
         writeFileSync(process.env['SMOKE_RESULT'], payload, 'utf8');
       }
       console.log(`SMOKE_RESULT ${payload}`);
       await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
+      await deps.getPlayer()?.destroy();
       app.exit(allPassed ? 0 : 1);
       return;
     }
@@ -843,8 +862,8 @@ async function runProjectMediaChecks(deps: SmokeDeps): Promise<Record<string, un
     };
     const snapshotText = Buffer.from(entries['project.db']).toString('latin1');
     const manifestOk =
-      manifest.version === 2 &&
-      (manifest.schemaVersion === 13 || manifest.schemaVersion === 14) &&
+      manifest.version === 3 &&
+      manifest.schemaVersion === 15 &&
       manifest.media?.length === 2;
     const privacyOk = !snapshotText.includes('C:\\media\\one.mp4') &&
       !snapshotText.includes('C:\\media\\two.mp4');
@@ -1129,7 +1148,7 @@ async function runS42WallChecks(
           ],
         },
       },
-    ]);
+    ], project.activeMediaId);
 
     const result = (await win.webContents.executeJavaScript(`
       (async () => {
@@ -1308,7 +1327,7 @@ async function runS42WallChecks(
           out.escapeCancelsDraft = polyCount() === beforeCancel && Boolean(document.querySelector('.wall-ppt'));
           await sleep(700);
           const persisted = await window.api.wall.listAnnotations({
-            projectId: '${project.id}',
+            projectId: '${project.id}', mediaId: ${JSON.stringify(project.activeMediaId)},
             shotIds: ['${shot.id}'],
           });
           out.rendererPersistedCount =
@@ -1386,7 +1405,7 @@ async function runS42WallChecks(
       })()
     `)) as Record<string, unknown>;
     await new Promise((resolve) => setTimeout(resolve, 500));
-    const saved = data.wall.listAnnotations(projectId, [shot.id])[shot.id] ?? [];
+    const saved = data.wall.listAnnotations(projectId, [shot.id], project.activeMediaId)[shot.id] ?? [];
     return {
       ...result,
       savedAnnotationCount: saved.length,
@@ -5595,22 +5614,22 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     data.wall.saveLayout(project.id, [
       { shotId: a.id, x: 40, y: 60 },
       { shotId: b.id, x: 300, y: 60 },
-    ]);
-    const layout = data.wall.getLayout(project.id);
+    ], project.activeMediaId);
+    const layout = data.wall.getLayout(project.id, project.activeMediaId);
     out.saveLoad =
       layout.length === 2 &&
       layout.find((i) => i.shotId === a.id)?.x === 40 &&
       layout.find((i) => i.shotId === b.id)?.y === 60;
     // 更新为 upsert
-    data.wall.saveLayout(project.id, [{ shotId: a.id, x: 55, y: 66 }]);
+    data.wall.saveLayout(project.id, [{ shotId: a.id, x: 55, y: 66 }], project.activeMediaId);
     out.saveLoad =
-      out.saveLoad && data.wall.getLayout(project.id).find((i) => i.shotId === a.id)?.x === 55;
+      out.saveLoad && data.wall.getLayout(project.id, project.activeMediaId).find((i) => i.shotId === a.id)?.x === 55;
     // CASCADE：删镜头后布局行消失
     data.shots.delete(b.id);
-    out.cascade = data.wall.getLayout(project.id).length === 1;
+    out.cascade = data.wall.getLayout(project.id, project.activeMediaId).length === 1;
     // 非法项目
     try {
-      data.wall.getLayout('no-such-project');
+      data.wall.getLayout('no-such-project', null);
       out.invalidProject = false;
     } catch (error) {
       out.invalidProject = (error as { code?: string }).code === 'WALL_PROJECT_NOT_FOUND';
@@ -5622,14 +5641,14 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     });
     const oc = data.shots.create({ projectId: other.id, startMs: 0, endMs: 500 });
     try {
-      data.wall.saveLayout(project.id, [{ shotId: oc.id, x: 0, y: 0 }]);
+      data.wall.saveLayout(project.id, [{ shotId: oc.id, x: 0, y: 0 }], project.activeMediaId);
       out.invalidShot = false;
     } catch (error) {
       out.invalidShot = (error as { code?: string }).code === 'WALL_SHOT_NOT_IN_PROJECT';
     }
     // 非法坐标
     try {
-      data.wall.saveLayout(project.id, [{ shotId: a.id, x: Number.NaN, y: 0 }]);
+      data.wall.saveLayout(project.id, [{ shotId: a.id, x: Number.NaN, y: 0 }], project.activeMediaId);
       out.invalidItem = false;
     } catch (error) {
       out.invalidItem = (error as { code?: string }).code === 'WALL_ITEM_INVALID';
@@ -5641,27 +5660,27 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     const w1 = data.shots.create({ projectId: project.id, startMs: 1000, endMs: 1500 });
     const w2 = data.shots.create({ projectId: project.id, startMs: 1500, endMs: 2000 });
     const w3 = data.shots.create({ projectId: project.id, startMs: 2000, endMs: 2500 });
-    data.wall.addEdge(project.id, w1.id, w2.id, 'solid');
-    data.wall.addEdge(project.id, w2.id, w3.id, 'dash');
+    data.wall.addEdge(project.id, w1.id, w2.id, 'solid', project.activeMediaId);
+    data.wall.addEdge(project.id, w2.id, w3.id, 'dash', project.activeMediaId);
     out.edgeAddList =
-      data.wall.listEdges(project.id).length === 2 &&
-      data.wall.listEdges(project.id).some((e) => e.kind === 'dash');
+      data.wall.listEdges(project.id, project.activeMediaId).length === 2 &&
+      data.wall.listEdges(project.id, project.activeMediaId).some((e) => e.kind === 'dash');
     try {
-      data.wall.addEdge(project.id, w1.id, w1.id, 'solid');
+      data.wall.addEdge(project.id, w1.id, w1.id, 'solid', project.activeMediaId);
       out.edgeSelfRejected = false;
     } catch (error) {
       out.edgeSelfRejected = (error as { code?: string }).code === 'WALL_EDGE_SELF';
     }
     data.shots.delete(w3.id);
     out.edgeCascade = !data.wall
-      .listEdges(project.id)
+      .listEdges(project.id, project.activeMediaId)
       .some((e) => e.toShotId === w3.id || e.fromShotId === w3.id);
     // 分组自动断连：组 = {w2, g1}；组外 w1 与组内 w2 的边必须断开；组内边（无）保留
     const g1 = data.shots.create({ projectId: project.id, startMs: 2500, endMs: 3000 });
-    data.wall.addEdge(project.id, w2.id, g1.id, 'solid'); // 组内边
-    data.wall.addEdge(project.id, w1.id, w2.id, 'solid'); // 跨组边（w1 在组外）→ 应断
-    data.wall.createGroup(project.id, '场景 X', [g1.id, w2.id]);
-    const edgesAfter = data.wall.listEdges(project.id);
+    data.wall.addEdge(project.id, w2.id, g1.id, 'solid', project.activeMediaId); // 组内边
+    data.wall.addEdge(project.id, w1.id, w2.id, 'solid', project.activeMediaId); // 跨组边（w1 在组外）→ 应断
+    data.wall.createGroup(project.id, '场景 X', [g1.id, w2.id], project.activeMediaId);
+    const edgesAfter = data.wall.listEdges(project.id, project.activeMediaId);
     out.groupAutoDisconnect =
       !edgesAfter.some((e) => (e.fromShotId === w1.id && e.toShotId === w2.id) || (e.fromShotId === w2.id && e.toShotId === w1.id)) &&
       edgesAfter.some((e) => e.fromShotId === w2.id && e.toShotId === g1.id);
@@ -5669,13 +5688,13 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
     data.wall.saveAnnotations(project.id, w1.id, [
       { type: 'arrow', color: '#ff0000', data: { pts: [{ x: 10, y: 10 }, { x: 40, y: 30 }] } },
       { type: 'mosaic', color: '#000000', data: { x: 5, y: 5, w: 10, h: 6 } },
-    ]);
-    const anns = data.wall.listAnnotations(project.id);
+    ], project.activeMediaId);
+    const anns = data.wall.listAnnotations(project.id, undefined, project.activeMediaId);
     out.annotations =
       (anns[w1.id]?.length ?? 0) === 2 &&
       anns[w1.id]?.[0]?.type === 'arrow';
     // 导出：给 w1 塞真实缩略图文件（lapian-asset 协议路径），主线 DFS 顺序 w1 → w2 → g1
-    const thumbDir = 'G:/__s43_wall_export__/projects';
+    const thumbDir = join(data.dataRoot, 'projects');
     mkdirSync(join(thumbDir, project.id), { recursive: true });
     writeFileSync(join(thumbDir, project.id, 'thumb.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
     data.shots.update({ id: w1.id, patch: {} });
@@ -5683,7 +5702,7 @@ async function runWallChecks(deps: SmokeDeps): Promise<Record<string, any>> {
       `lapian-asset://${project.id}/thumb.jpg`,
       w1.id,
     );
-    const exported = data.wall.exportImages(project.id, 'G:/__s43_wall_export__');
+    const exported = data.wall.exportImages(project.id, data.dataRoot, project.activeMediaId);
     out.exportOrder = exported.count === 1 && exported.skipped === 3 && exported.dir.includes('wall');
     try {
       data.projects.delete(other.id);
@@ -5927,7 +5946,7 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
     ['edgeDel', `
       const hook = window.__S43_WALL_TEST__;
       const shots3 = (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data;
-      await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: shots3[0].id, toShotId: shots3[1].id, kind: 'solid' });
+      await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, mediaId: ${JSON.stringify(project.activeMediaId)}, fromShotId: shots3[0].id, toShotId: shots3[1].id, kind: 'solid' });
       await hook.reloadEdges();
       await new Promise((r) => setTimeout(r, 300));
       const pathsBefore = document.querySelectorAll('.wall-edges > path').length;
@@ -5963,7 +5982,7 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
         while (!hook.state().wallOpen && Date.now() < dw) await new Promise((r) => setTimeout(r, 100));
       }
       const shots4 = (await window.api.shot.list({ projectId: ${JSON.stringify(project.id)} })).data;
-      await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, fromShotId: shots4[1].id, toShotId: shots4[2].id, kind: 'solid' });
+      await window.api.wall.addEdge({ projectId: ${JSON.stringify(project.id)}, mediaId: ${JSON.stringify(project.activeMediaId)}, fromShotId: shots4[1].id, toShotId: shots4[2].id, kind: 'solid' });
       await hook.reloadEdges();
       hook.dispatchDblClick(1);
       const d5 = Date.now() + 15000;
@@ -5994,7 +6013,7 @@ async function runWallUiChecks(win: BrowserWindow, deps: SmokeDeps): Promise<Rec
         const currentShotId = shots4[1].id;
         const readCurrent = async () => {
           const result = await window.api.wall.listAnnotations({
-            projectId: ${JSON.stringify(project.id)},
+            projectId: ${JSON.stringify(project.id)}, mediaId: ${JSON.stringify(project.activeMediaId)},
             shotIds: [currentShotId],
           });
           return result.ok ? (result.data[currentShotId] ?? []) : null;
@@ -7220,12 +7239,12 @@ async function runRedetectPreserveChecks(deps: SmokeDeps): Promise<Record<string
     out.initIds = initial.map((s) => `${s.startMs}:${s.id.slice(0, 6)}:${s.origin}`);
     // 用户内容：笔记（挂 s2）、连线 s2→s3、标注（宿主 s2）、布局（s2）、分组（s1+s2）、静帧（挂 s2）
     data.notes.upsert({ projectId: project.id, shotId: s2.id, text: 'S42 保全用例笔记' });
-    data.wall.addEdge(project.id, s3.id, s4.id, 'solid');
+    data.wall.addEdge(project.id, s3.id, s4.id, 'solid', project.activeMediaId);
     data.wall.saveAnnotations(project.id, s2.id, [
       { type: 'brush', color: '#ff0000', data: { points: [[10, 20], [30, 40]] } },
-    ]);
-    data.wall.saveLayout(project.id, [{ shotId: s2.id, x: 120, y: 80 }]);
-    data.wall.createGroup(project.id, '保全组', [s1.id, s2.id]);
+    ], project.activeMediaId);
+    data.wall.saveLayout(project.id, [{ shotId: s2.id, x: 120, y: 80 }], project.activeMediaId);
+    data.wall.createGroup(project.id, '保全组', [s1.id, s2.id], project.activeMediaId);
     // 静帧夹具：迁移 13 后真实静帧都带 media_id，这里显式取项目活动媒体
     const activeMedia = data.db
       .prepare('SELECT active_media_id AS id FROM projects WHERE id = ?')
@@ -7293,7 +7312,7 @@ async function runRedetectPreserveChecks(deps: SmokeDeps): Promise<Record<string
     // 笔记锚点 = 宿主 s2.startMs=2000 → 精确落点为新镜头 A（0-3000）
     out.noteRehosted = notes.length === 1 && notes[0].shotId === newA?.id;
     // 连线：两端按锚点重连（s3@4000→B、s4@6000→C；s3→s4 不与组 [s1,s2] 跨组）
-    const edges = data.wall.listEdges(project.id);
+    const edges = data.wall.listEdges(project.id, project.activeMediaId);
     out.edgeRelinked =
       edges.length === 1 &&
       edges[0].fromShotId !== s3.id &&
@@ -7301,14 +7320,14 @@ async function runRedetectPreserveChecks(deps: SmokeDeps): Promise<Record<string
       edges[0].fromShotId === newB?.id &&
       edges[0].toShotId === newC?.id;
     // 标注：宿主 s2 锚点 2000 → 新镜头 A（0-3000）
-    const anns = data.wall.listAnnotations(project.id, shots.map((s) => s.id));
+    const anns = data.wall.listAnnotations(project.id, shots.map((s) => s.id), project.activeMediaId);
     const annTotal = Object.values(anns).reduce((sum, list) => sum + (list as unknown[]).length, 0);
     out.annotationKept = annTotal === 1;
     // 布局：x=120 保留、挂新镜头
-    const layout = data.wall.getLayout(project.id);
+    const layout = data.wall.getLayout(project.id, project.activeMediaId);
     out.layoutKept = layout.length === 1 && layout[0].x === 120 && layout[0].shotId !== s2.id;
     // 分组：组保留；成员锚点（0）落新镜头 A，重挂后成员仍 1 条
-    const groups = data.wall.listGroups(project.id);
+    const groups = data.wall.listGroups(project.id, project.activeMediaId);
     out.groupKept =
       groups.length === 1 &&
       groups[0].shotIds.length === 1 &&

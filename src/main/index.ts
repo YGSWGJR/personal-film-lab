@@ -345,7 +345,8 @@ function ensureMainWindow(): BrowserWindow {
     event.preventDefault();
     if (closeCaptureStarted) return;
     closeCaptureStarted = true;
-    void captureWorkspaceSession(win).finally(() => {
+    void captureWorkspaceSession(win).finally(async () => {
+      await playerService?.destroy();
       allowWindowClose = true;
       win.close();
     });
@@ -495,7 +496,8 @@ app.on('before-quit', (event) => {
     exitCaptureStarted = true;
     event.preventDefault();
     void captureWorkspaceSession(win)
-      .finally(() => {
+      .finally(async () => {
+        await playerService?.destroy();
         allowWindowClose = true;
         cleanupServices();
         app.quit();

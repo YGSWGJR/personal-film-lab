@@ -143,6 +143,32 @@ export const dataImportProjectArgsSchema = z.object({
   projectId: z.string().min(1).max(200),
 });
 
+const timelineBoundaryEditSchema = z.object({
+  leftShotId: z.string().min(1),
+  rightShotId: z.string().min(1),
+  beforeMs: z.number().finite().nonnegative(),
+  afterMs: z.number().finite().nonnegative(),
+});
+
+const timelineContextSchema = z.object({
+  trackHeight: z.number().finite().min(1).max(240),
+  pxPerSecond: z.number().finite().min(24).max(768),
+  view: z.object({
+    viewStartMs: z.number().finite().nonnegative(),
+    scrollTop: z.number().finite().nonnegative(),
+    v2Visible: z.boolean(),
+    v1Visible: z.boolean(),
+    v1Locked: z.boolean(),
+    audioMuted: z.boolean(),
+    audioSolo: z.boolean(),
+  }).nullable(),
+  inPointMs: z.number().finite().nonnegative().nullable(),
+  outPointMs: z.number().finite().nonnegative().nullable(),
+  mergePartnerId: z.string().min(1).nullable(),
+  undo: z.array(timelineBoundaryEditSchema).max(50),
+  redo: z.array(timelineBoundaryEditSchema).max(50),
+});
+
 export const workspaceStateSchema = z.object({
   projectId: z.string().min(1).nullable(),
   activeMediaId: z.string().min(1).nullable().optional(),
@@ -159,6 +185,7 @@ export const workspaceStateSchema = z.object({
         timeMs: z.number().finite().min(0),
         selectedShotId: z.string().min(1).nullable(),
         shotScrollTop: z.number().finite().min(0).optional(),
+        timeline: timelineContextSchema.optional(),
         detectionState: z
           .object({
             detectionResult: z.unknown().optional(),
@@ -177,6 +204,7 @@ export const playerOpenArgsSchema = z
   .object({
     mediaPath: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
+    startTimeMs: z.number().finite().nonnegative().optional(),
   })
   .refine((value) => Boolean(value.mediaPath ?? value.projectId), {
     message: 'mediaPath 与 projectId 至少提供一个',
@@ -328,9 +356,12 @@ export const labelDetectRunArgsSchema = z.object({
 });
 
 /** S43：分镜墙画布一期 */
-export const wallGetLayoutArgsSchema = z.object({
+const projectWallScopeSchema = z.object({
   projectId: z.string().min(1),
+  mediaId: z.string().min(1).nullable(),
 });
+
+export const wallGetLayoutArgsSchema = projectWallScopeSchema;
 
 export const wallLayoutItemSchema = z.object({
   shotId: z.string().min(1),
@@ -338,36 +369,31 @@ export const wallLayoutItemSchema = z.object({
   y: z.number().finite().min(-1_000_000).max(1_000_000),
 });
 
-export const wallSaveLayoutArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallSaveLayoutArgsSchema = projectWallScopeSchema.extend({
   items: z.array(wallLayoutItemSchema).max(100_000),
 });
 
 const wallEdgeKindSchema = z.enum(['solid', 'dash']);
 
-export const wallEdgeListArgsSchema = z.object({ projectId: z.string().min(1) });
+export const wallEdgeListArgsSchema = projectWallScopeSchema;
 
-export const wallEdgeAddArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallEdgeAddArgsSchema = projectWallScopeSchema.extend({
   fromShotId: z.string().min(1),
   toShotId: z.string().min(1),
   kind: wallEdgeKindSchema,
 });
 
-export const wallEdgeRemoveArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallEdgeRemoveArgsSchema = projectWallScopeSchema.extend({
   fromShotId: z.string().min(1),
   toShotId: z.string().min(1),
 });
 
-export const wallGroupCreateArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallGroupCreateArgsSchema = projectWallScopeSchema.extend({
   name: z.string().min(1).max(80),
   shotIds: z.array(z.string().min(1)).min(2).max(100_000),
 });
 
-export const wallGroupDissolveArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallGroupDissolveArgsSchema = projectWallScopeSchema.extend({
   groupId: z.string().min(1),
 });
 
@@ -381,12 +407,11 @@ const wallAnnotationDataSchema = z.looseObject({
   size: z.number().finite().min(1).max(48).optional(),
 });
 
-export const wallAnnotationListArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallAnnotationListArgsSchema = projectWallScopeSchema.extend({
   shotIds: z.array(z.string().min(1)).max(100_000).optional(),
 });
 
-export const wallExportArgsSchema = z.object({ projectId: z.string().min(1) });
+export const wallExportArgsSchema = projectWallScopeSchema;
 
 export const wallBoardListArgsSchema = z.object({ projectId: z.string().min(1).optional() });
 
@@ -491,8 +516,7 @@ export const wallDissolveCompositeArgsSchema = z.object({
   compositeId: z.string().min(1),
 });
 
-export const wallAnnotationSaveArgsSchema = z.object({
-  projectId: z.string().min(1),
+export const wallAnnotationSaveArgsSchema = projectWallScopeSchema.extend({
   shotId: z.string().min(1),
   items: z
     .array(
@@ -834,6 +858,7 @@ export const storyboardExportArgsSchema = z.object({
 
 export const statsProjectArgsSchema = z.object({
   projectId: z.string().min(1),
+  mediaId: z.string().min(1).optional(),
 });
 
 export const emptyObjectSchema = z.object({}).optional();

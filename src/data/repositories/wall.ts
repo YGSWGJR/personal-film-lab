@@ -22,16 +22,16 @@ export class WallRepository {
     return this.layer.db;
   }
 
-  getLayout(projectId: string): ShotLayoutRow[] {
-    this.assertProject(projectId);
+  getLayout(projectId: string, mediaId: string | null): ShotLayoutRow[] {
+    this.assertScope(projectId, mediaId);
     const rows = this.db
-      .prepare('SELECT shot_id, x, y FROM shot_layout WHERE project_id = ?')
-      .all(projectId) as Array<{ shot_id: string; x: number; y: number }>;
+      .prepare('SELECT shot_id, x, y FROM shot_layout WHERE project_id = ? AND media_id IS ?')
+      .all(projectId, mediaId) as Array<{ shot_id: string; x: number; y: number }>;
     return rows.map((row) => ({ shotId: row.shot_id, x: row.x, y: row.y }));
   }
 
-  saveLayout(projectId: string, items: ShotLayoutRow[]): void {
-    this.assertProject(projectId);
+  saveLayout(projectId: string, items: ShotLayoutRow[], mediaId: string | null): void {
+    this.assertScope(projectId, mediaId);
     if (items.length === 0) return;
     for (const item of items) {
       if (
@@ -43,22 +43,15 @@ export class WallRepository {
         throw new DataError('WALL_ITEM_INVALID', `布局坐标无效：${item.shotId}`, { item });
       }
     }
-    const exists = this.db.prepare('SELECT id FROM shots WHERE project_id = ? AND id = ?');
-    for (const item of items) {
-      if (!exists.get(projectId, item.shotId)) {
-        throw new DataError('WALL_SHOT_NOT_IN_PROJECT', `镜头不属于该项目：${item.shotId}`, {
-          shotId: item.shotId,
-        });
-      }
-    }
+    this.assertShots(projectId, mediaId, items.map((item) => item.shotId));
     this.layer.transaction(() => {
       const upsert = this.db.prepare(
-        `INSERT INTO shot_layout (project_id, shot_id, x, y, updated_at)
-         VALUES (?, ?, ?, ?, strftime('%s','now') * 1000)
-         ON CONFLICT(project_id, shot_id) DO UPDATE SET
+        `INSERT INTO shot_layout (project_id, media_id, shot_id, x, y, updated_at)
+         VALUES (?, ?, ?, ?, ?, strftime('%s','now') * 1000)
+         ON CONFLICT DO UPDATE SET
            x = excluded.x, y = excluded.y, updated_at = excluded.updated_at`,
       );
-      for (const item of items) upsert.run(projectId, item.shotId, item.x, item.y);
+      for (const item of items) upsert.run(projectId, mediaId, item.shotId, item.x, item.y);
     });
   }
 
@@ -70,70 +63,61 @@ export class WallRepository {
     fromShotId: string,
     toShotId: string,
     kind: 'solid' | 'dash',
+    mediaId: string | null,
   ): { fromShotId: string; toShotId: string; kind: 'solid' | 'dash' } {
-    this.assertProject(projectId);
+    this.assertScope(projectId, mediaId);
     if (fromShotId === toShotId) {
       throw new DataError('WALL_EDGE_SELF', '连线不能从卡片连到自身', { fromShotId });
     }
     if (kind !== 'solid' && kind !== 'dash') {
       throw new DataError('WALL_ITEM_INVALID', `连线类型无效：${kind}`, { kind });
     }
-    const exists = this.db.prepare('SELECT id FROM shots WHERE project_id = ? AND id = ?');
-    if (!exists.get(projectId, fromShotId) || !exists.get(projectId, toShotId)) {
-      throw new DataError('WALL_SHOT_NOT_IN_PROJECT', '连线端点不属于该项目', {
-        fromShotId,
-        toShotId,
-      });
-    }
+    this.assertShots(projectId, mediaId, [fromShotId, toShotId]);
     this.layer.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO shot_edges (project_id, from_shot, to_shot, kind, created_at)
-           VALUES (?, ?, ?, ?, strftime('%s','now') * 1000)
+          `INSERT INTO shot_edges (project_id, media_id, from_shot, to_shot, kind, created_at)
+           VALUES (?, ?, ?, ?, ?, strftime('%s','now') * 1000)
            ON CONFLICT(project_id, from_shot, to_shot) DO UPDATE SET kind = excluded.kind`,
         )
-        .run(projectId, fromShotId, toShotId, kind);
+        .run(projectId, mediaId, fromShotId, toShotId, kind);
     });
     return { fromShotId, toShotId, kind };
   }
 
-  removeEdge(projectId: string, fromShotId: string, toShotId: string): void {
-    this.assertProject(projectId);
+  removeEdge(projectId: string, fromShotId: string, toShotId: string, mediaId: string | null): void {
+    this.assertScope(projectId, mediaId);
+    this.assertShots(projectId, mediaId, [fromShotId, toShotId]);
     this.layer.transaction(() => {
       this.db
-        .prepare('DELETE FROM shot_edges WHERE project_id = ? AND from_shot = ? AND to_shot = ?')
-        .run(projectId, fromShotId, toShotId);
+        .prepare('DELETE FROM shot_edges WHERE project_id = ? AND media_id IS ? AND from_shot = ? AND to_shot = ?')
+        .run(projectId, mediaId, fromShotId, toShotId);
     });
   }
 
-  listEdges(projectId: string): Array<{ fromShotId: string; toShotId: string; kind: string }> {
-    this.assertProject(projectId);
+  listEdges(projectId: string, mediaId: string | null): Array<{ fromShotId: string; toShotId: string; kind: string }> {
+    this.assertScope(projectId, mediaId);
     const rows = this.db
-      .prepare('SELECT from_shot, to_shot, kind FROM shot_edges WHERE project_id = ? ORDER BY created_at ASC')
-      .all(projectId) as Array<{ from_shot: string; to_shot: string; kind: string }>;
+      .prepare('SELECT from_shot, to_shot, kind FROM shot_edges WHERE project_id = ? AND media_id IS ? ORDER BY created_at ASC')
+      .all(projectId, mediaId) as Array<{ from_shot: string; to_shot: string; kind: string }>;
     return rows.map((row) => ({ fromShotId: row.from_shot, toShotId: row.to_shot, kind: row.kind }));
   }
 
   /* ---------- S43 二期：分组（独立板子，成组自动断开跨组边） ---------- */
 
-  createGroup(projectId: string, name: string, shotIds: string[]): { groupId: string } {
-    this.assertProject(projectId);
+  createGroup(projectId: string, name: string, shotIds: string[], mediaId: string | null): { groupId: string } {
+    this.assertScope(projectId, mediaId);
     if (shotIds.length < 2) {
       throw new DataError('WALL_GROUP_TOO_SMALL', '分组至少需要两张卡片', { shotIds });
     }
-    const exists = this.db.prepare('SELECT id FROM shots WHERE project_id = ? AND id = ?');
-    for (const shotId of shotIds) {
-      if (!exists.get(projectId, shotId)) {
-        throw new DataError('WALL_SHOT_NOT_IN_PROJECT', `镜头不属于该项目：${shotId}`, { shotId });
-      }
-    }
+    this.assertShots(projectId, mediaId, shotIds);
     const groupId = randomUUID();
     this.layer.transaction(() => {
       this.db
         .prepare(
-          "INSERT INTO shot_groups (id, project_id, name, created_at) VALUES (?, ?, ?, strftime('%s','now') * 1000)",
+          "INSERT INTO shot_groups (id, project_id, media_id, name, created_at) VALUES (?, ?, ?, ?, strftime('%s','now') * 1000)",
         )
-        .run(groupId, projectId, name);
+        .run(groupId, projectId, mediaId, name);
       const insert = this.db.prepare(
         'INSERT INTO shot_group_members (project_id, group_id, shot_id) VALUES (?, ?, ?)',
       );
@@ -141,7 +125,7 @@ export class WallRepository {
       // 自动断连：组与组外之间的连线全部删除
       this.db
         .prepare(
-          `DELETE FROM shot_edges WHERE project_id = ? AND (
+          `DELETE FROM shot_edges WHERE project_id = ? AND media_id IS ? AND (
              (from_shot IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?)
                AND to_shot NOT IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?))
              OR
@@ -149,11 +133,11 @@ export class WallRepository {
                AND from_shot NOT IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?))
            )`,
         )
-        .run(projectId, groupId, groupId, groupId, groupId);
+        .run(projectId, mediaId, groupId, groupId, groupId, groupId);
       // 防御断言：断连后组内外不应再有边
       const leftover = this.db
         .prepare(
-          `SELECT COUNT(*) AS n FROM shot_edges WHERE project_id = ? AND (
+          `SELECT COUNT(*) AS n FROM shot_edges WHERE project_id = ? AND media_id IS ? AND (
              (from_shot IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?)
                AND to_shot NOT IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?))
              OR
@@ -161,7 +145,7 @@ export class WallRepository {
                AND from_shot NOT IN (SELECT shot_id FROM shot_group_members WHERE group_id = ?))
            )`,
         )
-        .get(projectId, groupId, groupId, groupId, groupId) as { n: number };
+        .get(projectId, mediaId, groupId, groupId, groupId, groupId) as { n: number };
       if (leftover.n > 0) {
         throw new DataError('WALL_GROUP_DISCONNECT_FAILED', '分组断连失败', { groupId, leftover: leftover.n });
       }
@@ -169,24 +153,24 @@ export class WallRepository {
     return { groupId };
   }
 
-  dissolveGroup(projectId: string, groupId: string): void {
-    this.assertProject(projectId);
+  dissolveGroup(projectId: string, groupId: string, mediaId: string | null): void {
+    this.assertScope(projectId, mediaId);
     this.layer.transaction(() => {
       this.db
-        .prepare('DELETE FROM shot_groups WHERE project_id = ? AND id = ?')
-        .run(projectId, groupId);
+        .prepare('DELETE FROM shot_groups WHERE project_id = ? AND media_id IS ? AND id = ?')
+        .run(projectId, mediaId, groupId);
     });
   }
 
-  listGroups(projectId: string): Array<{
+  listGroups(projectId: string, mediaId: string | null): Array<{
     groupId: string;
     name: string;
     shotIds: string[];
   }> {
-    this.assertProject(projectId);
+    this.assertScope(projectId, mediaId);
     const gRows = this.db
-      .prepare('SELECT id, name FROM shot_groups WHERE project_id = ? ORDER BY created_at ASC')
-      .all(projectId) as Array<{ id: string; name: string }>;
+      .prepare('SELECT id, name FROM shot_groups WHERE project_id = ? AND media_id IS ? ORDER BY created_at ASC')
+      .all(projectId, mediaId) as Array<{ id: string; name: string }>;
     const mStmt = this.db.prepare(
       'SELECT shot_id FROM shot_group_members WHERE group_id = ? ORDER BY rowid ASC',
     );
@@ -201,9 +185,10 @@ export class WallRepository {
 
   listAnnotations(
     projectId: string,
-    shotIds?: string[],
+    shotIds: string[] | undefined,
+    mediaId: string | null,
   ): Record<string, Array<{ id: string; type: string; color: string; data: unknown }>> {
-    this.assertProject(projectId);
+    this.assertScope(projectId, mediaId);
     const out: Record<string, Array<{ id: string; type: string; color: string; data: unknown }>> = {};
     let rows: Array<{ shot_id: string; id: string; type: string; color: string; data_json: string }>;
     if (shotIds && shotIds.length > 0) {
@@ -211,15 +196,15 @@ export class WallRepository {
       rows = this.db
         .prepare(
           `SELECT shot_id, id, type, color, data_json FROM shot_annotations
-           WHERE project_id = ? AND shot_id IN (${placeholders}) ORDER BY created_at ASC`,
+           WHERE project_id = ? AND media_id IS ? AND shot_id IN (${placeholders}) ORDER BY created_at ASC`,
         )
-        .all(projectId, ...shotIds) as typeof rows;
+        .all(projectId, mediaId, ...shotIds) as typeof rows;
     } else {
       rows = this.db
         .prepare(
-          'SELECT shot_id, id, type, color, data_json FROM shot_annotations WHERE project_id = ? ORDER BY created_at ASC',
+          'SELECT shot_id, id, type, color, data_json FROM shot_annotations WHERE project_id = ? AND media_id IS ? ORDER BY created_at ASC',
         )
-        .all(projectId) as typeof rows;
+        .all(projectId, mediaId) as typeof rows;
     }
     for (const row of rows) {
       let data: unknown = {};
@@ -242,12 +227,10 @@ export class WallRepository {
     projectId: string,
     shotId: string,
     items: Array<{ type: string; color: string; data: unknown }>,
+    mediaId: string | null,
   ): void {
-    this.assertProject(projectId);
-    const exists = this.db.prepare('SELECT id FROM shots WHERE project_id = ? AND id = ?');
-    if (!exists.get(projectId, shotId)) {
-      throw new DataError('WALL_SHOT_NOT_IN_PROJECT', `镜头不属于该项目：${shotId}`, { shotId });
-    }
+    this.assertScope(projectId, mediaId);
+    this.assertShots(projectId, mediaId, [shotId]);
     const TYPES = new Set(['brush', 'smear', 'line', 'arrow', 'rect', 'ellipse', 'text', 'mosaic']);
     for (const item of items) {
       if (!TYPES.has(item.type)) {
@@ -255,12 +238,13 @@ export class WallRepository {
       }
     }
     this.layer.transaction(() => {
-      this.db.prepare('DELETE FROM shot_annotations WHERE project_id = ? AND shot_id = ?').run(projectId, shotId);
+      this.db.prepare('DELETE FROM shot_annotations WHERE project_id = ? AND media_id IS ? AND shot_id = ?')
+        .run(projectId, mediaId, shotId);
       const insert = this.db.prepare(
-        "INSERT INTO shot_annotations (id, project_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now') * 1000)",
+        "INSERT INTO shot_annotations (id, project_id, media_id, shot_id, type, color, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now') * 1000)",
       );
       for (const item of items) {
-        insert.run(randomUUID(), projectId, shotId, item.type, item.color, JSON.stringify(item.data ?? {}));
+        insert.run(randomUUID(), projectId, mediaId, shotId, item.type, item.color, JSON.stringify(item.data ?? {}));
       }
     });
   }
@@ -275,14 +259,15 @@ export class WallRepository {
   exportImages(
     projectId: string,
     dataRoot: string,
+    mediaId: string | null,
   ): { dir: string; count: number; skipped: number } {
-    this.assertProject(projectId);
-    const shots = this.layer.shots.list(projectId) as Array<{
+    this.assertScope(projectId, mediaId);
+    const shots = this.layer.shots.list(projectId, mediaId ?? undefined) as Array<{
       id: string;
       index: number;
       thumbnail?: string | null;
     }>;
-    const edgeRows = this.listEdges(projectId);
+    const edgeRows = this.listEdges(projectId, mediaId);
     const byId = new Map(shots.map((shot) => [shot.id, shot]));
     const solidNext = new Map<string, string[]>();
     const incoming = new Map<string, number>();
@@ -336,9 +321,31 @@ export class WallRepository {
     return { dir, count, skipped };
   }
 
-  private assertProject(projectId: string): void {
+  migrationNotice(projectId: string): { edges: number; groups: number; source: 'backup' | 'package' } | null {
+    return (this.db.prepare(
+      'SELECT cross_media_edges AS edges, cross_media_groups AS groups, source FROM media_wall_migration_notices WHERE project_id = ?',
+    ).get(projectId) as { edges: number; groups: number; source: 'backup' | 'package' } | undefined) ?? null;
+  }
+
+  private assertScope(projectId: string, mediaId: string | null): void {
     if (!this.layer.projects.exists(projectId)) {
       throw new DataError('WALL_PROJECT_NOT_FOUND', `项目不存在：${projectId}`, { projectId });
+    }
+    if (mediaId !== null) {
+      this.layer.projectMedia.get(projectId, mediaId);
+    } else if (this.layer.projectMedia.active(projectId)) {
+      throw new DataError('PROJECT_MEDIA_REQUIRED', '分镜墙缺少所属视频', { projectId });
+    }
+  }
+
+  private assertShots(projectId: string, mediaId: string | null, shotIds: string[]): void {
+    const lookup = this.db.prepare('SELECT media_id FROM shots WHERE project_id = ? AND id = ?');
+    for (const shotId of shotIds) {
+      const shot = lookup.get(projectId, shotId) as { media_id: string | null } | undefined;
+      if (!shot) throw new DataError('WALL_SHOT_NOT_IN_PROJECT', `镜头不属于该项目：${shotId}`, { shotId });
+      if (shot.media_id !== mediaId) {
+        throw new DataError('WALL_SHOT_NOT_IN_MEDIA', '分镜墙只接受当前视频的镜头', { shotId, mediaId });
+      }
     }
   }
 }

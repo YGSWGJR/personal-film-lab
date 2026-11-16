@@ -51,6 +51,14 @@ export class StillRepository {
     return rows.map(mapStill);
   }
 
+  listMainForProject(projectId: string): Still[] {
+    this.assertProject(projectId);
+    const rows = this.db.prepare(
+      "SELECT * FROM stills WHERE project_id = ? AND role = 'main' ORDER BY time_ms, id",
+    ).all(projectId) as StillRow[];
+    return rows.map(mapStill);
+  }
+
   get(id: string): Still {
     const row = this.db.prepare('SELECT * FROM stills WHERE id = ?').get(id) as StillRow | undefined;
     if (!row) throw new DataError('STILL_NOT_FOUND', `静帧不存在：${id}`, { id });

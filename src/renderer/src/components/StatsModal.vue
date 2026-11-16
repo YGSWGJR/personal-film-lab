@@ -17,6 +17,7 @@ const props = defineProps<{
   open: boolean;
   projectId: string | null;
   projectName: string;
+  media: Array<{ id: string; label: string }>;
 }>();
 
 const emit = defineEmits<{
@@ -24,6 +25,8 @@ const emit = defineEmits<{
 }>();
 
 const loading = ref(false);
+const mediaId = ref('');
+let requestId = 0;
 const error = ref<string | null>(null);
 const tags = ref<StatsTagDistributionItem[]>([]);
 const rhythm = ref<StatsRhythmPoint[]>([]);
@@ -42,14 +45,17 @@ const categoryColors: Record<StatsTagDistributionItem['category'], string> = {
 
 async function loadStats(): Promise<void> {
   if (!props.projectId) return;
+  const sequence = ++requestId;
+  const scope = { projectId: props.projectId, mediaId: mediaId.value || undefined };
   loading.value = true;
   error.value = null;
   try {
     const [tagResult, rhythmResult, progressResult] = await Promise.all([
-      window.api.stats.tagDistribution({ projectId: props.projectId }),
-      window.api.stats.rhythm({ projectId: props.projectId }),
-      window.api.stats.progress({ projectId: props.projectId }),
+      window.api.stats.tagDistribution(scope),
+      window.api.stats.rhythm(scope),
+      window.api.stats.progress(scope),
     ]);
+    if (sequence !== requestId) return;
     const failed = [tagResult, rhythmResult, progressResult].find((result) => !result.ok);
     if (failed && !failed.ok) {
       error.value = `${failed.error.code}: ${failed.error.message}`;
@@ -60,11 +66,11 @@ async function loadStats(): Promise<void> {
     if (progressResult.ok) progress.value = progressResult.data;
     loading.value = false;
     await nextTick();
-    renderCharts();
+    if (sequence === requestId) renderCharts();
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    if (sequence === requestId) error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    loading.value = false;
+    if (sequence === requestId) loading.value = false;
   }
 }
 
@@ -242,9 +248,11 @@ watch(
   () => [props.open, props.projectId] as const,
   ([open]) => {
     if (!open) {
+      requestId += 1;
       disposeCharts();
       return;
     }
+    mediaId.value = '';
     void loadStats();
   },
   { immediate: true },
@@ -282,6 +290,10 @@ onBeforeUnmount(() => {
             <h2>学习统计</h2>
             <span>{{ projectName }}</span>
           </div>
+          <select v-if="media.length > 1" v-model="mediaId" aria-label="学习统计视频" @change="loadStats">
+            <option value="">全部视频</option>
+            <option v-for="item in media" :key="item.id" :value="item.id">{{ item.label }}</option>
+          </select>
           <button type="button" aria-label="关闭" @click="emit('close')">×</button>
         </header>
 
