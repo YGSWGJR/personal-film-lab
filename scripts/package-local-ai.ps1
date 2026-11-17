@@ -41,8 +41,15 @@ if (Test-Path -LiteralPath $OutputPath) {
 
 $previous = Get-Location
 try {
-  Set-Location -LiteralPath $SourceRoot
-  & $sevenZip a -t7z -mx=5 -bd -bb0 $OutputPath ".\*"
+  # S46 修复：从父目录打包，使档案内条目带 local-ai\ 根前缀（与历版交付包一致，
+  # Setup 的 Nsis7z/7zr 解压到 $INSTDIR\resources 才能正确落位）。
+  # 历版交付包均为存储模式（Method=Copy），-mx=0 与其一致且解压更快。
+  $sourceLeaf = Split-Path -Leaf $SourceRoot
+  if ($sourceLeaf -ne "local-ai") {
+    throw "SourceRoot 目录名必须为 local-ai（当前：$sourceLeaf），否则档案根前缀会错位"
+  }
+  Set-Location -LiteralPath (Split-Path -Parent $SourceRoot)
+  & $sevenZip a -t7z -mx=0 -bd -bb0 $OutputPath "local-ai\*"
   if ($LASTEXITCODE -ne 0) {
     throw "本地 AI 资源打包失败，7zr exit=$LASTEXITCODE"
   }
